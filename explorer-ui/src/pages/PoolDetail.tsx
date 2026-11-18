@@ -296,13 +296,13 @@ export function PoolDetail({ poolId }: { poolId: number }) {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets', to: paths.assets() }, { label: data?.name ?? `Pool #${poolId}` }]} />
         <div className="detail-header">
-          <div className="page-title">
+          <h1 className="page-title">
             {data && <AssetIcon assetId={data.shareToken.assetId} iconAssetId={data.shareToken.iconAssetId} iconAssetIds={data.shareToken.iconAssetIds} symbol={data.shareToken.symbol} size={30} parachainId={data.shareToken.parachainId} origin={data.shareToken.origin} />}
             {' '}{data?.name ?? `Pool #${poolId}`}
             {/* A Hydrated pool goes by its product name (GDOT); its on-chain share name stays beside it. */}
             {data && data.shareToken.name && data.shareToken.name !== data.name && <span className="sub muted" style={{ marginLeft: 8 }}>{data.shareToken.name}</span>}
             {data && <span className="sub muted" style={{ marginLeft: 8 }}><PoolBadge pool={data.kind === 'stableswap' ? 'Stableswap' : 'XYK'} /></span>}
-          </div>
+          </h1>
         </div>
       </div>
       {isError

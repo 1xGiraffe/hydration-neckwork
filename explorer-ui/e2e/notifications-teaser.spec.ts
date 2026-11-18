@@ -32,8 +32,8 @@ test('the logged-out page sells the feature and its CTA opens the connect dialog
   await expect(page.getByRole('button', { name: '+ New alert' })).toHaveCount(0)
 
   await expect(page.locator('.dialog')).toHaveCount(0)
-  await page.getByRole('button', { name: 'Log in to set up alerts' }).click()
-  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+  await page.getByRole('button', { name: 'Sign in to set up alerts' }).click()
+  await expect(page.locator('.dialog-head h2')).toHaveText('Sign in with your wallet')
 })
 
 test('the topbar bell renders without a session — no badge — and leads to the teaser', async ({ page }) => {

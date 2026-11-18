@@ -276,11 +276,11 @@ describe('safety matching', () => {
 
 describe('referendum matching', () => {
   const row = (over: Partial<ReferendumEventRow> = {}): ReferendumEventRow =>
-    ({ blockHeight: 1_050, eventIndex: 3, index: 101, phase: 'submitted', track: 1, ...over })
+    ({ blockHeight: 1_050, eventIndex: 3, index: 101, phase: 'submitted', ...over })
 
   it('filters by phase and enriches the title when one is known', () => {
     const r = rule('referendum', { phases: ['confirmed', 'killed'] })
-    const rows = [row(), row({ blockHeight: 1_060, phase: 'confirmed', track: null }), row({ blockHeight: 1_070, phase: 'killed', track: null })]
+    const rows = [row(), row({ blockHeight: 1_060, phase: 'confirmed' }), row({ blockHeight: 1_070, phase: 'killed' })]
     const matches = evaluateReferendum(rows, [r], W, i => (i === 101 ? 'Add HDX liquidity' : null))
     expect(matches.map(m => m.identity)).toEqual(['101:confirmed', '101:killed'])
     expect(matches[0].payload).toMatchObject({ lane: 'referendum', title: 'Add HDX liquidity' })
@@ -288,7 +288,7 @@ describe('referendum matching', () => {
 
   it('treats the executed phase as one more filterable phase, outcome riding along', () => {
     const r = rule('referendum', { phases: ['executed'] })
-    const rows = [row(), row({ blockHeight: 1_060, phase: 'executed', track: null, outcome: 'ok' })]
+    const rows = [row(), row({ blockHeight: 1_060, phase: 'executed', outcome: 'ok' })]
     const matches = evaluateReferendum(rows, [r], W)
     expect(matches.map(m => m.identity)).toEqual(['101:executed'])
     expect(matches[0].payload).toMatchObject({ lane: 'referendum', row: { outcome: 'ok' } })
@@ -305,8 +305,8 @@ describe('referendum matching', () => {
     expect(REFERENDUM_PHASE_BY_EVENT['Referenda.ConfirmStarted']).toBe('confirming')
     expect(REFERENDUM_PHASE_BY_EVENT['Referenda.ConfirmAborted']).toBe('confirm-aborted')
     const rows = [
-      row({ blockHeight: 1_060, phase: 'confirming', track: null }),
-      row({ blockHeight: 1_070, phase: 'confirm-aborted', track: null }),
+      row({ blockHeight: 1_060, phase: 'confirming' }),
+      row({ blockHeight: 1_070, phase: 'confirm-aborted' }),
     ]
     expect(evaluateReferendum(rows, [rule('referendum', { phases: ['confirming'] })], W).map(m => m.identity))
       .toEqual(['101:confirming@1060'])
@@ -321,9 +321,9 @@ describe('referendum matching', () => {
   // silently swallow it. The `voted` precedent: block-key the repeatable phases.
   it('keeps a re-entered confirmation distinct from the first', () => {
     const rows = [
-      row({ blockHeight: 1_050, phase: 'confirming', track: null }),
-      row({ blockHeight: 1_060, phase: 'confirm-aborted', track: null }),
-      row({ blockHeight: 1_070, phase: 'confirming', track: null }),
+      row({ blockHeight: 1_050, phase: 'confirming' }),
+      row({ blockHeight: 1_060, phase: 'confirm-aborted' }),
+      row({ blockHeight: 1_070, phase: 'confirming' }),
     ]
     const ids = evaluateReferendum(rows, [rule('referendum', {})], W).map(m => m.identity)
     expect(new Set(ids).size).toBe(3)
@@ -332,15 +332,6 @@ describe('referendum matching', () => {
     // re-evaluating them still deduplicates.
     expect(evaluateReferendum([row({ phase: 'confirmed' })], [rule('referendum', {})], W)[0].identity)
       .toBe('101:confirmed')
-  })
-
-  it('matches a track filter against the numeric track id, and keeps an unknown track', () => {
-    const r = rule('referendum', { track: '1' })
-    expect(evaluateReferendum([row({ track: 1 })], [r], W)).toHaveLength(1)
-    expect(evaluateReferendum([row({ track: 2 })], [r], W)).toHaveLength(0)
-    // Track unresolvable (no Submitted row indexed): matching rather than
-    // silently dropping the event.
-    expect(evaluateReferendum([row({ track: null })], [r], W)).toHaveLength(1)
   })
 })
 
@@ -630,7 +621,7 @@ describe('renderMatch', () => {
   it('says how an enactment went, not just that it happened', () => {
     const r = rule('referendum', {})
     const refRow = (outcome: 'ok' | 'failed' | 'unavailable' | null) =>
-      ({ lane: 'referendum' as const, row: { blockHeight: 1_050, eventIndex: 3, index: 101, phase: 'executed' as const, track: null, outcome }, title: 'Add HDX liquidity' })
+      ({ lane: 'referendum' as const, row: { blockHeight: 1_050, eventIndex: 3, index: 101, phase: 'executed' as const, outcome }, title: 'Add HDX liquidity' })
     expect(renderNotification(renderMatch(match(refRow('ok'), 'referendum'), r, noViewerTag)).body)
       .toContain('Referendum #101 executed')
     expect(renderNotification(renderMatch(match(refRow('failed'), 'referendum'), r, noViewerTag)).body)

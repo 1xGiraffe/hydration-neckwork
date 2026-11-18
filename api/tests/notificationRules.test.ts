@@ -3,9 +3,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
-  NOTIFICATION_KINDS, ACTIVITY_TYPES, SAFETY_KINDS, REFERENDUM_PHASES, REFERENDUM_TRACKS,
+  NOTIFICATION_KINDS, ACTIVITY_TYPES, SAFETY_KINDS, REFERENDUM_PHASES,
   ruleParamSchemas, parseRuleParams, describeRule, isNotificationKind, KIND_LABELS,
-  referendumTrackId, referendumTrackName,
 } from '../src/notifications/notificationRules.ts'
 import { activityTypes } from '../src/routes/explorer.ts'
 
@@ -58,8 +57,6 @@ describe('rule param validation', () => {
     expect(parseRuleParams('health-factor', { address: SS58 }).ok).toBe(true)
     expect(parseRuleParams('referendum', { phases: ['deciding', 'confirmed'] }).ok).toBe(true)
     expect(parseRuleParams('referendum', {}).ok).toBe(true)
-    expect(parseRuleParams('referendum', { track: '0' }).ok).toBe(true)
-    expect(parseRuleParams('referendum', { track: 'root' }).ok).toBe(true)
     expect(parseRuleParams('tc-motion', {}).ok).toBe(true)
     expect(parseRuleParams('tc-motion', { phases: ['proposed', 'voted', 'executed'] }).ok).toBe(true)
     expect(parseRuleParams('safety', { kinds: [...SAFETY_KINDS] }).ok).toBe(true)
@@ -111,14 +108,15 @@ describe('rule param validation', () => {
     expect(parseRuleParams('account-activity', { address: SS58, type: 'nonsense' }).ok).toBe(false)
     expect(parseRuleParams('health-factor', { address: SS58, threshold: 42 }).ok).toBe(false)
     expect(parseRuleParams('referendum', { phases: ['pending'] }).ok).toBe(false)
-    // A track that is neither an id nor a name would match nothing at all.
-    expect(parseRuleParams('referendum', { track: 'treasury' }).ok).toBe(false)
+    // There is no per-track subscription: a rule carrying a track does not parse,
+    // so a stored one is skipped at load rather than evaluated.
+    expect(parseRuleParams('referendum', { track: '0' }).ok).toBe(false)
+    expect(parseRuleParams('referendum', { phases: ['deciding'], track: 'root' }).ok).toBe(false)
     // The two governance kinds keep separate vocabularies on purpose: neither can
     // be talked into delivering the other's traffic.
     expect(parseRuleParams('tc-motion', { phases: ['deciding'] }).ok).toBe(false)
     expect(parseRuleParams('tc-motion', { track: '0' }).ok).toBe(false)
     expect(parseRuleParams('referendum', { phases: ['approved'] }).ok).toBe(false)
-    expect(parseRuleParams('referendum', { track: '99' }).ok).toBe(false)
     expect(parseRuleParams('safety', { kinds: [] }).ok).toBe(false)
     expect(parseRuleParams('extrinsic', { section: 'Utility.dispatch' }).ok).toBe(false)
     expect(parseRuleParams('event', {}).ok).toBe(false)
@@ -150,7 +148,6 @@ describe('describeRule', () => {
     expect(describeRule('price', { assetId: 0, direction: 'below', price: 0.005 }, symbolOf)).toBe('HDX price below $0.005')
     expect(describeRule('health-factor', { address: SS58, threshold: 1.1 })).toContain('health factor below 1.1')
     expect(describeRule('referendum', { phases: ['deciding'] })).toBe('referenda — deciding')
-    expect(describeRule('referendum', { track: '1' })).toBe('referenda — any phase on whitelisted_caller')
     expect(describeRule('tc-motion', {})).toBe('technical committee motions — any phase')
     expect(describeRule('tc-motion', { phases: ['voted', 'approved'] })).toBe('technical committee motions — voted, approved')
     expect(describeRule('safety', {})).toBe('Security · every action')
@@ -194,34 +191,6 @@ describe('describeRule', () => {
   // throwing on the rules list.
   it('falls back to the kind label for params that no longer parse', () => {
     expect(describeRule('price', { nope: true })).toBe(KIND_LABELS.price)
-  })
-})
-
-// The chain reports a numeric track id; people write "root". Both have to reach
-// the matcher as the same id, or a rule written by name never matches.
-describe('OpenGov tracks', () => {
-  it('normalizes a name or an id to the numeric id, loosely on the name', () => {
-    expect(referendumTrackId('0')).toBe(0)
-    expect(referendumTrackId('root')).toBe(0)
-    expect(referendumTrackId('Whitelisted Caller')).toBe(1)
-    expect(referendumTrackId('whitelisted-caller')).toBe(1)
-    expect(referendumTrackId('economic_parameters')).toBe(9)
-    expect(referendumTrackId('nonexistent')).toBeNull()
-    expect(referendumTrackId('42')).toBeNull()
-  })
-
-  it('stores the id whichever form the rule used', () => {
-    const byName = parseRuleParams('referendum', { track: 'treasurer' })
-    const byId = parseRuleParams('referendum', { track: '5' })
-    expect(byName.ok && byName.params.track).toBe('5')
-    expect(byId.ok && byId.params.track).toBe('5')
-  })
-
-  it('names every track exactly once', () => {
-    expect(REFERENDUM_TRACKS.map(t => t.id)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-    expect(new Set(REFERENDUM_TRACKS.map(t => t.name)).size).toBe(REFERENDUM_TRACKS.length)
-    expect(referendumTrackName(8)).toBe('omnipool_admin')
-    expect(referendumTrackName(42)).toBeNull()
   })
 })
 

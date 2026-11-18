@@ -39,3 +39,9 @@ CREATE TABLE IF NOT EXISTS price_data.user_api_limits (account_id String, per_mi
 -- in-memory counter from the stored row after a restart, so a flush is
 -- idempotent under replay and a restart loses at most one flush interval).
 CREATE TABLE IF NOT EXISTS price_data.user_api_usage (account_id String, hour_start DateTime, requests UInt64, rejected UInt64, updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (account_id, hour_start) TTL hour_start + INTERVAL 400 DAY SETTINGS index_granularity = 256;
+-- Governance forum, private side (the public content is forum_* in 021_forum.sql).
+-- Who reported what, and why, and a moderator's sanctions on an account: never shown
+-- to anyone but moderators, never exported, never logged. A report is one per
+-- (reporter, target) while open; a sanction ('mute') holds until `until`.
+CREATE TABLE IF NOT EXISTS price_data.user_forum_reports (report_id String, reporter_account_id String, target_id String, reason LowCardinality(String), note String DEFAULT '', status LowCardinality(String) DEFAULT 'open', deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY report_id SETTINGS index_granularity = 64;
+CREATE TABLE IF NOT EXISTS price_data.user_forum_sanctions (account_id String, kind LowCardinality(String), until DateTime, reason String DEFAULT '', moderator_account_id String DEFAULT '', deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (account_id, kind) SETTINGS index_granularity = 64;

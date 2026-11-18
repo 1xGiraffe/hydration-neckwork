@@ -13,16 +13,22 @@ import { chTimestampMs } from './clickhouseTime.ts'
 
 export interface LoginChallenge { nonce: string; message: string }
 
-export function buildLoginMessage(host: string, address: string, ss58Polkadot: string, nonce: string, issuedAt: string): string {
+// The statement a wallet shows before signing. Human-readable and bound to everything
+// a phishing page would want to blur: the domain the person should see in their
+// address bar, what the signature is for, the exact account, a single-use nonce and
+// the moment it stops being accepted.
+export function buildLoginMessage(host: string, address: string, ss58Polkadot: string, nonce: string, issuedAt: string, expiresAt?: string): string {
   return [
     `${host} wants you to sign in`,
     '',
+    `Purpose: sign in to the Hydration Explorer at ${host} (governance forum, lists, notifications).`,
     'This signature only proves account ownership — no transaction is sent and no fee is paid.',
     '',
     `Address: ${address}`,
     `Account: ${ss58Polkadot}`,
     `Nonce: ${nonce}`,
     `Issued At: ${issuedAt}`,
+    ...(expiresAt ? [`Expires At: ${expiresAt}`] : []),
   ].join('\n')
 }
 
@@ -144,7 +150,8 @@ export function createChallenge(host: string, address: string): LoginChallenge |
   const n = normalizeAddress(address)
   if (!n) return null
   const nonce = randomBytes(16).toString('hex')
-  const message = buildLoginMessage(host, address.trim(), n.ss58Polkadot ?? n.accountId, nonce, new Date().toISOString())
+  const issued = Date.now()
+  const message = buildLoginMessage(host, address.trim(), n.ss58Polkadot ?? n.accountId, nonce, new Date(issued).toISOString(), new Date(issued + NONCE_TTL_MS).toISOString())
   // Cap the pending set so an unauthenticated client cannot grow it unboundedly
   // between sweeps (rate limiting bounds the rate; this bounds the total).
   if (pendingChallenges.size > 10_000) {
@@ -152,7 +159,7 @@ export function createChallenge(host: string, address: string): LoginChallenge |
     for (const [k, v] of pendingChallenges) if (v.expiresAt < now) pendingChallenges.delete(k)
     if (pendingChallenges.size > 10_000) return null
   }
-  pendingChallenges.set(nonce, { accountId: n.accountId, address: address.trim(), message, expiresAt: Date.now() + NONCE_TTL_MS })
+  pendingChallenges.set(nonce, { accountId: n.accountId, address: address.trim(), message, expiresAt: issued + NONCE_TTL_MS })
   return { nonce, message }
 }
 

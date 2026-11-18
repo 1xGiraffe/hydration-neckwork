@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect } from 'vitest'
+import { installReferendumTitles } from './helpers/referendumTitles.ts'
 import {
   cursorKey, evaluateReferendum, evaluatorParkedSubmissions, initEvaluator, parseParkedSubmissions,
   resetEvaluatorForTests, resolveSubmittedMatches, runEvaluatorTick, serializeParkedSubmissions,
@@ -10,9 +11,7 @@ import {
   type NotificationRule,
 } from '../src/notifications/notificationStore.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
-import {
-  initReferendumTitleService, isGenericReferendumTitle, loadReferendumTitles,
-} from '../src/services/referendumTitleService.ts'
+import { isGenericReferendumTitle } from '../src/services/referendumTitleService.ts'
 import { initExplorerService } from '../src/services/explorerService.ts'
 import { fakeClient, insertedRows, type FakeClient } from './helpers/userFakes.ts'
 
@@ -38,7 +37,7 @@ function rule(params: unknown): NotificationRule {
 }
 
 const row = (over: Partial<ReferendumEventRow> = {}): ReferendumEventRow =>
-  ({ blockHeight: 1_050, eventIndex: 3, index: 412, phase: 'submitted', track: 5, ...over })
+  ({ blockHeight: 1_050, eventIndex: 3, index: 412, phase: 'submitted', ...over })
 
 const titles = new Map<number, string>()
 const titleFor = (index: number) => titles.get(index) ?? null
@@ -85,7 +84,7 @@ describe('parked submitted notifications', () => {
     const result = tick(new Map(), [row()], [rule({ phases: ['submitted'] })])
     expect(result.matches).toHaveLength(0)
     expect(result.changed).toBe(true)
-    expect(result.pending.get(412)).toMatchObject({ blockHeight: 1_050, eventIndex: 3, track: 5, parkedAt: NOW })
+    expect(result.pending.get(412)).toMatchObject({ blockHeight: 1_050, eventIndex: 3, parkedAt: NOW })
   })
 
   it('delivers straight away when the title is already real', () => {
@@ -179,7 +178,7 @@ describe('parked submitted notifications', () => {
   })
 
   it('round-trips the persisted map, and ignores an unreadable row', () => {
-    const map = new Map<number, ParkedSubmission>([[412, { blockHeight: 1_050, eventIndex: 3, track: 5, parkedAt: NOW }]])
+    const map = new Map<number, ParkedSubmission>([[412, { blockHeight: 1_050, eventIndex: 3, parkedAt: NOW }]])
     expect(parseParkedSubmissions(serializeParkedSubmissions(map))).toEqual(map)
     expect(parseParkedSubmissions('not json').size).toBe(0)
     expect(parseParkedSubmissions(null).size).toBe(0)
@@ -207,8 +206,7 @@ describe('parked submissions survive a restart', () => {
     initNotifications(client)
     await loadNotifications()
     initEvaluator(client)
-    initReferendumTitleService(client)
-    await loadReferendumTitles()
+    installReferendumTitles(tables.forum_posts as { pallet: string; ref_index: number; title: string }[])
   }
 
   // A restart reads the user_* tables back: the store's in-memory maps are
@@ -226,7 +224,7 @@ describe('parked submissions survive a restart', () => {
     tables = {
       raw_ingestion_state: [{ head: 1_000 }],
       referendum_lifecycle_events: [lifecycle(412, 'Submitted', 900)],
-      referendum_titles: [],
+      forum_posts: [],
       raw_events: [], raw_extrinsics: [],
       user_notification_rules: [], user_notification_state: [], user_notification_channels: [],
       user_notification_inbox: [],
@@ -251,8 +249,8 @@ describe('parked submissions survive a restart', () => {
     await restart()
     expect(evaluatorParkedSubmissions()[412]).toMatchObject({ blockHeight: 900 })
 
-    tables.referendum_titles.push({ pallet: 'opengov', ref_index: 412, title: 'Add HDX liquidity to the Omnipool' })
-    await loadReferendumTitles()
+    tables.forum_posts.push({ pallet: 'opengov', ref_index: 412, title: 'Add HDX liquidity to the Omnipool' })
+    installReferendumTitles(tables.forum_posts as { pallet: string; ref_index: number; title: string }[])
     setHead(1_010)
     await runEvaluatorTick()
     // The proposal leads; the state change reads underneath it.

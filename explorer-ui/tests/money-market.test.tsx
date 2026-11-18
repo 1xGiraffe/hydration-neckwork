@@ -61,7 +61,7 @@ describe('money-market profile helpers', () => {
       { key: 'activity', label: 'Activity', count: 42, countAtLeast: false },
       { key: 'extrinsics', label: 'Extrinsics', count: 120 },
       { key: 'events', label: 'Events', count: 340 },
-      { key: 'votes', label: 'Votes', count: 7 },
+      { key: 'governance', label: 'Governance', count: 7 },
     ])
   })
 

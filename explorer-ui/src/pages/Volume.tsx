@@ -105,7 +105,7 @@ export function Volume() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Volume' }]} />
-        <div className="page-title">Volume <span className="sub">{through ? `trading on Hydration, through ${through}` : 'trading on Hydration'}</span></div>
+        <h1 className="page-title">Volume <span className="sub">{through ? `trading on Hydration, through ${through}` : 'trading on Hydration'}</span></h1>
       </div>
 
       {isError && <LoadError title="Couldn’t load volume" onRetry={() => { void refetch() }} />}

@@ -22,7 +22,7 @@ export function EventDetail({ id }: { id: string }) {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Events', to: paths.events() }, { label: id }]} />
         <div className="detail-header">
-          <div className="page-title">Event <span className="num">{id}</span></div>
+          <h1 className="page-title">Event <span className="num">{id}</span></h1>
         </div>
       </div>
 

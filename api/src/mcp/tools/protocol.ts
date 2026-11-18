@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { userLine } from '../format/untrusted.ts'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolError, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import type {
@@ -147,22 +148,23 @@ const bondsPageUrl = (base: string, family: string): string => `${base.replace(/
 
 /* ============ description ============ */
 
-const DESCRIPTION = `The protocol's own dashboards, each rendered as headline figures plus its top-N tables. One required argument, 'dashboard', picks which:
+const DESCRIPTION = `The protocol's own dashboards: headline figures plus top-N tables. 'dashboard' picks one:
 
-- 'revenue' — what the protocol earns. Totals for the day, week, month and all time; the split by stream (HOLLAR borrow interest, Omnipool asset and protocol fees, liquidation penalties, HSM revenue, network fees, XCM execution fees, Uniswap v3 fees, asset reserve); the accounts that generated the most; the live per-block accrual drips; and the HDX distributed to stakers from the three pots. 'range' (30d / 1y / all) applies HERE and only here.
-- 'hdx' — the token. Price and 24-hour move, total/protocol/user supply, holder cohorts, every lock type with its total, the unlock schedule (what is unlockable NOW versus scheduled), buy/sell flow and standing DCA pressure, and the largest accumulators and distributors.
-- 'hollar' — the stablecoin. Price, peg deviation in basis points, how much of the last 30 days sat within 25 bps, where the supply lives (stablepools, Omnipool, elsewhere), the HSM's collateral holdings with their purchase and buy-back parameters, and the pools that quote it.
-- 'ice' — the intent/solver layer (the Explorer's Intents page). Solver mode, protocol fee and routing overrides, open limit and DCA orders with the capital they reserve, fills per day (matched intent-to-intent vs routed through the pools, valued when they settled), execution quality (time to fill in blocks, partial and cancel rates, price against limit in basis points), the top traders (intent owners) and pairs, and fee revenue. For the individual intents call get_activity with type=intent; an intent id reads through inspect_entity.
-- 'juicer' — the Juicer strategy vaults: TVL and cap, est. APY (the official formula), Main and PRIME-loop health, top positions, withdrawal requests, activity since launch.
-- 'bil' — Brazilian Invoice Loans: NAV (BIL and uBIL are valued at it), stated vs realized APY, TVL and cap, the maturity ladder, the redemption queue and its wait, borrowing against BIL, pool 10055's premium to NAV.
+- 'revenue' — what the protocol earns: day/week/month/all-time totals, the split by stream (HOLLAR borrow interest net of the Juicer borrow discount, Omnipool asset and protocol fees, liquidation penalties, HSM, Juicer fees, network and XCM fees, Uniswap v3 fees, asset reserve), top generating accounts, live per-block accrual, HDX distributed to stakers from the three pots. 'range' (30d / 1y / all) applies here only.
+- 'hdx' — price and 24H move, total/protocol/user supply, holder cohorts, every lock type, the unlock schedule (unlockable NOW vs scheduled), buy/sell flow and DCA pressure, top accumulators and distributors.
+- 'hollar' — price, peg deviation (bps), share of 30 days within 25 bps, where supply lives, the HSM's collateral with purchase and buy-back parameters, the pools quoting it.
+- 'ice' — the intent/solver layer: solver mode, fee and routing overrides, open limit and DCA orders with reserved capital, fills per day (matched vs routed, valued at settlement), execution quality (blocks to fill, partial and cancel rates, price vs limit in bps), top traders and pairs, fee revenue. Individual intents: get_activity type=intent or inspect_entity.
+- 'juicer' — the Juicer vaults: TVL and cap, est. APY (official formula), Main and PRIME-loop health, top positions, withdrawals, activity since launch.
+- 'bil' — Brazilian Invoice Loans: NAV (BIL and uBIL valued at it), stated vs realized APY, TVL and cap, maturity ladder, redemption queue and wait, borrowing against BIL, pool 10055's premium to NAV.
 - 'hollar-bonds'/'hdx-bonds' — Treasury bonds by round: yield, sales, redemptions, holders (HDX's sold for DOT via LBP, yield in HDX). Buys: get_activity type=bond.
-- 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
-- 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
-- 'volume' — 24H / 7D / 30D volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7D top pools (volume/TVL), assets and traders.
+- 'security' — egress usage vs limit, per-asset deposit fuses and distance to lockdown, the Omnipool's per-block allowances and peak pressure, circuit-breaker trips, what is paused, lending-market solvency, runtime version, the Technical Committee, Wormhole backing.
+- 'liquidity' — the TVL split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool asset by asset with each weight against its CAP.
+- 'volume' — 24H/7D/30D with change: ROUTED (each trade once, netted — the DefiLlama figure), then per VENUE (each fill in its pool; sums to MORE than routed — never mix them), then 7D top pools (volume/TVL), assets and traders.
 
-Every one of these payloads is 10-280 KB upstream and carries long raw series (the Omnipool's TVL history alone is 1,351 daily points). None of that is returned: series are collapsed into first/last/high/low with their window, and tables are cut to the top rows. Timestamps inside the revenue payloads are UNIX SECONDS, unlike the ClickHouse timestamps everywhere else on this server; both are rendered as UTC here.
+Raw series are never returned: they collapse to first/last/high/low with their window, tables to top rows. Revenue timestamps are UNIX SECONDS upstream; all render as UTC.
 
-Prefer get_network_status for liveness, get_money_market for per-account lending risk ('security' sizes the markets, never an account), get_pools for one pool, and get_asset for one token.`
+Prefer get_network_status for liveness, get_money_market for one account's lending risk ('security' never sizes an account), get_pools for one pool, get_asset for one token.`
+
 
 /* ============ juicer ============ */
 
@@ -205,7 +207,7 @@ function renderJuicer(d: JuicerDashboard, ctx: ToolContext): string {
       ['Generated', d.generatedAt ? `${formatTime(d.generatedAt)} · ${relativeAge(d.generatedAt)}` : null],
     ]),
     ...(d.vaults ?? []).flatMap(v => [
-      h3(`${v.name} — ${assetLabel(v.shareAsset)} over ${assetLabel(v.collateral)}`),
+      h3(`${userLine(v.name, 80)} — ${assetLabel(v.shareAsset)} over ${assetLabel(v.collateral)}`),
       kv([
         ['Vault', explorerLink(accountLabel(v.vault), accountUrl(ctx.explorerBaseUrl, v.vault.address))],
         ['Deposits', v.status],
@@ -382,7 +384,7 @@ interface BondDashboardResponse {
 
 function renderBonds(d: BondDashboardResponse, ctx: ToolContext): string {
   const base = ctx.explorerBaseUrl
-  const U = d.underlying, face = (raw: string | null | undefined) => raw == null ? DASH : formatAmount(raw, U.decimals, `${U.symbol} face`)
+  const U = d.underlying, face = (raw: string | null | undefined) => raw == null ? DASH : formatAmount(raw, U.decimals, `${userLine(U.symbol, 32)} face`)
   const t = d.totals
   const pct = (v: number | null) => v == null ? DASH : formatPercent(v)
   return joinBlocks(
@@ -401,12 +403,12 @@ function renderBonds(d: BondDashboardResponse, ctx: ToolContext): string {
         ['Asset', explorerLink(assetLabel(r.asset), assetUrl(base, r.asset.assetId))],
         ['Issued · matures', `${face(r.issued)} on ${formatTime(r.createdAt)} · matures ${formatTime(r.maturityAt)}`],
         ['Fixed yield', r.fixedYieldPct == null ? null : r.sales.some(o => o.lbp)
-          ? `${pct(r.fixedYieldPct)} to maturity at the sale's average price of ${r.salePrice == null ? DASH : r.salePrice.toFixed(4)} ${U.symbol} per bond (${pct(r.discountPct ?? null)} discount) · ${pct(r.avgAprPct ?? null)} APR as bought, bonds-weighted`
+          ? `${pct(r.fixedYieldPct)} to maturity at the sale's average price of ${r.salePrice == null ? DASH : r.salePrice.toFixed(4)} ${userLine(U.symbol, 32)} per bond (${pct(r.discountPct ?? null)} discount) · ${pct(r.avgAprPct ?? null)} APR as bought, bonds-weighted`
           : `${pct(r.fixedYieldPct)} to maturity (${pct(r.aprAtOpenPct)} APR from when the sale opened; net of the 0.1% fee)`],
         ['Sold', `${face(r.soldForMoney)} for money (${r.proceeds.map(p => formatAmount(p.raw, p.asset.decimals, assetLabel(p.asset))).join(' + ') || DASH}) · ${face(r.rolledOver)} rolled over · ${formatCount(r.buyers)} buyers`],
         ['Redeemed', `${face(r.redeemed)} in ${formatCount(r.redemptions)} redemptions`],
         ['Outstanding', `${face(r.publicOutstanding)} public (${formatUsd(r.publicUsd)}) · ${face(r.issuerHeld)} the Treasury's own (unsold, fees)`],
-        ['Worth now', r.valueFactor == null ? null : `${r.valueFactor.toFixed(6)} ${U.symbol} per bond`],
+        ['Worth now', r.valueFactor == null ? null : `${r.valueFactor.toFixed(6)} ${userLine(U.symbol, 32)} per bond`],
       ]),
       ...r.sales.filter(o => o.lbp).map(o => {
         const l = o.lbp!, P = o.paymentAsset
@@ -415,14 +417,14 @@ function renderBonds(d: BondDashboardResponse, ctx: ToolContext): string {
           ['LBP pool', explorerLink(accountLabel(l.pool), accountUrl(base, l.pool.address))],
           ['Sale window', `${l.startAt ? formatTime(l.startAt) : DASH} → ${l.endAt ? formatTime(l.endAt) : DASH} · ${formatPercent(l.feePct)} fee in ${assetLabel(P)} · ${assetLabel(P)} weight ${l.paymentWeightStart}% → ${l.paymentWeightEnd}%`],
           ['Seeded · returned', `${face(l.seed.bonds)} + ${formatAmount(l.seed.payment, P.decimals, assetLabel(P))} · ${l.returned ? `${face(l.returned.bonds)} unsold + ${formatAmount(l.returned.payment, P.decimals, assetLabel(P))} back to the Treasury on ${formatTime(l.returned.at)}` : 'still in the pool'}`],
-          ['Sold', `${face(o.sold)} net of ${formatCount(l.sellBacks)} sells back for ${formatAmount(o.paid, P.decimals, assetLabel(P))} (fees ${formatAmount(l.fees, P.decimals, assetLabel(P))}) · ${o.avgPrice == null ? DASH : o.avgPrice.toFixed(6)} ${P.symbol} per bond = ${o.avgFacePrice == null ? DASH : o.avgFacePrice.toFixed(4)} ${U.symbol} at the time`],
-          ['Spot over the sale', faces.length ? `${faces[0].toFixed(4)} → ${faces[faces.length - 1].toFixed(4)} ${U.symbol} per bond (low ${Math.min(...faces).toFixed(4)}, high ${Math.max(...faces).toFixed(4)})` : DASH],
+          ['Sold', `${face(o.sold)} net of ${formatCount(l.sellBacks)} sells back for ${formatAmount(o.paid, P.decimals, assetLabel(P))} (fees ${formatAmount(l.fees, P.decimals, assetLabel(P))}) · ${o.avgPrice == null ? DASH : o.avgPrice.toFixed(6)} ${userLine(P.symbol, 32)} per bond = ${o.avgFacePrice == null ? DASH : o.avgFacePrice.toFixed(4)} ${userLine(U.symbol, 32)} at the time`],
+          ['Spot over the sale', faces.length ? `${faces[0].toFixed(4)} → ${faces[faces.length - 1].toFixed(4)} ${userLine(U.symbol, 32)} per bond (low ${Math.min(...faces).toFixed(4)}, high ${Math.max(...faces).toFixed(4)})` : DASH],
           ['Reserves replay', l.reconciled === true ? 'every fill accounted for (lands on what was returned)' : l.reconciled === false ? 'does NOT land on what was returned — curve withheld' : 'pool still holds its reserves'],
         ])
       }),
       r.buyerStats && r.buyerStats.top.length ? table(['Top buyer', 'Bonds', 'Fills', 'Price', 'APR'], r.buyerStats.top.slice(0, 8).map(b => [
         explorerLink(accountLabel(b.account), accountUrl(base, b.account.address)), face(b.bonds), formatCount(b.fills),
-        b.facePrice == null ? DASH : `${b.facePrice.toFixed(4)} ${U.symbol}`, pct(b.aprPct),
+        b.facePrice == null ? DASH : `${b.facePrice.toFixed(4)} ${userLine(U.symbol, 32)}`, pct(b.aprPct),
       ])) : null,
       r.buyerStats ? kv([['Buyers', `${formatCount(r.buyerStats.buyers)} buyers in ${formatCount(r.buyerStats.purchases)} purchases (median ${face(r.buyerStats.medianPurchase)}, largest ${face(r.buyerStats.largestPurchase)}) · top 10 bought ${pct(r.buyerStats.top10SharePct)} · ${formatCount(r.buyerStats.sellers)} sold back`]]) : null,
       table(['Sale', 'Pays', 'State', 'Price', 'Fixed yield', 'APR at open', 'Sold', 'Unsold'], r.sales.map(o => [
@@ -430,11 +432,11 @@ function renderBonds(d: BondDashboardResponse, ctx: ToolContext): string {
         pct(o.fixedYieldPct), pct(o.aprAtOpenPct), face(o.sold), o.unsold === '0' ? (o.remaining === '0' ? DASH : `${face(o.remaining)} left`) : face(o.unsold),
       ])),
       r.holders?.list.length ? table(['Top holder', 'Bonds', 'USD'], r.holders.list.slice(0, 8).map(h => [
-        h.account ? explorerLink(accountLabel(h.account), accountUrl(base, h.account.address)) : h.tag?.name ?? DASH, face(h.balance), formatUsd(h.valueUsd ?? null),
+        h.account ? explorerLink(accountLabel(h.account), accountUrl(base, h.account.address)) : userLine(h.tag?.name, 64) || DASH, face(h.balance), formatUsd(h.valueUsd ?? null),
       ])) : null,
     )),
     note(d.rounds.some(r => r.sales.some(o => o.facedAtEventTime))
-      ? `A bond redeems 1:1 for its underlying from maturity. Until then it is valued at its sale's price while the sale stands, then at that price accreting to face by maturity (simple interest). These bonds were paid for in another asset, so every price, discount and yield is in ${U.symbol} at each purchase's own time: what the payment was worth in ${U.symbol} then, against the ${U.symbol} it redeems for.`
+      ? `A bond redeems 1:1 for its underlying from maturity. Until then it is valued at its sale's price while the sale stands, then at that price accreting to face by maturity (simple interest). These bonds were paid for in another asset, so every price, discount and yield is in ${userLine(U.symbol, 32)} at each purchase's own time: what the payment was worth in ${userLine(U.symbol, 32)} then, against the ${userLine(U.symbol, 32)} it redeems for.`
       : 'A bond redeems 1:1 for its underlying from maturity. Until then it is valued at its sale\'s price (net of the fee) while the sale stands, then at that price accreting to face by maturity (simple interest). Prices and yields are on the sales\' own units (one USDT or USDC per HOLLAR of face).'),
   )
 }
@@ -492,7 +494,7 @@ function renderUserRevenue(u: UserRevenueSummary): string {
       ['Unpriced facts, all time (counted, not valued)', u.unpricedCells > 0 ? formatCount(u.unpricedCells) : null],
     ]),
     (u.unmeasured ?? []).length ? `${h3('Not measured')}\n${bullets(u.unmeasured.map(x => `${x.label} — ${x.reason}`))}` : null,
-    note('What users EARN on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual, staking and GIGAHDX yield, referrer commissions, less borrow interest (HOLLAR interest on HOLLAR loans in every market, and borrow interest on every other asset), exit fees and forfeits — booked when owed, per closed hour. NOT additive with Protocol Revenue: the two overlap (protocol-owned liquidity earns LP fees too), so never sum them.'),
+    note('What users EARN on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual, staking and GIGAHDX yield, referrer commissions, less borrow interest (HOLLAR interest on HOLLAR loans in every market, and borrow interest on every other asset), exit fees and forfeits — booked when owed, per closed hour. A Juicer vault\'s income (its loop\'s PRIME yield and its Main position, less their HOLLAR interest at the debt token\'s discount) is its share holders\', less the protocol\'s fee share of the loop\'s yield. NOT additive with Protocol Revenue: the two overlap (protocol-owned liquidity earns LP fees too), so never sum them.'),
     note('HDX staking is booked GROSS as it accrues: the payable share depends on governance action points no event states, so the unpaid part is booked as a forfeit (negative) at the claim or exit — a window can hold staking income whose forfeit lands later.'),
   )
 }
@@ -1006,7 +1008,7 @@ function renderVolume(d: PlatformVolume, ctx: ToolContext): string {
     h3('Top pools — 7D'),
     table(['Pool', 'Venue', '7D volume', 'TVL', '7D volume / TVL'], (d.topPools ?? []).slice(0, MAX_VOLUME_ROWS).map(p => {
       const href = poolHref(p)
-      return [href ? explorerLink(p.name, href) : p.name, venueLabel(p.venue), formatUsd(p.volume7dUsd), formatUsd(p.tvlUsd), ratioPct(p.volumeTvl7d)]
+      return [href ? explorerLink(userLine(p.name, 80), href) : userLine(p.name, 80), venueLabel(p.venue), formatUsd(p.volume7dUsd), formatUsd(p.tvlUsd), ratioPct(p.volumeTvl7d)]
     }), 'no pool traded in the 7 days'),
     note('7D volume / TVL is the window\'s volume over the pool\'s MEAN daily TVL across the same 7 days — a ratio for the window, not annualised.'),
     h3('Top assets — 7D'),

@@ -138,9 +138,9 @@ export function ApiAdmin() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'API admin' }]} />
-        <div className="page-title">
+        <h1 className="page-title">
           API admin <span className="sub">Data API accounts, usage and limits</span>
-        </div>
+        </h1>
       </div>
 
       {!available || users.isError ? (

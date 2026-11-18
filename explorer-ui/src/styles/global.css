@@ -336,9 +336,9 @@ svg { display: block; }
 /* ============ TOPBAR ============ */
 .topbar {
   position: sticky; top: 0; z-index: 50;
-  background: color-mix(in srgb, var(--bg) 86%, transparent);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  background: color-mix(in srgb, var(--bg) 97%, transparent);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
   border-bottom: 1px solid var(--separator);
   /* extend the frosted bar up behind the iOS status bar and push the nav row
      below it (0 on Android/desktop, so no visual change there) */
@@ -348,7 +348,7 @@ svg { display: block; }
 .brand { display: inline-flex; align-items: baseline; gap: 9px; flex-shrink: 0; }
 .brand .logo { width: 22px; height: 22px; color: var(--accent); transform: translateY(3px); }
 .brand .wm { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 18px; letter-spacing: 0; }
-.brand .pr { font-family: 'Gazpacho', serif; font-style: italic; font-weight: 400; font-size: 18px; color: var(--accent); }
+.brand .pr { font-family: 'Gazpacho', serif; font-style: italic; font-weight: 400; font-size: 18px; color: var(--accent-text); }
 
 /* grouped nav: two dropdown groups (Activity, Chain) + direct links */
 .nav { display: flex; gap: 4px; margin-left: 0; min-width: 0; flex: 0 0 auto; align-items: center; }
@@ -364,7 +364,7 @@ svg { display: block; }
 .nav-trigger .caret { font-size: 9px; color: var(--text-low); transition: transform 150ms; }
 .nav-link:hover, .nav-group:hover > .nav-trigger, .nav-group.open > .nav-trigger { color: var(--text-high); background: var(--panel-hover); }
 .nav-group.open > .nav-trigger .caret { transform: rotate(180deg); }
-.nav-trigger.active, .nav-link.active { color: var(--accent); background: var(--accent-soft); }
+.nav-trigger.active, .nav-link.active { color: var(--accent-text); background: var(--accent-soft); }
 .nav-menu {
   position: absolute; top: calc(100% + 8px); left: 0; z-index: 120;
   min-width: 176px; padding: 6px;
@@ -376,7 +376,7 @@ svg { display: block; }
 .nav-group.open > .nav-menu { opacity: 1; visibility: visible; transform: translateY(0); }
 .nav-menu a { display: block; padding: 9px 12px; border-radius: 9px; font-size: 13px; color: var(--text-medium); white-space: nowrap; transition: color 130ms, background 130ms; }
 .nav-menu a:hover { color: var(--text-high); background: var(--panel-hover); }
-.nav-menu a.active { color: var(--accent); background: var(--accent-soft); }
+.nav-menu a.active { color: var(--accent-text); background: var(--accent-soft); }
 
 /* hamburger (mobile only) + right-hand drawer (preis-style) */
 .nav-burger { display: none; width: 34px; height: 34px; padding: 0; align-items: center; justify-content: center; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color 150ms, background 150ms; }
@@ -408,7 +408,7 @@ svg { display: block; }
   transition: color 130ms, background 130ms;
 }
 .drawer-sec > a:hover, .drawer-sec > button.drawer-row:hover { color: var(--text-high); background: var(--panel-hover); }
-.drawer-sec > a.active { color: var(--accent); background: var(--accent-soft); }
+.drawer-sec > a.active { color: var(--accent-text); background: var(--accent-soft); }
 .drawer-connect-btn { width: 100%; justify-content: center; height: 40px; }
 /* bottom drawer section: the live + theme controls (moved out of the topbar
    on mobile) sit side by side as regular pills */
@@ -475,27 +475,35 @@ svg { display: block; }
 .filter-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 /* "smol" toggle — hides sub-$10 activity; while hiding, the word itself wears
    the dim+strike treatment the rows it hides would get. */
-.smol-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.06em; color: var(--text-medium); }
+.smol-toggle { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; letter-spacing: 0.06em; color: var(--text-medium); }
 .smol-toggle:hover { color: var(--text-high); }
 .smol-toggle svg { width: 13px; height: 13px; }
 .smol-toggle.hiding .smol-word { opacity: .5; text-decoration: line-through; }
-.filter-toggle { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium); }
+.filter-toggle { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 9999px; background: var(--panel); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium); }
 .filter-toggle:hover { color: var(--text-high); }
 .filter-toggle.open, .filter-toggle.has { color: var(--text-high); border-color: var(--sky); }
 .filter-toggle svg { width: 13px; height: 13px; }
-.filter-toggle .fb { background: var(--accent); color: #fff; border-radius: 9999px; padding: 1px 6px; font-size: 10px; }
+.filter-toggle .fb { background: var(--accent-fill); color: #fff; border-radius: 9999px; padding: 1px 6px; font-size: 10px; }
 .filter-toggle .chev { color: var(--text-low); }
 .filters.hidden { display: none; }
 .filters { margin-top: 12px; }
 [data-theme="light"] .theme-toggle .ic-sun { display: none; }
 [data-theme="light"] .theme-toggle .ic-moon { display: block; }
 
-/* Mid-width fold: between the mobile drawer (≤860px) and full desktop, the six
-   nav items would squeeze the topbar search to its minimum — Assets/HDX/HOLLAR
-   collapse into the Assets dropdown instead. */
-.nav .nav-fold-group { display: none; }
+/* Mid-width fold: between the mobile drawer (≤860px) and full desktop, the nav
+   items would squeeze the topbar search to its minimum — the Assets and Revenue
+   menus collapse into one Assets dropdown instead. */
+.nav .nav-fold-group, .nav .nav-wfold-group { display: none; }
+@media (min-width: 861px) and (max-width: 1279px) {
+  .nav .nav-wfold-group { display: block; }
+  .nav .nav-wunfold-group { display: none; }
+}
+/* With Governance as its own trigger, the "explorer" half of the wordmark gives
+   its width to the search until the bar has room for both. */
+@media (min-width: 1280px) and (max-width: 1439px) {
+  .brand .pr { display: none; }
+}
 @media (min-width: 861px) and (max-width: 1119px) {
-  .nav > .nav-link.nav-fold { display: none; }
   .nav .nav-fold-group { display: block; }
   /* The permanent Assets group yields to the wider fold dropdown here, or the
      bar would show two "Assets" triggers. */
@@ -617,26 +625,30 @@ svg { display: block; }
 .pager .btns button { transition: transform 90ms ease; }
 .tabs button:active, .nav-trigger:active, .nav-link:active, .pager .btns button:active, .activity-chip:active, .exp-btn:active { transform: scale(0.96); }
 .page-head { margin-bottom: 24px; }
-.crumbs { display: flex; align-items: center; gap: 8px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
-.crumbs a:hover { color: var(--accent); }
+.crumbs { display: flex; align-items: center; gap: 8px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+.crumbs a:hover { color: var(--accent-text); }
 .crumbs .sep { color: var(--text-lowest); }
+/* A long last crumb (a forum title) ends in an ellipsis instead of pushing the page wide. */
+.crumbs { min-width: 0; max-width: 100%; }
+.crumbs > span > a, .crumbs .sep { flex-shrink: 0; }
+.crumbs [aria-current="page"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .page-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 34px; letter-spacing: 0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; row-gap: 2px; }
-.page-title .sub { font-family: 'GeistMono'; font-size: 13px; color: var(--text-medium); font-weight: 400; letter-spacing: 0; }
+.page-title .sub { font-family: 'GeistMono', ui-monospace, monospace; font-size: 13px; color: var(--text-medium); font-weight: 400; letter-spacing: 0; }
 /* An enacted referendum whose dispatched call errored: the status word alone turns red. */
-.page-title .sub .ref-status-failed { color: var(--red); }
+.page-title .sub .ref-status-failed { color: var(--red-text); }
 
 /* ============ DASHBOARD HERO (search-first) ============ */
 .hero { padding: 40px 0 36px; text-align: center; border-bottom: 1px solid var(--separator); margin-bottom: 32px; }
 .hero h1 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 56px; line-height: 1.02; letter-spacing: 0; margin-bottom: 8px; }
 @media (max-width: 720px) { .hero h1 { font-size: 38px; } }
-.hero h1 em { font-style: italic; font-weight: 400; color: var(--accent); }
+.hero h1 em { font-style: italic; font-weight: 400; color: var(--accent-text); }
 .hero p { color: var(--text-medium); font-size: 15px; margin-bottom: 26px; }
 .hero .search { max-width: 720px; margin: 0 auto; height: 52px; padding: 0 20px; border-radius: 16px; }
 .hero .search input { font-size: 15px; }
 .hero .search svg { width: 18px; height: 18px; }
 .hero .quick { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
-.hero .quick span { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
-.hero .quick a { font-family: 'GeistMono'; font-size: 11px; color: var(--sky); padding: 3px 9px; border-radius: 9999px; background: var(--sky-soft); }
+.hero .quick span { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
+.hero .quick a { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--sky); padding: 3px 9px; border-radius: 9999px; background: var(--sky-soft); }
 .hero .quick a:hover { color: var(--text-high); }
 
 /* search-first variant: bigger search, breathing room, slim ribbon */
@@ -671,8 +683,8 @@ svg { display: block; }
 .panel { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; overflow: hidden; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--separator); }
 .panel-head .t { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 17px; letter-spacing: 0; }
-.panel-head a { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
-.panel-head a:hover { color: var(--accent); }
+.panel-head a { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.panel-head a:hover { color: var(--accent-text); }
 /* An open account-picker dropdown (Invites, tag member editor) is an absolutely
    positioned child that pokes past the panel's own bottom edge — exempt the
    panel from its own corner-clipping overflow for exactly as long as the
@@ -1074,22 +1086,22 @@ svg { display: block; }
    chip focuses its asset above rather than navigating away. */
 .tm-unpriced { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--separator); }
 .tm-rowgroup + .tm-rowgroup { margin-top: 14px; }
-.tm-unpriced-cap { display: block; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); margin-bottom: 8px; }
+.tm-unpriced-cap { display: block; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); margin-bottom: 8px; }
 .tm-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .tm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border-radius: 9999px; background: var(--bg-elev2); border: 1px solid var(--separator); font-family: 'Geist', sans-serif; font-size: 13px; color: var(--text-medium); cursor: pointer; appearance: none; text-align: left; transition: border-color 140ms, color 140ms, background 140ms; }
 .tm-chip:hover { border-color: var(--text-lowest); color: var(--text-high); }
 .tm-chip.on { border-color: var(--sky); background: var(--sky-soft); color: var(--text-high); }
-.tm-chip-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-low); }
+.tm-chip-val { font-family: 'GeistMono', ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-low); }
 .tm-chips-scroll { max-height: 148px; overflow-y: auto; margin-top: 4px; }
-.tm-empty { padding: 22px; color: var(--text-low); font-family: 'GeistMono'; font-size: 13px; text-align: center; }
+.tm-empty { padding: 22px; color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 13px; text-align: center; }
 
 /* combined activity */
-.pill-badge { display: inline-block; font-family: 'GeistMono'; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; padding: 3px 9px; border-radius: 9999px; white-space: nowrap; }
+.pill-badge { display: inline-block; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; padding: 3px 9px; border-radius: 9999px; white-space: nowrap; }
 .asset-flow { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .activity-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
-.activity-chip { font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em; padding: 6px 13px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color .14s, background .14s, border-color .14s, transform 90ms ease; }
+.activity-chip { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; letter-spacing: 0.04em; padding: 6px 13px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-medium); transition: color .14s, background .14s, border-color .14s, transform 90ms ease; }
 .activity-chip:hover { color: var(--text-high); }
-.activity-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.activity-chip.on { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
 
 /* The activity type filter as one segmented control (preis's interval picker
    look): a full-width rounded track whose accent pill glides between segments.
@@ -1101,18 +1113,18 @@ svg { display: block; }
 .seg-bar::-webkit-scrollbar { display: none; }
 .seg-bar.has-ink::before { content: ''; position: absolute; top: 3px; bottom: 3px;
   left: var(--ink-left, 0); width: var(--ink-width, 0);
-  border-radius: 9999px; background: var(--accent); pointer-events: none; }
+  border-radius: 9999px; background: var(--accent-fill); pointer-events: none; }
 .seg-bar.ink-live::before { transition: left 200ms var(--ease-standard), width 200ms var(--ease-standard); }
-.seg-btn { position: relative; z-index: 1; flex: 1 0 auto; padding: 6px 13px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em; color: var(--text-medium); white-space: nowrap; text-align: center; transition: color 160ms, transform 90ms ease; }
+.seg-btn { position: relative; z-index: 1; flex: 1 0 auto; padding: 6px 13px; border-radius: 9999px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; letter-spacing: 0.04em; color: var(--text-medium); white-space: nowrap; text-align: center; transition: color 160ms, transform 90ms ease; }
 .seg-btn:hover { color: var(--text-high); }
 .seg-btn:active { transform: scale(0.96); }
 .seg-btn.active { color: #fff; }
 /* No-JS fallback: without the ink the active segment paints itself. */
-.seg-bar:not(.has-ink) .seg-btn.active { background: var(--accent); }
+.seg-bar:not(.has-ink) .seg-btn.active { background: var(--accent-fill); }
 .activity-action {
   all: unset; box-sizing: border-box; height: 29px; line-height: 27px; padding: 0 13px;
   border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
-  font-family: 'GeistMono'; font-size: 11px; letter-spacing: 0.04em;
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; letter-spacing: 0.04em;
   color: var(--text-medium); cursor: pointer;
 }
 .activity-action:hover, .activity-action:focus { border-color: var(--sky); color: var(--text-high); }
@@ -1123,20 +1135,20 @@ svg { display: block; }
 
 .th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
 .th-sort:hover { color: var(--text-high); }
-.th-sort.on { color: var(--accent); }
+.th-sort.on { color: var(--accent-text); }
 
 /* inline row expand (extrinsics / events) */
 .exp-toggle { width: 34px; text-align: center; }
-.exp-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-low); font-family: 'GeistMono'; font-size: 12px; transition: transform .15s, color .15s, background .15s; }
+.exp-btn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; transition: transform .15s, color .15s, background .15s; }
 .exp-btn:hover { color: var(--text-high); background: var(--panel-hover); }
-.exp-btn.open { transform: rotate(90deg); color: var(--accent); }
+.exp-btn.open { transform: rotate(90deg); color: var(--accent-text); }
 .exp-host.open { background: var(--panel-hover); }
 .exp-row > td { padding: 0 !important; background: var(--bg); border-bottom: 1px solid var(--separator); }
 .exp { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; border-left: 2px solid var(--accent); }
 .exp-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
 @media (max-width: 720px) { .exp-cols { grid-template-columns: 1fr; } }
-.exp-h { font-family: 'GeistMono'; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-low); margin-bottom: 8px; }
-.exp-kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-family: 'GeistMono'; font-size: 12px; }
+.exp-h { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-low); margin-bottom: 8px; }
+.exp-kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; }
 .exp-kv .kk { color: var(--text-medium); }
 .exp-kv .vv { color: var(--text-high); word-break: break-all; }
 .exp-evs { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1242,34 +1254,34 @@ svg { display: block; }
   padding: 1px 7px; border-radius: 9999px; font-size: 11px; line-height: 1.4;
   border: 1px solid currentColor; background: color-mix(in srgb, currentColor 12%, transparent);
 }
-.addr-pill .id-verified { color: var(--green); font-weight: 700; font-size: 11px; }
+.addr-pill .id-verified { color: var(--green-text); font-weight: 700; font-size: 11px; }
 /* Smart-contract marker inside account pills — muted, non-interactive, same
    weight class as the ✓ so a pill row keeps one rhythm. */
 .addr-pill .contract-glyph { color: var(--text-medium); font-size: 11px; font-weight: 500; letter-spacing: -0.5px; }
 
 /* status badge */
-.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 9999px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
 .badge svg { width: 11px; height: 11px; }
-.badge.ok { background: var(--green-soft); color: var(--green); }
-.badge.fail { background: var(--red-soft); color: var(--red); }
+.badge.ok { background: var(--green-soft); color: var(--green-text); }
+.badge.fail { background: var(--red-soft); color: var(--red-text); }
 .badge.finalized { background: var(--sky-soft); color: var(--sky); }
-.badge.pending { background: var(--amber-soft); color: var(--amber); }
+.badge.pending { background: var(--amber-soft); color: var(--amber-text); }
 /* icon-only badge (compact lists) — even padding keeps the pill round instead
    of the text variant's wider oval. */
 .badge-icon { padding: 4px; gap: 0; }
 
 /* call pill — pallet.method, color by pallet */
-.call { display: inline-flex; align-items: baseline; gap: 0; font-family: 'GeistMono'; font-size: 12px; padding: 3px 9px; border-radius: 7px; background: var(--panel); border: 1px solid var(--border); white-space: nowrap; }
+.call { display: inline-flex; align-items: baseline; gap: 0; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; padding: 3px 9px; border-radius: 7px; background: var(--panel); border: 1px solid var(--border); white-space: nowrap; }
 .call .pallet { font-weight: 600; }
 .call .dot { color: var(--text-lowest); margin: 0 1px; }
 .call .method { color: var(--text-medium); }
-.call.omnipool .pallet { color: var(--accent); }
+.call.omnipool .pallet { color: var(--accent-text); }
 .call.tokens .pallet, .call.balances .pallet, .call.currencies .pallet { color: var(--sky); }
 .call.xtokens .pallet, .call.polkadotxcm .pallet, .call.xcmpqueue .pallet { color: var(--lavender); }
-.call.staking .pallet { color: var(--green); }
-.call.router .pallet { color: var(--amber); }
+.call.staking .pallet { color: var(--green-text); }
+.call.router .pallet { color: var(--amber-text); }
 .call.stableswap .pallet { color: var(--lavender-deep); }
-.call.dca .pallet { color: var(--amber); }
+.call.dca .pallet { color: var(--amber-text); }
 .call.evm .pallet { color: var(--lavender-deep); }
 .call.moneymarket .pallet { color: var(--lavender-deep); }
 .call.system .pallet, .call.timestamp .pallet, .call.utility .pallet { color: var(--text-medium); }
@@ -1355,7 +1367,7 @@ svg { display: block; }
 .detail-header .nav-btns a svg, .detail-header .nav-btns button svg { width: 14px; height: 14px; }
 
 /* ============ TABS ============ */
-.tabs { display: flex; gap: 4px; margin: 24px 0 16px; border-bottom: 1px solid var(--separator); overflow-x: auto; scrollbar-width: none; position: relative; }
+.tabs { display: flex; gap: 4px; margin: 24px 0 16px; border-bottom: 1px solid var(--separator); overflow-x: auto; scrollbar-width: none; position: relative; min-height: 41px; }
 /* Sliding active indicator (tabsInk.ts): a ::before ink line per bar glides
    between tabs, positioned purely via CSS variables the script writes — no
    injected DOM, so React's children stay untouched. While present, the
@@ -1377,9 +1389,9 @@ svg { display: block; }
 .tabs button { padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--text-medium); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 140ms, border-color 140ms, transform 90ms ease; }
 .tabs button { flex: 0 0 auto; }
 .tabs button:hover { color: var(--text-high); }
-.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
-.tabs button .cnt { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: 6px; }
-.tabs button.active .cnt { color: var(--accent); }
+.tabs button.active { color: var(--accent-text); border-bottom-color: var(--accent); }
+.tabs button .cnt { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); margin-left: 6px; }
+.tabs button.active .cnt { color: var(--accent-text); }
 /* A tab may carry the same unread pill the topbar's bell does, or — where the
    attention has no number behind it — a bare dot. */
 .tabs button .invite-badge { margin-left: 6px; vertical-align: middle; }
@@ -1456,11 +1468,11 @@ svg { display: block; }
    rather than wrapping inside the value's one narrow column. */
 .acct-stats-hint { flex-basis: 100%; text-align: right; margin-top: -10px; }
 .acct-bal { text-align: right; }
-.acct-bal .lab { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
-.acct-bal .amt { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
-.acct-bal .hint, .acct-stats-hint .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.acct-bal .lab { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.acct-bal .amt { font-family: 'GeistMono', ui-monospace, monospace; font-size: 26px; font-weight: 600; }
+.acct-bal .hint, .acct-stats-hint .hint { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
 .acct-bal.subtle .amt { font-size: 14px; font-weight: 500; color: var(--text-medium); }
-.acct-bal.subtle .lab { font-size: 9px; color: var(--text-lowest); }
+.acct-bal.subtle .lab { font-size: 9px; color: var(--text-low); }
 /* A label with a roomier and a compact spelling ("Protocol revenue" / "Revenue"):
    the wide form yields below the width where the stat row starts wrapping. */
 .acct-bal .lab-narrow { display: none; }
@@ -1723,17 +1735,22 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 :root[data-theme="dark"] .filters select, :root[data-theme="dark"] .activity-action { color-scheme: dark; }
 :root[data-theme="light"] .filters select, :root[data-theme="light"] .activity-action { color-scheme: light; }
 .filters select option, .activity-action option { background: var(--bg-elev); color: var(--text-high); }
+/* Every other native dropdown list too: a select's own background is often a
+   translucent panel tint, which the popup cannot draw over the page, so the
+   options get an opaque surface in the active theme's colours. */
+select option, select optgroup { background-color: var(--bg-elev); color: var(--text-high); }
+select option:disabled { color: var(--text-low); }
 
 /* Mobile-only sort control for lists whose sortable column headers vanish in
    the stacked-card view (accounts). Same look as the filter selects. */
 .mobile-sort { display: none; }
 @media (max-width: 720px) {
   .mobile-sort { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-  .mobile-sort label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+  .mobile-sort label { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
   .mobile-sort select {
     all: unset; box-sizing: border-box; height: 34px; line-height: 32px; padding: 0 12px;
     border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
-    font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); cursor: pointer;
+    font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-high); cursor: pointer;
   }
   :root[data-theme="dark"] .mobile-sort select { color-scheme: dark; }
   :root[data-theme="light"] .mobile-sort select { color-scheme: light; }
@@ -2536,13 +2553,13 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 .notify-wrap { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .notify-bell { width: 12px; height: 12px; flex-shrink: 0; }
 .notify-link { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-.notify-error { color: var(--red); font-family: 'GeistMono'; font-size: 11px; }
+.notify-error { color: var(--red-text); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
 /* Subscribed: the same pill, wearing the accent it already uses for an active
    chip. State comes from the rules the viewer HAS, so this survives a reload —
    and clicking it unsubscribes, which is why it reads as pressed. */
-.notify-btn.on, .notify-link.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.notify-btn.on, .notify-link.on { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .notify-btn.on { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.notify-manage { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.notify-manage { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
 .notify-manage:hover { color: var(--text-high); }
 /* Asset header: the prefilled alert buttons, pushed to the far edge of the row.
    Three pills do not fit one phone line, so the row wraps as a block and each
@@ -2553,8 +2570,8 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 .notify-count {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9999px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent);
-  font-family: 'GeistMono'; font-size: 10.5px; line-height: 1;
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text);
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; line-height: 1;
 }
 .notify-count:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 /* The filter zone's `extra` slot, when it holds more than one control — one
@@ -2656,7 +2673,7 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 }
 .seg-switch .seg-indicator {
   position: absolute; top: 3px; bottom: 3px; left: 3px; width: var(--seg-width); border-radius: 9999px;
-  background: var(--accent);
+  background: var(--accent-fill);
   transform: translateX(calc(var(--active-index) * (var(--seg-width) + var(--seg-gap))));
   transition: transform 180ms ease-out;
   pointer-events: none;
@@ -3136,8 +3153,8 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 .ref-phase.future .ref-phase-note { color: var(--text-low); }
 .ref-eta-date { color: var(--text-low); }
 .ref-phase-bar { height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--text-low) 14%, transparent); overflow: hidden; }
-.ref-phase-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width .6s ease; }
-.ref-phase.future .ref-phase-fill, .ref-phase.done .ref-phase-fill { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+.ref-phase-fill { height: 100%; border-radius: 3px; background: var(--text-medium); transition: width .6s ease; }
+.ref-phase.future .ref-phase-fill, .ref-phase.done .ref-phase-fill { background: color-mix(in srgb, var(--text-medium) 40%, transparent); }
 /* Phones: the phases stack, and the note keeps its full text. */
 @media (max-width: 720px) {
   .ref-phases { flex-direction: column; gap: 10px; }
@@ -3149,12 +3166,16 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 .ref-gauge-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 6px; }
 .ref-gauge-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-low); }
 .ref-gauge-nums { font-size: 11px; }
-.ref-gauge.pass .ref-gauge-current { color: var(--green); font-weight: 600; }
-.ref-gauge.fail .ref-gauge-current { color: var(--red); font-weight: 600; }
+.ref-gauge.pass .ref-gauge-current { color: var(--green-text); font-weight: 600; }
+.ref-gauge.support.pass .ref-gauge-current { color: var(--sky); }
+.ref-gauge.below .ref-gauge-current { color: var(--amber-text); font-weight: 600; }
+.ref-gauge.fail .ref-gauge-current { color: var(--red-text); font-weight: 600; }
 /* The tick can sit at 0 or 100%, so the bar must not clip it. */
 .ref-gauge-bar { position: relative; height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--text-low) 14%, transparent); }
 .ref-gauge-fill { height: 100%; border-radius: 3px; }
 .ref-gauge.pass .ref-gauge-fill { background: var(--green); }
+.ref-gauge.support.pass .ref-gauge-fill { background: var(--sky); }
+.ref-gauge.below .ref-gauge-fill { background: var(--amber); }
 .ref-gauge.fail .ref-gauge-fill { background: var(--red); }
 .ref-gauge.unknown .ref-gauge-fill { background: var(--text-low); }
 .ref-gauge-tick { position: absolute; top: -2px; bottom: -2px; width: 1.5px; border-radius: 1px; background: var(--text-medium); }
@@ -3221,9 +3242,9 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 .vb-bubble .vb-name { font-family: inherit; font-weight: 600; color: var(--text-high); }
 /* Self-set profile name: same amber-and-italic treatment as .addr-pill's, so a
    bubble reads as "the owner's own claim" identically to every other pill. */
-.vb-bubble .vb-name.profile-name { color: var(--amber); font-style: italic; }
+.vb-bubble .vb-name.profile-name { color: var(--amber-text); font-style: italic; }
 .vb-bubble .id-verified { margin-left: 2px; color: inherit; }
-.badge.vote-split { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.badge.vote-split { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-text); }
 .badge.badge-quiet { background: var(--surface-2); color: var(--text-low); margin-left: 6px; }
 tr.row-muted td { opacity: .55; }
 .empty-note { padding: 14px; text-align: center; color: var(--text-low); font-size: 12px; }
@@ -3382,8 +3403,8 @@ tr.row-muted td { opacity: .55; }
 .sec-bounty div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-medium); border-bottom: 1px solid var(--separator); padding-bottom: 5px; }
 .sec-bounty div:last-child { border-bottom: 0; }
 .sec-bounty .mono { color: var(--text-high); }
-.sec-links { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; font-family: 'GeistMono'; font-size: 11px; }
-.sec-links a { color: var(--accent); }
+.sec-links { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
+.sec-links a { color: var(--accent-text); }
 .sec-links a:hover { text-decoration: underline; }
 /* The audit list is the only table on the page narrow enough not to need the
    shared 760px floor, so it keeps its natural width beside the bounty card. */
@@ -3420,7 +3441,7 @@ tr.row-muted td { opacity: .55; }
 .sec-ov-card { text-align: left; cursor: pointer; transition: border-color 140ms, background 140ms; }
 .sec-ov-card:hover { border-color: var(--text-low); background: var(--panel-hover); }
 .sec-ov-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.sec-inline-link { color: var(--accent); font: inherit; }
+.sec-inline-link { color: var(--accent-text); font: inherit; }
 .sec-inline-link:hover { text-decoration: underline; }
 .sec-supplemental { background: var(--panel); color: var(--text-low); border: 1px solid var(--separator); margin-left: 8px; }
 
@@ -3482,7 +3503,7 @@ tr.row-muted td { opacity: .55; }
 .sec-amt-n { font-size: 11px; color: var(--text-low); }
 .sec-amt-n::after { content: ' pos'; }
 /* A qualifier that belongs to the column, not to the value under it. */
-.tbl thead th .th-sub { display: block; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-lowest); }
+.tbl thead th .th-sub { display: block; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-low); }
 
 /* Security sections are pages, not tabs, so the nav row is links — same look as the
    shared tab bar, but a real navigation, which is what resets the scroll position
@@ -3492,7 +3513,7 @@ tr.row-muted td { opacity: .55; }
   border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 140ms, border-color 140ms;
 }
 .sec-section-nav .tabs .sec-nav-link:hover { color: var(--text-high); }
-.sec-section-nav .tabs .sec-nav-link.active { color: var(--accent); border-bottom-color: var(--accent); }
+.sec-section-nav .tabs .sec-nav-link.active { color: var(--accent-text); border-bottom-color: var(--accent); }
 
 /* Phone: seven section links cannot fit 390px, and the shared tab bar they
    borrow their look from scrolls with no visible affordance. The row wraps
@@ -3600,14 +3621,14 @@ tr.row-muted td { opacity: .55; }
    manager contract that mints it. */
 .wh-asset { display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .wh-mgr { font-size: 10.5px; color: var(--text-low); }
-.wh-mgr:hover { color: var(--accent); }
+.wh-mgr:hover { color: var(--accent-text); }
 .wh-origin { display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .wh-chain { color: var(--text-high); }
-.wh-out { font-family: 'GeistMono'; font-size: 10.5px; color: var(--accent); white-space: nowrap; }
+.wh-out { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; color: var(--accent-text); white-space: nowrap; }
 .wh-out:hover { text-decoration: underline; }
 .wh-count { color: var(--text-lowest); }
 .wh-route .wh-hop { color: var(--text-high); white-space: nowrap; }
-.wh-route .wh-hop:hover { color: var(--accent); }
+.wh-route .wh-hop:hover { color: var(--accent-text); }
 .wh-arrow { color: var(--text-lowest); padding: 0 3px; }
 .badge.wh-quiet { background: var(--panel); color: var(--text-low); }
 /* A queued release sits in the same table as a transfer in flight, so its route
@@ -3735,7 +3756,7 @@ tr.row-muted td { opacity: .55; }
   background: var(--bg-elev2); border: 1px solid var(--separator);
   font-size: 12px; white-space: nowrap; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14); }
 .rev-pill-label { color: var(--text-high); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
-a.rev-pill-label:hover { color: var(--accent); }
+a.rev-pill-label:hover { color: var(--accent-text); }
 .rev-pill-usd { color: var(--text-medium); font-size: 11px; }
 .rev-fullscreen .rev-pill { font-size: 14px; }
 
@@ -3847,11 +3868,12 @@ a.rev-pill-label:hover { color: var(--accent); }
    One page for every decision body. The live cards lead; the shared status
    tones (good / bad / live / quiet) are the page's one visual vocabulary. */
 .gov-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin-bottom: 22px; }
+.gov-cards.n-1, .gov-cards.n-2 { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
 .gov-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-elev); text-decoration: none; color: inherit; transition: border-color .14s, transform 90ms ease; }
 .gov-card:hover { border-color: var(--accent); }
 .gov-card:active { transform: scale(0.99); }
 .gov-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.gov-card-clock { margin-left: auto; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); white-space: nowrap; }
+.gov-card-clock { margin-left: auto; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); white-space: nowrap; }
 .gov-card-title { font-size: 14px; font-weight: 600; color: var(--text-high); line-height: 1.35;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .gov-card-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: auto; }
@@ -3860,12 +3882,12 @@ a.rev-pill-label:hover { color: var(--accent); }
 .gov-tallybar { width: 74px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--text-low) 22%, transparent); overflow: hidden; display: inline-block; }
 .gov-tallybar > span { display: block; height: 100%; background: color-mix(in srgb, var(--green) 75%, var(--text-low)); }
 
-.badge.gov-status.good { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+.badge.gov-status.good { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green-text); }
 /* Confirming: nearly settled-yes — the approved green, paler and yellower, so
    the two greens read as one family at two stages. */
-.badge.gov-status.almost { background: color-mix(in srgb, var(--green) 11%, transparent); color: color-mix(in srgb, var(--green) 72%, var(--text-medium)); }
-.badge.gov-status.bad { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red); }
-.badge.gov-status.neutral { background: color-mix(in srgb, var(--sky-deep) 13%, transparent); color: var(--sky-deep); }
+.badge.gov-status.almost { background: color-mix(in srgb, var(--green) 11%, transparent); color: color-mix(in srgb, var(--green-text) 72%, var(--text-medium)); }
+.badge.gov-status.bad { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red-text); }
+.badge.gov-status.neutral { background: color-mix(in srgb, var(--sky-deep) 13%, transparent); color: var(--sky); }
 .badge.gov-status.quiet { background: var(--surface-2); color: var(--text-medium); }
 
 .gov-era-note { font-size: 12.5px; line-height: 1.5; color: var(--text-medium); max-width: 86ch; margin: 2px 0 14px; }
@@ -3917,7 +3939,7 @@ a.rev-pill-label:hover { color: var(--accent); }
 .mcp-spec-k { font-size: 10.5px; color: var(--text-low); }
 .mcp-spec-raw { margin: 8px 0 0; font-size: 11.5px; line-height: 1.7; color: var(--text-low); white-space: pre-wrap; overflow-wrap: anywhere; }
 .mcp-spec-out { margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--separator); }
-.mcp-spec-verb { font-size: 10.5px; color: var(--accent); }
+.mcp-spec-verb { font-size: 10.5px; color: var(--accent-text); }
 .mcp-spec-line { margin-top: 8px; font-size: 16px; font-weight: 500; line-height: 1.5; color: var(--text-high); overflow-wrap: anywhere; }
 .mcp-spec-usd { margin-top: 4px; font-size: 13px; color: var(--text-medium); }
 /* --text-lowest sits near 2:1 on the light ground; this line carries a real
@@ -3978,13 +4000,13 @@ a.rev-pill-label:hover { color: var(--accent); }
    in one wrapping row, a long title pushed the mark onto a line of its own. */
 .mcp-tool-id { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; min-width: 0; flex: 1 1 auto; }
 .mcp-tool-name { font-size: 13px; font-weight: 500; color: var(--text-high); }
-.mcp-tool[open] .mcp-tool-name { color: var(--accent); }
+.mcp-tool[open] .mcp-tool-name { color: var(--accent-text); }
 .mcp-tool-title { font-size: 13.5px; color: var(--text-medium); min-width: 0; }
-.mcp-tool-mark { flex: 0 0 auto; font-family: 'GeistMono'; font-size: 14px; color: var(--text-low); }
+.mcp-tool-mark { flex: 0 0 auto; font-family: 'GeistMono', ui-monospace, monospace; font-size: 14px; color: var(--text-low); }
 .mcp-tool-mark::before { content: '+'; }
-.mcp-tool[open] .mcp-tool-mark { color: var(--accent); }
+.mcp-tool[open] .mcp-tool-mark { color: var(--accent-text); }
 .mcp-tool[open] .mcp-tool-mark::before { content: '\2212'; }
-.mcp-tool-desc { margin: 0; padding: 0 18px 18px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.72; color: var(--text-medium); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-tool-desc { margin: 0; padding: 0 18px 18px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; line-height: 1.72; color: var(--text-medium); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Recorded exchanges. The accent rule marks where a person spoke; everything
    under it is what came back. */
@@ -4235,30 +4257,30 @@ a.rev-pill-label:hover { color: var(--accent); }
 .ipc-title { font-weight: 600; margin-left: 2px; }
 .ipc-last { margin-left: 8px; font-size: 13px; }
 .ipc-seg { flex: 0 0 auto; }
-.ipc-auto { margin-left: 3px; color: var(--accent); }
+.ipc-auto { margin-left: 3px; color: var(--accent-text); }
 .ipc-sub { margin: 8px 0 6px; font-size: 12px; }
-.ipc-limit-v { color: var(--amber); }
+.ipc-limit-v { color: var(--amber-text); }
 .ipc-plot { position: relative; }
 .ipc-svg { width: 100%; height: auto; display: block; touch-action: pan-y; }
 .ipc-empty { padding: 48px 0; text-align: center; }
 .ipc-grid { stroke: var(--separator); stroke-width: 1; }
-.ipc-axis { font-family: 'GeistMono'; font-size: 10px; fill: var(--text-low); }
-.ipc-up { color: var(--green); } .ipc-down { color: var(--red); }
+.ipc-axis { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; fill: var(--text-low); }
+.ipc-up { color: var(--green-text); } .ipc-down { color: var(--red-text); }
 .ipc-wick { stroke: currentColor; stroke-width: 1; }
 .ipc-body { fill: currentColor; }
 .ipc-fill { fill: var(--sky, #5fb3f3); stroke: var(--bg-elev); stroke-width: 1.5; }
 .ipc-limit line { stroke: var(--amber); stroke-width: 1.5; stroke-dasharray: 6 4; }
 .ipc-limit rect { fill: var(--amber); }
-.ipc-limit text { font-family: 'GeistMono'; font-size: 10.5px; fill: #1a1a1a; font-weight: 600; }
+.ipc-limit text { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; fill: #1a1a1a; font-weight: 600; }
 .ipc-limit-off text { fill: var(--amber); }
 .ipc-limit-edge line { stroke-dasharray: 2 5; opacity: .9; }
 .ipc-limit text.ipc-edge-note { fill: var(--amber); font-weight: 500; font-size: 10px; }
 .ipc-now line { stroke: var(--text-low); stroke-width: 1; stroke-dasharray: 2 3; }
 .ipc-now rect { fill: var(--panel); stroke: var(--border); }
-.ipc-now text { font-family: 'GeistMono'; font-size: 10.5px; fill: var(--text-high, currentColor); }
+.ipc-now text { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; fill: var(--text-high, currentColor); }
 .ipc-ohlc { position: absolute; top: 4px; left: 8px; right: 84px; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--text-medium); pointer-events: none; }
 .ipc-ohlc .k { color: var(--text-low); margin-right: 4px; }
-.ipc-c-up { color: var(--green); } .ipc-c-down { color: var(--red); }
+.ipc-c-up { color: var(--green-text); } .ipc-c-down { color: var(--red-text); }
 .ipc-cross { stroke: var(--text-low); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
 @media (max-width: 720px) { .ipc-ohlc { right: 8px; font-size: 10.5px; gap: 2px 9px; } }
 .ipc-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 6px; font-size: 11px; }
@@ -4374,7 +4396,7 @@ a.orc-consumer:hover .orc-asset span:last-child { text-decoration: underline; }
    breakdown page, the river + ribbon panel, and the river's own as-of line. */
 .rev-river-head { align-items: baseline; }
 .rev-more { margin-left: auto; font-size: 12px; color: var(--text-low); white-space: nowrap; }
-.rev-more:hover { color: var(--accent); }
+.rev-more:hover { color: var(--accent-text); }
 .rev-asof { padding: 0 16px 12px; font-size: 11.5px; color: var(--text-low); }
 /* /revenue full screen (Revenue.tsx RevenueRivers, useRiverFullscreen.ts): ONE
    view, the two rivers stacked as two equal bands at every aspect ratio, and
@@ -4512,3 +4534,957 @@ html.rev-fs-lock #view .wrap { animation: none; }
 @media (max-width: 720px) { .bonds-page .lbp-chart .hdx-ax { font-size: 12px; } }
 .nowrap { white-space: nowrap; }
 .bond-buyer-cards { margin: 0 0 12px; }
+
+/* ── Governance and the forum ─────────────────────────────────────────────────
+   The hub, the referendum page, discussions, the proposal wizard and "my
+   governance". Governance's own accent is the vote lavender (--cat-vote); the
+   verdict tones reuse the explorer's outcome colours (green pass, red fail, amber
+   waiting, blue in progress). Forum prose is Geist at reading size and measure. */
+.gov-h2 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 21px; margin: 30px 0 12px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.gov-h2-sub { font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-low); font-weight: 400; }
+.gov-h3 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 17px; margin: 0 0 10px; }
+.gov-section .gov-h3 { margin-top: 22px; }
+.gov-h4 { font-size: 12px; font-weight: 600; color: var(--text-medium); margin: 14px 0 6px; }
+.gov-section { scroll-margin-top: calc(var(--safe-top) + 112px); }
+.gov-empty { color: var(--text-medium); font-size: 13px; margin: 6px 0 12px; }
+.gov-fineprint { color: var(--text-low); font-size: 12px; line-height: 1.5; margin: 8px 0; max-width: 90ch; }
+.gov-break { word-break: break-all; }
+.link-btn { all: unset; cursor: pointer; color: var(--sky); font-size: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--sky) 40%, transparent); text-underline-offset: 2px; }
+.link-btn:hover { color: var(--text-high); }
+.link-btn:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; border-radius: 3px; }
+.gov-btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: 9999px; font-size: 12.5px; font-weight: 600; background: var(--panel); border: 1px solid var(--border); color: var(--text-high); cursor: pointer; white-space: nowrap; }
+.gov-btn:hover:not(:disabled) { background: var(--panel-hover); }
+.gov-btn:disabled { cursor: not-allowed; color: var(--text-medium); }
+.gov-btn-primary { border-color: transparent; background: var(--action-fill); color: var(--action-on); }
+/* Restates the fill: the plain button's hover (`.gov-btn:hover:not(:disabled)`) is more
+   specific and would otherwise paint the panel colour under the primary's text colour. */
+.gov-btn-primary:hover:not(:disabled) { background: var(--action-fill); filter: brightness(1.08); }
+/* A primary that cannot be pressed yet reads as neutral, its label still legible (the lavender fill is kept for the one action that can). */
+.gov-btn-primary:disabled { background: var(--bg-elev2); border-color: var(--border); color: var(--text-medium); filter: none; }
+.gov-soon { font-family: 'GeistMono', ui-monospace, monospace; font-size: 9.5px; font-weight: 500; letter-spacing: .03em; padding: 1px 6px; border-radius: 9999px; background: var(--lavender-soft); color: var(--lavender); }
+.gov-more { display: block; width: 100%; margin: 12px 0; padding: 10px; border-radius: 12px; border: 1px dashed var(--border); background: transparent; color: var(--text-medium); font-size: 13px; cursor: pointer; }
+.gov-more:hover:not(:disabled) { color: var(--text-high); border-color: var(--text-low); }
+.gov-more-link { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); margin-left: auto; }
+.gov-more-link:hover { color: var(--accent-text); }
+.gov-label { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 9999px; font-size: 11px; background: var(--lavender-soft); color: var(--lavender); white-space: nowrap; }
+.gov-label.ok { background: var(--green-soft); color: var(--green-text); margin-left: 6px; }
+.gov-label.gov-label-no { background: var(--panel-hover); color: var(--text-medium); cursor: help; }
+.gov-proxy-fold > summary { cursor: pointer; width: max-content; }
+.gov-proxy-fold[open] > summary { margin-bottom: 6px; }
+.gov-linked { font-size: 11.5px; color: var(--sky); white-space: nowrap; }
+.gov-track-chip { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 9999px; border: 1px solid color-mix(in srgb, var(--lavender) 45%, transparent); color: var(--lavender); font-size: 12px; white-space: nowrap; }
+.gov-track-chip.small { font-size: 11px; padding: 0 8px; }
+a.gov-track-chip:hover { background: var(--lavender-soft); }
+.gov-track-link:hover { color: var(--text-high); }
+.gov-moment { color: inherit; text-decoration: none; border-bottom: 1px dotted transparent; }
+a.gov-moment:hover { border-bottom-color: currentColor; }
+.gov-moment.projected { border-bottom: 1px dotted var(--text-low); cursor: help; }
+.gov-legacy-author { font-size: 13px; }
+.gov-not-ready { display: flex; align-items: center; gap: 12px; padding: 16px 18px; border: 1px dashed color-mix(in srgb, var(--amber) 45%, var(--border)); border-radius: 14px; background: color-mix(in srgb, var(--amber) 6%, transparent); color: var(--text-medium); font-size: 13px; margin: 8px 0 14px; }
+.gov-not-ready-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--amber); animation: gov-pulse 1.4s ease-in-out infinite; }
+@keyframes gov-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .gov-not-ready-dot { animation: none; } }
+.gov-position { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 9999px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; white-space: nowrap; }
+.gov-position.aye { background: var(--green-soft); color: var(--green-text); }
+.gov-position.nay { background: var(--red-soft); color: var(--red-text); }
+.gov-position.split { background: var(--lavender-soft); color: var(--lavender); }
+
+/* the referendum page */
+.gov-ref-title { font-size: 30px; line-height: 1.2; }
+.gov-ref-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 8px; font-size: 13px; color: var(--text-medium); }
+.gov-ref-proposer { display: inline-flex; align-items: center; gap: 6px; }
+.gov-ref-links { gap: 8px; align-items: center; flex-wrap: wrap; }
+.gov-section-nav { position: sticky; top: calc(var(--safe-top) + 61px); z-index: 20; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; margin: 0 -4px 14px; padding: 8px 4px; background: var(--bg); border-bottom: 1px solid var(--separator); }
+.gov-section-nav::-webkit-scrollbar { display: none; }
+@media (max-width: 720px) {
+  .gov-section-nav { -webkit-mask-image: linear-gradient(to right, #000 85%, transparent); mask-image: linear-gradient(to right, #000 85%, transparent); padding-right: 32px; }
+}
+.gov-section-link { flex: 0 0 auto; padding: 5px 11px; border-radius: 9999px; font-size: 12.5px; color: var(--text-medium); display: inline-flex; gap: 6px; align-items: center; }
+.gov-section-link:hover { color: var(--text-high); background: var(--panel-hover); }
+.gov-section-count { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; color: var(--text-low); }
+.tone-pass, .tone-done-good { --tone: var(--green); }
+.tone-track { --tone: var(--sky-deep); }
+.tone-fail, .tone-done-bad { --tone: var(--red); }
+.tone-wait { --tone: var(--amber); }
+.tone-quiet { --tone: var(--text-medium); }
+:root[data-theme="dark"] .tone-track { --tone: var(--sky); }
+.gov-vote-entry { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 280px; }
+.gov-vote-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 42px; padding: 0 24px; border-radius: 9999px; border: 0; background: var(--action-fill); color: var(--action-on); font-size: 14.5px; font-weight: 700; cursor: pointer; }
+.gov-vote-btn:hover { filter: brightness(1.08); }
+.gov-quick { display: inline-flex; gap: 4px; }
+.gov-quick-btn { height: 30px; padding: 0 10px; border-radius: 9999px; border: 1px solid var(--border); background: transparent; color: var(--text-medium); font-size: 12px; font-weight: 600; cursor: pointer; }
+.gov-quick-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+.gov-quick-btn:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.gov-quick-btn.aye.on { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 55%, transparent); color: var(--green-text); }
+.gov-quick-btn.nay.on { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 55%, transparent); color: var(--red-text); }
+.gov-quick-btn.abstain.on { background: var(--sky-soft); border-color: color-mix(in srgb, var(--sky) 55%, transparent); color: var(--sky); }
+.gov-vote-btn:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.gov-vote-entry.compact { flex-direction: row; align-items: center; max-width: none; }
+.gov-vote-entry.compact .gov-vote-btn { height: 32px; padding: 0 14px; font-size: 13px; }
+.gov-wtd { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 16px 20px; font-size: 14.5px; line-height: 1.6; }
+.wtd-line { color: var(--text-high); overflow-wrap: anywhere; }
+.wtd-children { margin: 6px 0 2px; padding-left: 22px; color: var(--text-medium); font-size: 13.5px; }
+.wtd-children li { margin: 3px 0; }
+.wtd-children li::marker { color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
+.wtd-code { font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; padding: 1px 5px; border-radius: 5px; background: var(--panel-hover); }
+.gov-call-details { margin-top: 10px; }
+.gov-call-details > summary { cursor: pointer; font-size: 13px; color: var(--text-medium); padding: 6px 0; }
+.gov-call-details > summary:hover { color: var(--text-high); }
+.gov-call-details[open] > summary { margin-bottom: 8px; }
+.gov-mobile-bar { display: none; }
+@media (max-width: 720px) {
+  .gov-ref-title { font-size: 24px; }
+  .gov-mobile-bar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px)); background: color-mix(in srgb, var(--bg) 97%, transparent); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--separator); }
+  .gov-mobile-word { font-family: 'Gazpacho', serif; font-weight: 600; font-size: 17px; color: var(--tone-text, var(--tone)); }
+  .gov-ref { padding-bottom: 72px; }
+  .gov-wtd { padding: 14px 16px; }
+}
+
+/* forum prose: the one place user-authored markup renders (markdown/render.ts) */
+.md-body { font-size: 15px; line-height: 1.7; color: var(--text-high); overflow-wrap: anywhere; }
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+.md-body p, .md-body ul, .md-body ol, .md-body blockquote, .md-body pre, .md-body table { margin: 0 0 14px; max-width: 75ch; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 { font-family: 'Gazpacho', serif; font-weight: 500; line-height: 1.3; margin: 24px 0 10px; max-width: 75ch; }
+/* The text's headings are shifted one level down (render.ts): an h2 is its top level. */
+.md-body h2 { font-size: 22px; } .md-body h3 { font-size: 19px; } .md-body h4 { font-size: 17px; } .md-body h5, .md-body h6 { font-size: 15px; }
+.md-body a { color: var(--sky); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--sky) 40%, transparent); text-underline-offset: 2px; }
+.md-body a:hover { color: var(--text-high); }
+.md-body a.md-ext::after { content: '↗'; font-size: .8em; margin-left: 2px; color: var(--text-low); }
+.md-body a.md-img-link { display: inline-flex; gap: 6px; padding: 2px 8px; border-radius: 6px; border: 1px dashed var(--border); text-decoration: none; font-size: 13px; }
+.md-body a.md-img-link::before { content: '🖼'; }
+.md-body .md-img-gone { display: inline-flex; gap: 6px; padding: 2px 8px; border-radius: 6px; border: 1px dashed var(--border); font-size: 13px; color: var(--text-medium); }
+.md-body .md-img-gone::before { content: '🖼'; opacity: 0.6; }
+/* A mention: an account named with @, the same whether typed here or carried over. */
+.md-body a.md-mention { color: var(--lavender); text-decoration: none; font-weight: 500; padding: 0 3px; border-radius: 4px; background: var(--lavender-soft); }
+.md-body a.md-mention:hover { color: var(--text-high); }
+.md-body .md-img { display: block; max-width: 100%; height: auto; border-radius: 10px; margin: 10px 0; border: 1px solid var(--separator); }
+.md-body blockquote { border-left: 3px solid var(--lavender-soft); padding: 2px 0 2px 14px; color: var(--text-medium); }
+.md-body code { font-family: 'GeistMono', ui-monospace, monospace; font-size: .88em; padding: 1px 5px; border-radius: 5px; background: var(--panel-hover); }
+.md-body pre { padding: 12px 14px; border-radius: 10px; background: var(--panel-hover); overflow-x: auto; }
+.md-body pre code { padding: 0; background: none; }
+.md-body table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 13.5px; }
+.md-body th, .md-body td { border: 1px solid var(--separator); padding: 6px 10px; text-align: left; }
+.md-body hr { border: 0; border-top: 1px solid var(--separator); margin: 20px 0; }
+.md-body li { margin: 3px 0; }
+.gov-post { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 18px; padding: 20px 24px; }
+.gov-post-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; font-size: 13px; }
+.gov-tldr { padding: 10px 14px; border-radius: 10px; background: var(--lavender-soft); font-size: 14px; margin: 0 0 14px; }
+.gov-post-foot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--separator); font-size: 12.5px; }
+.gov-post-panel { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--separator); }
+.gov-revisions { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.gov-revisions summary { cursor: pointer; font-size: 13px; color: var(--text-medium); }
+.gov-revision-title { font-weight: 600; margin: 8px 0; }
+.gov-revision-body { font-size: 14px; padding: 8px 0 0 12px; border-left: 2px solid var(--separator); }
+/* An earlier version's own headings stay below the page's: a version is quoted, not a second page. */
+.gov-revision-body h1 { font-size: 20px; } .gov-revision-body h2 { font-size: 18px; } .gov-revision-body h3, .gov-revision-body h4 { font-size: 16px; }
+.gov-revision-body > :first-child { margin-top: 0; }
+.gov-post-title { font-size: 30px; line-height: 1.2; }
+.gov-missing { padding: 28px; text-align: center; color: var(--text-medium); font-size: 14px; line-height: 1.6; }
+@media (max-width: 720px) { .gov-post { padding: 16px; } .gov-post-title { font-size: 24px; } .md-body { font-size: 14.5px; } }
+
+/* comments */
+.cmt-thread { max-width: 900px; }
+.cmt-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.cmt-count { margin-left: auto; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; color: var(--text-low); }
+.cmt-compose-placeholder { padding: 12px 14px; border: 1px dashed var(--border); border-radius: 12px; font-size: 13px; color: var(--text-low); margin-bottom: 14px; }
+.cmt-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.cmt { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 14px; padding: 12px 16px; scroll-margin-top: calc(var(--safe-top) + 120px); }
+.cmt.cmt-target { border-color: var(--lavender); box-shadow: 0 0 0 3px var(--lavender-soft); }
+.cmt-head { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; font-size: 12.5px; margin-bottom: 6px; }
+.cmt-time { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); margin-left: auto; }
+.cmt-time:hover { color: var(--text-high); }
+.cmt-edited { font-size: 11px; color: var(--text-low); font-style: italic; }
+.cmt-md { font-size: 14px; line-height: 1.65; }
+.cmt-stub { font-size: 13px; font-style: italic; color: var(--text-low); margin: 2px 0; }
+.cmt.cmt-hidden { background: transparent; border-style: dashed; }
+.cmt-actions { display: flex; gap: 12px; margin-top: 8px; }
+.cmt-replies { margin: 10px 0 0 6px; padding-left: 14px; border-left: 2px solid var(--separator); display: grid; gap: 8px; }
+.cmt-reply { background: transparent; border: 0; padding: 6px 0; }
+.cmt-skeleton { display: grid; gap: 10px; }
+.cmt-skeleton .skeleton { height: 70px; }
+@media (max-width: 720px) { .cmt { padding: 10px 12px; } .cmt-replies { margin-left: 0; padding-left: 10px; } .cmt-count { margin-left: 0; } }
+
+/* curves (components/gov/CurveChart.tsx) */
+.curve-chart { margin: 0; }
+.curve-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 820px) { .curve-panels { grid-template-columns: 1fr; } }
+.curve-panel { --c: var(--green); position: relative; background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 12px 12px 4px; min-width: 0; }
+.curve-panel.support { --c: var(--sky-deep); }
+:root[data-theme="dark"] .curve-panel.support { --c: var(--sky); }
+.curve-head { display: flex; align-items: baseline; gap: 10px; padding: 0 4px 6px; font-size: 12.5px; }
+.curve-label { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; color: var(--text-high); }
+.curve-key { width: 12px; height: 3px; border-radius: 2px; background: var(--c); }
+.curve-now-value { font-family: 'GeistMono', ui-monospace, monospace; font-size: 15px; color: var(--text-high); }
+.curve-key-thr { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--text-low); font-size: 11.5px; }
+.curve-dash { width: 14px; border-top: 2px dashed var(--text-medium); }
+.curve-svg { display: block; touch-action: pan-y; }
+.curve-grid { stroke: var(--separator); stroke-width: 1; }
+.curve-axis { fill: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; }
+.curve-now-label { fill: var(--text-medium); }
+.curve-pass { fill: var(--c); opacity: .09; }
+.curve-thr { fill: none; stroke: var(--text-medium); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.curve-line { fill: none; stroke: var(--c); stroke-width: 2; stroke-linejoin: round; }
+.curve-proj { stroke: var(--c); stroke-width: 2; stroke-dasharray: 2 4; opacity: .7; }
+.curve-dot { fill: var(--c); stroke: var(--bg-elev); stroke-width: 2; }
+.curve-now { stroke: var(--text-low); stroke-width: 1; }
+.curve-mark { stroke: var(--green); stroke-width: 1; stroke-dasharray: 2 3; }
+.curve-cross { stroke: var(--text-medium); stroke-width: 1; }
+.curve-tip { position: absolute; top: 34px; transform: translateX(-50%); pointer-events: none; z-index: 2; background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; font-size: 12px; line-height: 1.5; box-shadow: 0 6px 18px rgba(0,0,0,.18); white-space: nowrap; }
+.curve-tip-date { color: var(--text-medium); font-size: 11px; }
+.curve-tip-block { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-low); }
+.curve-missing p { font-size: 13px; color: var(--text-medium); line-height: 1.55; margin: 6px 4px 12px; }
+.curve-caption { font-size: 12px; color: var(--text-low); line-height: 1.55; margin: 10px 2px 0; max-width: 100ch; }
+
+/* the hub */
+.gov-hub-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.gov-hub-head .ext-link-row, .gov-hub-head > :last-child { margin-left: auto; }
+.gov-card { position: relative; overflow: hidden; }
+.gov-card::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--tone, transparent); }
+.gov-card.verdict-pass { --tone: var(--green); } .gov-card.verdict-fail { --tone: var(--red); } .gov-card.verdict-wait { --tone: var(--amber); } .gov-card.verdict-track { --tone: var(--sky-deep); }
+.gov-card-verdict { font-family: 'Gazpacho', serif; font-weight: 600; font-size: 16px; color: var(--tone-text, var(--tone)); }
+.gov-card-meters { display: grid; gap: 5px; }
+.gov-meter { display: grid; grid-template-columns: 64px 1fr 56px; align-items: center; gap: 8px; font-size: 11px; color: var(--text-medium); }
+.gov-meter-track { position: relative; height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--text-low) 18%, transparent); }
+.gov-meter-fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--green); }
+.gov-meter-track.support .gov-meter-fill { background: var(--sky-deep); }
+:root[data-theme="dark"] .gov-meter-track.support .gov-meter-fill { background: var(--sky); }
+.gov-meter-bar { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text-high); border-radius: 1px; }
+.gov-meter-num { font-family: 'GeistMono', ui-monospace, monospace; text-align: right; color: var(--text-high); }
+.gov-meter-num.short { color: var(--text-medium); }
+.gov-hub-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
+@media (max-width: 860px) { .gov-hub-grid { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+.gov-hub-card { margin-bottom: 16px; }
+.gov-hub-card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.gov-hub-card-head .gov-h3 { margin: 0; }
+.gov-h4 + .gov-cal-strip { margin-top: 4px; }
+.gov-hub-card .gov-h4 { margin-top: 16px; }
+.gov-deadlines { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.gov-deadlines > li { padding: 9px 0; border-bottom: 1px solid var(--separator); }
+.gov-deadlines > li:last-child { border-bottom: 0; }
+.gov-deadline-title { color: var(--text-high); font-size: 13.5px; font-weight: 500; line-height: 1.4; }
+.gov-deadline-title:hover { color: var(--accent-text); }
+.gov-deadline-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; font-size: 12px; color: var(--text-medium); }
+.gov-needs-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gov-needs-row > div:first-child { min-width: 0; }
+.gov-vote-entry.compact { flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 720px) { .gov-needs-row { flex-direction: column; align-items: stretch; gap: 8px; } .gov-needs-row .gov-vote-entry.compact { justify-content: flex-start; } }
+.gov-needs-lead { font-size: 13px; color: var(--text-medium); margin: 0 0 6px; }
+.gov-allset { font-size: 14px; color: var(--green-text); margin: 4px 0 8px; }
+.gov-needs-empty p { margin: 0 0 10px; font-size: 13.5px; color: var(--text-medium); }
+.gov-cal-strip { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.gov-cal-strip li { display: grid; grid-template-columns: 96px 1fr; gap: 10px; font-size: 12.5px; align-items: baseline; }
+.gov-cal-date { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; color: var(--text-low); }
+.gov-cal-what { color: var(--text-medium); }
+.gov-discs { list-style: none; margin: 0; padding: 0; }
+.gov-disc { padding: 12px 0; border-bottom: 1px solid var(--separator); }
+.gov-disc:last-child { border-bottom: 0; }
+.gov-discs-page .gov-disc { padding: 16px 4px; }
+.gov-disc-title { font-size: 15px; font-weight: 600; color: var(--text-high); line-height: 1.4; }
+.gov-disc-title:hover { color: var(--accent-text); }
+.gov-disc-excerpt { margin: 4px 0 6px; font-size: 13px; line-height: 1.5; color: var(--text-medium); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 90ch; }
+.gov-disc-meta { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; font-size: 12px; }
+.gov-disc-stat { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
+.gov-watch-form { display: flex; gap: 8px; }
+.gov-watch-form input { flex: 1; min-width: 0; width: 0; height: 34px; padding: 0 12px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-high); font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; }
+.gov-watch-form input:focus { border-color: var(--sky); outline: none; }
+.gov-form-error { color: var(--red-text); font-size: 12.5px; margin: 6px 0 0; }
+.gov-watch-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.gov-watch-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+
+/* discussions */
+.gov-forum-bar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.gov-search { flex: 1 1 220px; max-width: 420px; }
+.gov-search input { width: 100%; height: 34px; padding: 0 14px; border-radius: 9999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-high); font-size: 13px; }
+.gov-search input:focus { border-color: var(--sky); outline: none; }
+.gov-labels { margin-bottom: 8px; }
+
+/* a track's rules (components/gov/trackRules.tsx, on the proposal wizard) */
+.gov-track-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1px; margin: 0 0 8px; background: var(--separator); border: 1px solid var(--separator); border-radius: 16px; overflow: hidden; }
+.gov-track-facts > div { background: var(--bg-elev); padding: 14px 16px; }
+.gov-track-facts dt { font-size: 12px; color: var(--text-low); margin-bottom: 4px; }
+.gov-track-facts dd { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text-high); }
+
+/* an account's governance */
+.gov-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--separator); border: 1px solid var(--separator); border-radius: 16px; overflow: hidden; margin-bottom: 6px; }
+.gov-summary > div, .gov-lock-grid > div { background: var(--bg-elev); padding: 12px 16px; display: grid; gap: 4px; }
+.gov-stat-label { font-size: 11.5px; color: var(--text-low); }
+.gov-stat { font-family: 'GeistMono', ui-monospace, monospace; font-size: 15px; color: var(--text-high); }
+.gov-stat.good { color: var(--green-text); }
+.gov-lock-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; background: var(--separator); border-radius: 12px; overflow: hidden; margin: 4px 0 8px; }
+.gov-lock-card { padding: 14px 16px; }
+.gov-unlock-steps { margin: 6px 0; padding-left: 18px; font-size: 12.5px; color: var(--text-medium); }
+.gov-lock-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.gov-lock-actions .gov-fineprint { margin: 0; flex: 1 1 260px; }
+@media (min-width: 721px) { .gov-votes-tbl { min-width: 720px; } }
+@media (max-width: 720px) { .tbl.gov-votes-tbl { min-width: 0; } .gov-votes-tbl .gov-title-cell, .gov-votes-tbl .gov-after { text-align: right; } }
+.gov-cell-sub { font-size: 11.5px; margin-top: 2px; }
+.gov-after { font-size: 12.5px; }
+.gov-proxy-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; font-size: 13px; }
+.gov-proxy-list li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* A delegation is a sentence ("4 members delegate 44.4B HDX to …"): it flows as text,
+   not as flex items, which would put the row's gap between every word and figure. */
+.gov-deleg-list li { display: block; line-height: 1.9; }
+.gov-deleg-list li .addr-wrap, .gov-deleg-list li .addr-pill { vertical-align: middle; }
+.gov-activity { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 13px; }
+.gov-activity-kind { color: var(--text-low); }
+.gov-card-foot { font-size: 12px; }
+.gov-card-foot .mono { font-size: 11.5px; }
+.gov-hub-grid { align-items: start; }
+.gov-track-facts { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 860px) { .gov-track-facts { grid-template-columns: 1fr; } }
+.gov-votes-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.gov-votes-bar .activity-chips { margin-bottom: 0; }
+.gov-votes-bar .cmt-count { margin-left: auto; }
+.gov-wallets { display: grid; gap: 10px; margin-bottom: 14px; }
+.gov-wallet-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* forum, nav and tracks */
+.nav-count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 7px; border-radius: 9px; background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); color: var(--text-high); font-size: 11px; font-weight: 600; line-height: 1; vertical-align: 1px; font-variant-numeric: tabular-nums; }
+.gov-hub-grid.gov-hub-grid-one { grid-template-columns: 1fr; }
+.gov-tracks .gov-cards { margin-bottom: 4px; }
+.pe-signin { margin-top: 12px; }
+
+/* governance: loading skeletons */
+.gov-skeleton-list { display: grid; gap: 10px; }
+.gov-skeleton-list .skeleton { height: 38px; border-radius: 10px; }
+
+/* Meters: approval green, support blue; under the bar amber (projected to meet it) or red. */
+.gov-meter-track.below .gov-meter-fill, :root[data-theme="dark"] .gov-meter-track.support.below .gov-meter-fill { background: var(--amber); }
+.gov-meter-track.short .gov-meter-fill, :root[data-theme="dark"] .gov-meter-track.support.short .gov-meter-fill { background: var(--red); }
+.gov-row-meters { display: grid; gap: 3px; margin-top: 6px; max-width: 280px; }
+.gov-row-meters .gov-meter { grid-template-columns: 58px 1fr 52px; font-size: 10.5px; }
+.gov-row-talk { font-size: 12px; white-space: nowrap; }
+.gov-row-mine { font-weight: 600; white-space: nowrap; }
+
+/* /governance/me */
+.gov-ready { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin: 0 0 16px; padding: 12px 16px; border-radius: 14px; background: var(--green-soft); border: 1px solid color-mix(in srgb, var(--green) 40%, transparent); font-size: 14px; }
+.gov-ready strong { color: var(--text-high); }
+.gov-me-empty { max-width: 640px; }
+.gov-me-empty p { color: var(--text-medium); line-height: 1.55; margin: 6px 0 14px; }
+.gov-btn-big { height: 44px; padding: 0 22px; font-size: 14px; }
+.gov-stat-text { font-family: inherit; font-size: 14px; }
+.gov-lock-why { margin: 0 0 8px; font-size: 13.5px; line-height: 1.55; color: var(--text-medium); max-width: 80ch; }
+.gov-lock-why strong { color: var(--text-high); font-weight: 600; }
+.gov-activity-title { color: var(--text-high); font-weight: 500; }
+.gov-activity-title:hover { color: var(--accent-text); }
+.votes-capital { font-size: 11.5px; margin-top: 2px; }
+
+/* The referendum page: a status column beside the content on wide screens. */
+.gov-ref-actions { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.gov-ref-layout { display: block; }
+.gov-ref-aside { display: none; }
+@media (min-width: 1100px) {
+  .gov-ref-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
+  .gov-ref-aside {
+    --tone: var(--text-medium);
+    display: flex; flex-direction: column; gap: 12px; position: sticky; top: calc(var(--safe-top) + 122px);
+    padding: 16px 18px 18px; border-radius: 18px; background: var(--bg-elev); border: 1px solid var(--separator);
+    border-top: 4px solid var(--tone);
+  }
+}
+.gov-ref-aside.tone-pass { --tone: var(--green); }
+.gov-ref-aside.tone-track { --tone: var(--sky); }
+.gov-ref-aside.tone-fail { --tone: var(--red); }
+.gov-ref-aside.tone-wait { --tone: var(--amber); }
+.gov-ref-aside.tone-done-good { --tone: var(--green); }
+.gov-ref-aside.tone-done-bad { --tone: var(--red); }
+.gov-aside-word { font-family: 'Gazpacho', serif; font-weight: 600; font-size: 24px; line-height: 1.1; color: var(--tone-text, var(--tone)); }
+.gov-aside-clock { font-size: 13px; color: var(--text-medium); margin-top: -6px; }
+.gov-aside-sides { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--separator); border-bottom: 1px solid var(--separator); }
+.gov-aside-side { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; }
+.gov-aside-side.aye .k { color: var(--green-text); font-weight: 600; }
+.gov-aside-side.nay .k { color: var(--red-text); font-weight: 600; }
+.gov-aside-side .v { font-size: 13px; color: var(--text-high); }
+.gov-aside-meters { display: grid; gap: 6px; }
+.gov-aside-note { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-medium); }
+.gov-aside-note.below { color: var(--amber-text); }
+.gov-ref-aside .gov-vote-entry { max-width: none; align-items: stretch; }
+.gov-ref-aside .gov-vote-btn { width: 100%; }
+.gov-aside-mine { margin: 0; font-size: 12.5px; color: var(--text-medium); }
+.ref-gauge-note.below { color: var(--amber-text); }
+.ref-tl-row.projected .ref-tl-label, .ref-tl-row.projected .ref-tl-when { color: var(--text-low); }
+.ref-tl-dot.future { background: transparent; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--text-low) 70%, transparent); }
+.tally-lines { display: grid; gap: 3px; font-size: 13px; }
+.gov-deposits { display: grid; gap: 2px; margin-top: 8px; font-size: 13px; color: var(--text-medium); }
+.gov-deposits > span { display: block; }
+
+/* The vote map: centred and capped so it never outgrows the reading column. */
+.gov-bubbles .vb-canvas { margin: 0 auto; }
+
+/* Phones: the last content clears the fixed vote bar. */
+@media (max-width: 720px) {
+  .gov-ref { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+}
+/* A referendum is read by its title: sans, as on every governance page. */
+.tbl.votes-tbl .ref-link { font-family: inherit; font-size: 13px; }
+/* On a referendum the discussion fills its column, as the description above it does. */
+.gov-ref .cmt-thread { max-width: none; }
+.gov-aside-clock .gov-card-clock { font-family: inherit; font-size: 13px; }
+
+/* ============ ACCESSIBILITY AND TOUCH (site-wide) ============ */
+/* The first tab stop: straight to the page, past the topbar and its menus. */
+.skip-link {
+  position: fixed; z-index: 200; top: calc(var(--safe-top) + 8px); left: 8px;
+  padding: 10px 16px; border-radius: 9999px; border: 1px solid var(--border);
+  background: var(--bg-elev); color: var(--text-high); font-size: 13.5px; font-weight: 600;
+  transform: translateY(calc(-100% - 16px - var(--safe-top)));
+}
+.skip-link:focus { transform: none; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); }
+#view:focus { outline: none; }
+
+/* A focused control scrolled into view lands below the sticky topbar (and below the
+   referendum's section nav where there is one), never under them. */
+html { scroll-padding-top: calc(var(--safe-top) + 72px); }
+html:has(.gov-section-nav) { scroll-padding-top: calc(var(--safe-top) + 120px); }
+
+/* Fields whose focus was only a border tint get a visible ring. */
+.search:focus-within { box-shadow: 0 0 0 2px var(--sky); }
+.gov-watch-form input:focus, .gov-search input:focus, .field select:focus { box-shadow: 0 0 0 2px color-mix(in srgb, var(--sky) 45%, transparent); }
+
+@media (pointer: coarse) {
+  /* 16px text in every field, so focusing one never zooms the page on iOS. */
+  :where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"]), select, textarea) { font-size: 16px !important; }
+  .vote-amount input { font-size: 22px !important; }
+
+  /* Tap targets: controls that stand alone are at least 44px; small ones inside
+     dense rows keep their look and get a 44px hit area around them. */
+  .theme-toggle, .topbar-bell, .nav-burger { width: 44px; height: 44px; flex-shrink: 0; }
+  .vote-sheet-head :is(.vote-wallets-btn, .vote-back), .gov-btn { height: 44px; }
+  .mde-bar .mde-tool { width: 44px; height: 44px; }
+  .copy { width: 24px; height: 24px; }
+  .vote-sheet :is(.unlock-list input, .unlock-claim input, .vote-fee-switch input) { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 0; }
+  .vote-sheet :is(.unlock-list label, .unlock-claim, .vote-fee-switch) { min-height: 44px; align-items: center; }
+  :is(.copy, .fa-link, .gov-section-link, .activity-chip, .pc-toggle, .notify-link, .copy-text-btn, .vote-chips button, .vote-dir.sm, .cart-remove, .mde-tab, .link-btn) { position: relative; }
+  :is(.copy, .fa-link, .gov-section-link, .activity-chip, .pc-toggle, .notify-link, .copy-text-btn, .vote-chips button, .vote-dir.sm, .cart-remove, .mde-tab, .link-btn)::after {
+    content: ''; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%);
+  }
+}
+
+/* The technical committee card's room while it loads (its height at each width). */
+.gov-tc-card-sk { height: 115px; border-radius: 16px; margin-bottom: 16px; }
+@media (max-width: 1100px) { .gov-tc-card-sk { height: 160px; } }
+@media (max-width: 720px) { .gov-tc-card-sk { height: 256px; } }
+/* A link inside running text is told apart by more than its colour. */
+.hdx-note a.hash { text-decoration: underline; text-underline-offset: 2px; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
+
+/* A post's banner: a fixed 2:1 box (cropped to fill), so the text below never moves when it loads. */
+.gov-post-banner { display: block; width: 100%; aspect-ratio: 2 / 1; max-height: 340px; object-fit: cover; border-radius: 12px; margin: 0 0 16px; background: var(--panel); border: 1px solid var(--separator); }
+
+/* A poll's results, read-only: the leading option in lavender, the rest quiet. */
+.gov-poll { margin: 18px 0 4px; padding: 14px 16px 12px; border-radius: 14px; border: 1px solid var(--separator); background: var(--panel); max-width: 75ch; }
+.gov-poll-head { margin-bottom: 10px; }
+.gov-poll-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 18px; line-height: 1.3; margin: 0; }
+.gov-poll-meta { margin: 3px 0 0; font-size: 12.5px; color: var(--text-medium); }
+.gov-poll-options { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.gov-poll-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 14px; }
+.gov-poll-label { min-width: 0; overflow-wrap: anywhere; }
+.gov-poll-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; font-size: 13px; }
+.gov-poll-option.lead .gov-poll-label { font-weight: 600; }
+.gov-poll-bar { margin-top: 5px; height: 6px; border-radius: 9999px; background: var(--separator); overflow: hidden; }
+.gov-poll-bar > span { display: block; height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--text-medium) 55%, transparent); }
+.gov-poll-option.lead .gov-poll-bar > span { background: var(--lavender); }
+.gov-poll-voters { margin-top: 6px; font-size: 12.5px; }
+.gov-poll-voters > summary { cursor: pointer; color: var(--text-medium); width: max-content; }
+.gov-poll-voters > summary:hover { color: var(--text-high); }
+.gov-poll-voter-list { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 6px; align-items: center; }
+.gov-poll-voter { display: inline-flex; align-items: center; gap: 5px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--sky); }
+.gov-poll-voter .emoji { font-size: 13px; }
+.gov-poll-voter.legacy { font-family: inherit; color: var(--text-medium); }
+.gov-poll-note { margin: 10px 0 0; font-size: 12.5px; color: var(--text-medium); }
+/* The archive list's rows while they load: their own height at each width. */
+.gov-skeleton-list.gov-archive-sk { margin-top: 12px; }
+.gov-skeleton-list.gov-archive-sk .skeleton { height: 108px; }
+@media (max-width: 720px) { .gov-skeleton-list.gov-archive-sk .skeleton { height: 133px; } }
+/* A referendum's title and sub-line while the detail loads. */
+.gov-ref-title-sk { display: block; width: min(100%, 640px); height: 36px; border-radius: 8px; }
+.gov-ref-sub-sk { min-height: 24px; }
+.gov-ref-sub-sk .skeleton { display: block; width: min(100%, 360px); height: 18px; border-radius: 9999px; }
+@media (max-width: 720px) {
+  .gov-ref-title-sk { height: 86px; }
+  .gov-ref-sub-sk { min-height: 86px; align-items: flex-start; }
+  /* The proposer keeps a line of its own, so a name that loads longer never re-wraps the row. */
+  .gov-ref-sub .gov-ref-proposer { flex-basis: 100%; }
+}
+/* A verdict word is text in its tone: the tone's text-safe shade (4.5:1 on the page grounds). */
+.tone-pass, .tone-done-good { --tone-text: var(--green-text); }
+.tone-fail, .tone-done-bad { --tone-text: var(--red-text); }
+.tone-wait { --tone-text: var(--amber-text); }
+/* The "Get notified" link is a standalone control: at least 24px tall at every width. */
+.ext-link.notify-link { min-height: 24px; }
+
+/* ============ GOVERNANCE DISCLOSURES (components/gov/Disclosure.tsx) ============ */
+/* Terms: the house .ice-gloss fold, with one row per term. */
+.gov-terms dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; }
+.gov-terms .gov-terms-row { display: contents; }
+@media (max-width: 720px) { .gov-terms .gov-terms-row dd { margin-bottom: 8px; } }
+/* ⓘ: a quiet icon button and a small note under it. */
+.gov-info { position: relative; display: inline-flex; vertical-align: -2px; margin-left: 4px; }
+.gov-info-btn { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 9999px; color: var(--text-low); cursor: pointer; }
+.gov-info-btn svg { width: 15px; height: 15px; }
+.gov-info-btn:hover, .gov-info-btn[aria-expanded="true"] { color: var(--text-high); }
+.gov-info-pop { position: absolute; z-index: 30; top: calc(100% + 6px); left: -8px; width: max-content; max-width: min(320px, calc(100vw - 32px)); padding: 9px 11px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-elev2); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); font-family: 'Geist', system-ui, sans-serif; font-size: 12.5px; font-weight: 400; line-height: 1.5; color: var(--text-medium); text-transform: none; letter-spacing: 0; white-space: normal; text-align: left; }
+/* Details: a quiet summary with a chevron; no box when closed, a hairline above when open. */
+.gov-details { margin-top: 14px; font-size: 13px; }
+.gov-details > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; color: var(--text-medium); width: max-content; max-width: 100%; }
+.gov-details > summary::-webkit-details-marker { display: none; }
+.gov-details > summary::before { content: ''; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform 140ms; margin-right: 2px; }
+.gov-details[open] > summary::before { transform: rotate(45deg); }
+.gov-details > summary:hover { color: var(--text-high); }
+.gov-details[open] > .gov-details-body { border-top: 1px solid var(--separator); margin-top: 10px; padding-top: 12px; }
+/* An icon-only button (bell, link, feed) in a header row. */
+.gov-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 9999px; color: var(--text-medium); border: 1px solid var(--border); background: transparent; cursor: pointer; }
+.gov-icon-btn:hover { color: var(--text-high); background: var(--panel-hover); }
+.gov-icon-btn.on { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.gov-icon-btn svg { width: 15px; height: 15px; }
+@media (pointer: coarse) { .gov-icon-btn { width: 44px; height: 44px; } .gov-info-btn { position: relative; } .gov-info-btn::after { content: ''; position: absolute; inset: -13px; } }
+
+/* ============ GOVERNANCE READING: REFERENDUM PAGE AND FORUM ============ */
+/* The referendum's header: one muted line (index · track · proposer · submitted) and two icon buttons. */
+.gov-ref-meta { flex-wrap: nowrap; align-items: flex-start; gap: 8px 12px; font-size: 13px; color: var(--text-medium); }
+.gov-ref-meta-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; min-width: 0; flex: 1 1 auto; min-height: 32px; }
+.gov-ref-meta .gov-ref-proposer { flex-basis: auto; }
+.gov-ref-sep { color: var(--text-low); }
+.gov-ref-meta .gov-ref-actions { flex: 0 0 auto; gap: 6px; }
+.gov-icon-btn:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.gov-icon-btn.done { color: var(--green-text); }
+
+/* Status: a section like the others — the verdict in one line, its phases, then charts or meters. */
+.gov-ref-status { scroll-margin-top: calc(var(--safe-top) + 112px); }
+.gov-ref-status-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px 20px; flex-wrap: wrap; }
+.gov-ref-status-text { flex: 1 1 320px; min-width: 0; }
+.gov-ref-status-line { margin: 0 0 14px; font-size: 15px; line-height: 1.5; color: var(--text-medium); }
+.gov-ref-status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--tone); margin-right: 8px; vertical-align: 1px; }
+.gov-ref-status-word { font-weight: 600; color: var(--tone-text, var(--text-high)); }
+.gov-ref-status-when { text-decoration: underline dotted; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); text-underline-offset: 3px; cursor: help; }
+.gov-ref-status-vote { margin-bottom: 14px; }
+.gov-ref-status-mine { margin: -6px 0 14px; font-size: 13px; color: var(--text-medium); }
+.gov-ref-status-deposits .gov-deposits { margin: -6px 0 14px; font-size: 12.5px; color: var(--text-low); }
+.ref-progress.bare { margin: 0 0 18px; padding: 0; border: 0; border-radius: 0; background: none; }
+.gov-ref-status .curve-chart { margin-bottom: 4px; }
+.gov-ref-status .gov-terms { margin: 14px 0 0; }
+.gov-ref-status > .gov-details { margin-top: 10px; }
+.gov-ref-status > .gov-details .curve-chart { margin-top: 2px; }
+/* Phase and gauge labels in sentence case, like the house ribbon's labels. */
+.ref-phase-label, .ref-gauge-label { font-family: inherit; font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.ref-phase-note { font-size: 12px; }
+@media (max-width: 720px) { .gov-ref-status-vote { display: none; } }
+
+/* The description: no card; its author and date are a meta line under the heading. */
+.gov-post.plain { background: none; border: 0; border-radius: 0; padding: 0; }
+.gov-post.plain .gov-post-meta { margin: -4px 0 12px; gap: 8px; font-size: 12px; color: var(--text-low); }
+.gov-post.plain .gov-post-foot { margin-top: 12px; padding-top: 0; border-top: 0; }
+/* A long body fades out (ForumPostBody's clamp): a tap or click on the text shows the rest.
+   The fade's lowest stretch is its button — the pointer there, a chevron that answers the
+   hover anywhere on the text, and the keyboard's way in; the text above stays selectable. */
+.gov-post-fold { position: relative; }
+.gov-post-fold:focus { outline: none; }
+.gov-post-fold.clamped .gov-post-md { max-height: clamp(280px, 42vh, 440px); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 140px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 140px), transparent); }
+.gov-post-fold-more { position: absolute; left: 0; right: 0; bottom: 0; height: 72px; display: flex; align-items: flex-end; justify-content: center; padding: 0; border: 0; background: none; color: var(--text-low); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.gov-post-fold-more svg { box-sizing: content-box; padding: 5px; border-radius: 9999px; border: 1px solid var(--border); background: var(--bg); transition: color .15s, border-color .15s, transform .15s; }
+.gov-post-fold.clamped:hover .gov-post-fold-more svg { color: var(--text-high); border-color: color-mix(in srgb, var(--text-high) 30%, transparent); transform: translateY(2px); }
+.gov-post-fold-more:focus-visible { outline: none; }
+.gov-post-fold-more:focus-visible svg { color: var(--text-high); outline: 2px solid var(--lavender); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .gov-post-fold-more svg { transition: none; } .gov-post-fold.clamped:hover .gov-post-fold-more svg { transform: none; } }
+/* What it does: plain text on a rule, not a card. */
+.gov-ref .gov-wtd { background: none; border: 0; border-left: 2px solid var(--separator); border-radius: 0; padding: 2px 0 2px 16px; }
+
+/* Votes: the map (wider on desktop, folded under "Vote map" on phones), then the table. */
+.gov-bubbles { margin: 0 0 10px; }
+.gov-bubbles .vb-canvas { max-width: 320px; }
+@media (min-width: 721px) { .gov-bubbles .vb-canvas { max-width: 460px; } }
+/* On the light theme's red fill the link blue falls under 4.5:1; a nay bubble's address reads in text colour. */
+:root[data-theme="light"] .vb-bubble.vb-nay .vb-addr, :root[data-theme="light"] .vb-bubble.vb-nay .vb-addr .addr-head { color: var(--text-high); }
+.gov-votemap { margin: 0 0 10px; }
+@media (max-width: 720px) {
+  /* The full table on a phone: one line per vote, the time in the row's tooltip. */
+  .tbl.votes-tbl.votes-line tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) 74px 92px; align-items: center; gap: 8px; padding: 8px 12px; }
+  .tbl.votes-tbl.votes-line tbody td[data-label="Vote"] { white-space: nowrap; }
+  .tbl.votes-tbl.votes-line tbody td { padding: 0; text-align: left; min-width: 0; overflow: hidden; }
+  .tbl.votes-tbl.votes-line tbody td[data-label]::before { display: none; }
+  .tbl.votes-tbl.votes-line tbody td[data-label="Time"] { display: none; }
+  .tbl.votes-tbl.votes-line tbody td[data-label="Voting power"] { text-align: right; white-space: nowrap; }
+  .tbl.votes-tbl.votes-line .votes-capital { display: none; }
+}
+
+/* More details: one closed fold at the end of the page; its labels in sentence case. */
+.gov-ref-details { margin-top: 30px; }
+.gov-ref-details > .gov-details { margin-top: 0; font-size: 14px; }
+.gov-more-dl { grid-template-columns: 190px minmax(0, 1fr); }
+.gov-more-dl .dt { padding: 9px 0; font-family: inherit; font-size: 12.5px; text-transform: none; letter-spacing: 0; }
+.gov-more-dl .dd { padding: 9px 0; }
+@media (max-width: 720px) { .gov-more-dl { grid-template-columns: 1fr; } .gov-more-dl .dd { padding-top: 2px; } }
+
+/* Comments: no card per comment; a hairline between threads, a rule beside replies. */
+.cmt-toolbar:has(> .gov-h2) { margin: 30px 0 12px; align-items: center; }
+.cmt-toolbar > .gov-h2 { margin: 0; }
+.cmt-toolbar-end { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.cmt-thread .cmt-list { gap: 0; }
+.cmt-thread .cmt { background: none; border: 0; border-top: 1px solid var(--separator); border-radius: 0; padding: 16px 0; }
+.cmt-thread .cmt-list > .cmt:first-child { border-top: 0; padding-top: 4px; }
+.cmt-thread .cmt.cmt-reply { border-top: 0; padding: 10px 0 4px; }
+.cmt-thread .cmt.cmt-target { box-shadow: inset 3px 0 0 var(--lavender); padding-left: 12px; }
+.cmt-thread .cmt-replies { margin: 8px 0 0 4px; padding-left: 14px; gap: 0; }
+.cmt-body.clamped { max-height: 186px; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); mask-image: linear-gradient(to bottom, #000 70%, transparent); }
+.cmt-thread .gov-more { margin: 8px 0 4px; }
+.cmt-head .gov-position { padding: 0; background: none; color: var(--text-low); }
+.cmt-head .gov-position.aye .gov-position-side { color: var(--green-text); font-weight: 600; }
+.cmt-head .gov-position.nay .gov-position-side { color: var(--red-text); font-weight: 600; }
+.cmt-head .gov-position.split .gov-position-side { color: var(--text-medium); font-weight: 600; }
+.cmt-compose-placeholder { padding: 0; border: 0; font-size: 12.5px; }
+/* "Oldest ▾": the order and the voters-only filter in one small popover. */
+.cmt-menu { position: relative; }
+.cmt-menu-btn { display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 10px 0 12px; border-radius: 9999px; border: 1px solid var(--border); background: transparent; color: var(--text-medium); font: inherit; font-size: 12.5px; cursor: pointer; }
+.cmt-menu-btn svg { width: 12px; height: 12px; }
+.cmt-menu-btn:hover, .cmt-menu-btn[aria-expanded="true"] { color: var(--text-high); background: var(--panel-hover); }
+.cmt-menu-btn:focus-visible, .cmt-menu-item:focus-visible, .fc-collapsed:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.cmt-menu-pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 176px; padding: 6px; display: grid; gap: 2px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-elev2); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); }
+.cmt-menu-item { min-height: 32px; padding: 0 10px; text-align: left; border: 0; border-radius: 8px; background: none; color: var(--text-medium); font: inherit; font-size: 13px; cursor: pointer; }
+.cmt-menu-item:hover { color: var(--text-high); background: var(--panel-hover); }
+.cmt-menu-item[aria-pressed="true"] { color: var(--text-high); font-weight: 600; }
+.cmt-menu-item[aria-pressed="true"]::after { content: ' ✓'; color: var(--text-low); font-weight: 400; }
+.cmt-menu-check { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-top: 4px; padding: 4px 10px 0; border-top: 1px solid var(--separator); font-size: 13px; color: var(--text-medium); cursor: pointer; }
+/* The thread's comment box at rest: one line that opens the sign-in prompt or the editor. */
+.fc-collapsed { display: block; width: 100%; height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text-low); font: inherit; font-size: 14px; text-align: left; cursor: text; }
+.fc-collapsed:hover { border-color: color-mix(in srgb, var(--text-low) 70%, transparent); color: var(--text-medium); }
+@media (pointer: coarse) { .cmt-menu-btn, .fc-collapsed { height: 44px; } .cmt-menu-item, .cmt-menu-check { min-height: 44px; } }
+@media (max-width: 720px) { .cmt-thread .cmt { padding: 14px 0; } }
+
+/* A long post: the contents list holds the top two levels and scrolls inside itself;
+   long code blocks and tall images are cut down until asked for. */
+@media (min-width: 1100px) {
+  .gov-post-layout:has(.gov-post-toc) .gov-post-aside { max-height: calc(100vh - 120px); overflow: auto; overscroll-behavior: contain; }
+}
+.gov-post-toc .toc-l1 button { padding-left: 22px; font-size: 12.5px; }
+.gov-post-md pre[data-clamp="on"] { max-height: 420px; max-height: calc(16lh + 24px); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent); mask-image: linear-gradient(to bottom, #000 80%, transparent); }
+.md-body .md-pre-more { max-width: 75ch; margin: -6px 0 14px; }
+.gov-post-md .md-img { width: auto; max-height: 520px; object-fit: contain; }
+.md-body a.md-img-open { display: block; width: fit-content; max-width: 100%; text-decoration: none; cursor: zoom-in; }
+.md-body a.md-img-open:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; border-radius: 10px; }
+
+/* A post page's meta line (topics, linked items) and the discussions list. */
+.gov-post-sub { flex: 1 1 auto; min-width: 0; align-self: center; font-size: 12.5px; color: var(--text-low); }
+.gov-post-sub .hash { font-size: inherit; }
+.gov-discs-page .gov-disc-excerpt { -webkit-line-clamp: 1; line-clamp: 1; }
+.gov-discs-page .gov-disc-meta :is(.gov-label, .gov-linked) { padding: 0; border: 0; border-radius: 0; background: none; color: var(--text-low); font-size: 12px; }
+.gov-discs-page .gov-disc-meta a.gov-linked { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 2px; }
+.gov-discs-page .gov-disc-meta a.gov-linked:hover { color: var(--text-high); }
+.gov-discs-page .gov-disc-meta :is(.gov-label, .gov-linked)::before { content: '·'; margin-right: 5px; }
+@media (max-width: 720px) {
+  .gov-discs-page .gov-disc-excerpt { display: none; }
+}
+
+/* ============ GOVERNANCE HUB AND LISTS (pages/Governance*.tsx, components/gov) ============ */
+/* Card and section titles are Geist; the serif is kept for the h1, section h2s and the verdict. */
+.gov-h3 { font-family: 'Geist', system-ui, sans-serif; font-size: 15px; font-weight: 600; }
+/* A count beside a heading: a small neutral bubble. */
+.gov-count { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 20px; padding: 0 7px; border-radius: 9999px; background: color-mix(in srgb, var(--text-high) 9%, transparent); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; font-weight: 500; color: var(--text-medium); align-self: center; }
+/* The page's Terms fold sits right under its title. */
+.gov-head-terms { margin: -12px 0 18px; }
+/* Statuses: settled-yes is plain text; a pill only for a live state or a failed/stopped one. */
+.gov-status-text { font-size: 12.5px; color: var(--text-medium); white-space: nowrap; }
+.badge.gov-status { font-family: 'Geist', system-ui, sans-serif; font-size: 11.5px; text-transform: none; letter-spacing: 0; padding: 2px 9px; white-space: nowrap; }
+.badge.gov-status.bad { background: transparent; border: 1px solid color-mix(in srgb, var(--red) 50%, transparent); color: var(--red-text); }
+.badge.gov-status.bad.stopped { border-color: color-mix(in srgb, var(--amber) 55%, transparent); color: var(--amber-text); }
+/* Filter chips on these pages: a neutral filled state (pink is for navigation). */
+:is(.gov-hub, .gov-me) .activity-chip.on { background: color-mix(in srgb, var(--text-high) 10%, transparent); border-color: color-mix(in srgb, var(--text-high) 24%, transparent); color: var(--text-high); }
+/* The hub's tab strip scrolls on a phone: a fade at its right edge says there is more. */
+@media (max-width: 720px) {
+  .gov-hub .detail-tabs { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); padding-right: 36px; }
+}
+
+/* Live cards: one link (the title) stretched over the card, the reader's state in the corner. */
+.gov-cards .gov-card-verdict { color: var(--text-high); }
+.gov-card:hover { border-color: color-mix(in srgb, var(--text-high) 28%, transparent); }
+.gov-card-link { color: inherit; text-decoration: none; }
+.gov-card-link::after { content: ''; position: absolute; inset: 0; border-radius: inherit; }
+.gov-card-link:focus-visible { outline: none; }
+.gov-card:has(.gov-card-link:focus-visible) { outline: 2px solid var(--sky); outline-offset: 2px; }
+.gov-card-foot { min-height: 34px; }
+.gov-card-where { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; color: var(--text-low); }
+.gov-card-mine { position: relative; z-index: 1; margin-left: auto; display: inline-flex; align-items: center; }
+.gov-card-voted { font-size: 12px; color: var(--text-medium); padding: 3px 9px; border: 1px solid var(--separator); border-radius: 9999px; white-space: nowrap; }
+.skeleton.gov-card-sk { height: 169px; border-radius: 14px; }
+/* The heading's own margins move to the row, so the heading and the actions centre on one line
+   and, wrapped under it on a narrow screen, the actions keep a gap to the heading and the cards. */
+.gov-hub-head { align-items: center; row-gap: 12px; margin: 30px 0 16px; }
+.gov-hub-head .gov-h2 { margin: 0; }
+.gov-hub-partial { margin: -8px 0 8px; font-size: 12.5px; color: var(--text-medium); }
+.gov-hub-partial a { color: var(--text-medium); text-decoration: underline; text-underline-offset: 2px; }
+.gov-hub-partial a:hover { color: var(--text-high); }
+/* Below the cards: discussions and dates as plain columns, no card around them. */
+.gov-hub .gov-hub-grid { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px 48px; margin-top: 36px; }
+.gov-hub .gov-hub-grid.gov-hub-grid-one { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 860px) { .gov-hub .gov-hub-grid { grid-template-columns: minmax(0, 1fr); gap: 28px; } }
+.gov-hub-col .gov-hub-card-head { margin-bottom: 4px; }
+.gov-disc.compact { padding: 9px 0; }
+.gov-disc.compact .gov-disc-title { font-size: 14px; }
+.gov-disc.compact .gov-disc-meta { gap: 0; margin-top: 2px; color: var(--text-low); }
+.gov-disc.compact .gov-disc-meta > span + span::before { content: '·'; padding: 0 6px; }
+.gov-hub-foot { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 36px 0 8px; padding-top: 14px; border-top: 1px solid var(--separator); font-size: 12.5px; }
+.gov-hub-foot a { color: var(--text-medium); min-height: 24px; display: inline-flex; align-items: center; }
+.gov-hub-foot a:hover { color: var(--text-high); }
+
+/* A popover under a button (feed and calendar URLs, the accounts list, the quick-vote menu). */
+.gov-pop-wrap { position: relative; display: inline-flex; }
+.gov-pop-wrap:has(> .gov-pop) { z-index: 45; }
+/* The page's top-level blocks rise in with a transform animation that stays applied
+   (fill-mode both), so each is its own stacking context and a later block paints
+   over an earlier one whatever z-index sits inside it: the block holding an open
+   popover is lifted as a whole. */
+.wrap > :has(.gov-pop) { position: relative; z-index: 45; }
+.gov-pop { position: absolute; z-index: 40; top: calc(100% + 6px); right: 0; width: max-content; max-width: min(380px, calc(100vw - 32px)); padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-elev2); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.24); font-size: 13px; line-height: 1.5; color: var(--text-medium); text-align: left; white-space: normal; }
+.gov-pop-note { margin: 0 0 10px; }
+.gov-pop-sub { margin: 4px 0 0; font-size: 12px; font-weight: 600; color: var(--text-medium); }
+.gov-pop-url { display: flex; align-items: center; gap: 8px; }
+.gov-pop-url code { flex: 1 1 auto; min-width: 0; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; padding: 4px 8px; border-radius: 6px; background: var(--panel-hover); overflow-x: auto; white-space: nowrap; }
+.gov-sub-pop .gov-pop { width: min(380px, calc(100vw - 32px)); }
+.gov-filters .gov-sub-pop { margin-left: auto; }
+
+/* `Vote ▾`: the composer button and, joined to it, the quick add-to-cart menu. */
+.gov-split { display: inline-flex; align-items: center; }
+.gov-split.has-menu .gov-split-main { border-radius: 9999px 0 0 9999px; padding-right: 12px; }
+.gov-split-more { border-radius: 0 9999px 9999px 0; padding: 0 9px; margin-left: -1px; }
+.gov-split-more.gov-btn-primary { box-shadow: inset 1px 0 0 color-mix(in srgb, var(--action-on) 35%, transparent); }
+.gov-split-more svg { width: 14px; height: 14px; }
+.gov-split-cart { margin-right: 10px; font-size: 12px; color: var(--text-medium); white-space: nowrap; }
+.gov-split-pop .gov-pop { padding: 6px; }
+.gov-split-menu { display: grid; gap: 2px; min-width: 190px; }
+.gov-split-item { text-align: left; padding: 8px 10px; min-height: 32px; border-radius: 8px; font-size: 13px; color: var(--text-high); }
+.gov-split-item:hover { background: var(--panel-hover); }
+.gov-split-item.on { font-weight: 600; }
+
+/* Referenda and motions tables. */
+.gov-title-cell .gov-cell-sub { font-size: 12px; color: var(--text-low); }
+.gov-row-talk { color: var(--text-low); }
+/* The committee: the label, the members and the bell on one line, the bell
+   right-aligned at its end; narrower, the members wrap under the label and the
+   bell stays at the right of the label's line. */
+.gov-tc-members { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: 'label pills bell'; align-items: center; gap: 10px 14px; margin: 4px 0 18px; }
+.gov-tc-label { grid-area: label; font-size: 13px; font-weight: 600; color: var(--text-high); white-space: nowrap; display: inline-flex; align-items: center; }
+.gov-tc-label .muted { font-weight: 400; margin-left: 4px; }
+.gov-tc-members .sec-pills { grid-area: pills; margin: 0; }
+.gov-tc-members > .notify-wrap { grid-area: bell; justify-self: end; }
+@media (max-width: 899px) { .gov-tc-members { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'label bell' 'pills pills'; } }
+/* Its placeholder holds the row's height at each width (the pills wrap to more lines as it narrows). */
+.skeleton.gov-tc-card-sk { height: 32px; margin: 4px 0 18px; border-radius: 10px; }
+@media (max-width: 1099px) { .skeleton.gov-tc-card-sk { height: 62px; } }
+@media (max-width: 899px) { .skeleton.gov-tc-card-sk { height: 123px; } }
+@media (max-width: 480px) { .skeleton.gov-tc-card-sk { height: 152px; } }
+/* The archive: one collection at a time, List or Table. */
+.gov-archive-chips { margin: 0 0 12px; gap: 6px; }
+.gov-archive-chips .activity-chip { padding: 6px 11px; }
+.gov-chip-n { margin-left: 6px; color: var(--text-low); }
+.activity-chip.on .gov-chip-n { color: var(--text-medium); }
+.gov-view-toggle { display: inline-flex; gap: 2px; padding: 2px; margin: 0 0 12px; border: 1px solid var(--border); border-radius: 9999px; }
+.gov-view-toggle button { min-height: 26px; padding: 0 12px; border-radius: 9999px; font-size: 12px; color: var(--text-medium); }
+.gov-view-toggle button:hover { color: var(--text-high); }
+.gov-view-toggle button.on { background: color-mix(in srgb, var(--text-high) 10%, transparent); color: var(--text-high); }
+
+/* /governance/me: ribbon, account chips + Manage accounts, needs-vote lines. */
+.gov-ribbon { margin: 0 0 16px; align-items: flex-start; }
+/* On wider screens the four figures share the card's width instead of bunching at its left. */
+@media (min-width: 721px) { .ribbon.standalone.gov-ribbon { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); row-gap: 12px; } .gov-ribbon .rs { display: none; } }
+.gov-ribbon .v.good { color: var(--green-text); }
+.gov-me-accounts { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 0 20px; }
+.gov-me-accounts .activity-chips { margin: 0; flex: 1 1 auto; }
+.gov-me-one { font-size: 12px; color: var(--text-medium); }
+@media (max-width: 720px) {
+  .gov-me-accounts .activity-chips { flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); padding-right: 28px; }
+  .gov-me-accounts .activity-chips::-webkit-scrollbar { display: none; }
+  .gov-me-accounts .activity-chip { flex: 0 0 auto; }
+  .gov-archive-chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); padding-right: 28px; }
+  .gov-archive-chips::-webkit-scrollbar { display: none; }
+  .gov-archive-chips .activity-chip { flex: 0 0 auto; }
+}
+.gov-manage { margin-left: auto; }
+.gov-manage .gov-pop { width: min(400px, calc(100vw - 32px)); display: grid; gap: 8px; }
+.gov-manage .gov-wallets { margin-bottom: 4px; }
+.gov-manage .gov-fineprint { margin: 0; }
+.gov-needs .gov-h2 { margin-top: 8px; }
+.gov-needs-list { list-style: none; margin: 0; padding: 0; }
+.gov-needs-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 4px 16px; padding: 8px 0; border-bottom: 1px solid var(--separator); }
+.gov-needs-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; color: var(--text-high); }
+.gov-needs-title:hover { color: var(--accent-text); }
+.gov-needs-meta { font-size: 12px; color: var(--text-low); white-space: nowrap; }
+.skeleton.gov-needs-sk { height: 52px; border-radius: 10px; margin: 8px 0; }
+@media (max-width: 720px) {
+  .gov-needs-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .gov-needs-title { grid-column: 1 / -1; white-space: normal; }
+  /* Beside the Vote button the meta wraps instead of running under it. */
+  .gov-needs-meta { white-space: normal; min-width: 0; line-height: 1.45; }
+}
+/* An account's sections: no box around the unlock schedule; empty sections are one line; folds for the rest. */
+.gov-account .gov-lock-card { padding: 0; border: 0; background: none; }
+.gov-account .gov-lock-card + .gov-lock-card { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--separator); }
+.gov-empty-line { margin-top: 18px; color: var(--text-low); }
+.gov-account .gov-fold { margin-top: 12px; }
+.gov-account .gov-section + .gov-fold, .gov-empty-line + .gov-fold { margin-top: 18px; }
+.gov-history .panel { overflow-x: auto; }
+.gov-proxies .gov-label.ok, .gov-proxies .gov-label.gov-label-no { background: none; padding: 0; margin-left: 4px; }
+.gov-proxies .gov-label.gov-label-no { color: var(--red-text); }
+
+/* A track's further rules, folded under its main facts. */
+.gov-track-more { margin: 0 0 8px; }
+.gov-track-more .gov-track-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+@media (max-width: 860px) { .gov-track-more .gov-track-facts { grid-template-columns: minmax(0, 1fr); } }
+
+/* Governance lists on a phone: a row is a title line and one meta line, not a labelled card. */
+@media (max-width: 720px) {
+  .tbl.gov-list-tbl tbody tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 11px 14px; }
+  .tbl.gov-list-tbl tbody td { padding: 0; text-align: left; font-size: 12.5px; color: var(--text-medium); overflow: visible; }
+  .tbl.gov-list-tbl tbody td[data-label]::before { display: none; }
+  .tbl.gov-list-tbl tbody td.gov-title-cell { flex: 1 1 calc(100% - 64px); order: -1; font-size: 13.5px; color: var(--text-high); }
+  .tbl.gov-list-tbl tbody td[data-label="#"] { order: -2; }
+  .tbl.gov-list-tbl tbody td[data-label="When"] { margin-left: auto; }
+  .tbl.gov-list-tbl tbody td[data-label="Your vote"]::before { display: inline; content: 'Your vote '; float: none; margin: 0; font: inherit; text-transform: none; letter-spacing: 0; color: var(--text-low); }
+  .tbl.gov-list-tbl tbody td[data-label="HDX"]::after { content: ' HDX'; }
+  .tbl.gov-votes-tbl.gov-list-tbl .gov-title-cell, .tbl.gov-votes-tbl.gov-list-tbl .gov-after { text-align: left; }
+  .tbl.gov-list-tbl .gov-row-meters { max-width: none; }
+  /* A tag's running referenda on a phone: the title, then "12 members · Aye 12.3B · Nay 988k", the status at the end. */
+  .tbl.gov-members-tbl tbody td.gov-title-cell { flex-basis: 100%; }
+  .tbl.gov-members-tbl tbody td[data-label="Members"]::after { content: ' members'; color: var(--text-low); }
+  .tbl.gov-members-tbl tbody td[data-label="Aye HDX"]::before { content: 'Aye '; color: var(--text-low); }
+  .tbl.gov-members-tbl tbody td[data-label="Nay HDX"]::before { content: 'Nay '; color: var(--text-low); }
+  .tbl.gov-members-tbl tbody td[data-label="Abstain HDX"]::before { content: 'Abstain '; color: var(--text-low); }
+  .tbl.gov-members-tbl tbody td[data-label="Aye HDX"]::before, .tbl.gov-members-tbl tbody td[data-label="Nay HDX"]::before, .tbl.gov-members-tbl tbody td[data-label="Abstain HDX"]::before { display: inline; float: none; margin: 0; font: inherit; text-transform: none; letter-spacing: 0; }
+  .tbl.gov-members-tbl tbody td:has(> .muted:only-child) { display: none; }
+  .tbl.gov-members-tbl tbody td[data-label="Status"] { margin-left: auto; }
+}
+/* ============ ACCESSIBILITY FIXES (governance) ============ */
+/* An address drawn inside a vote bubble sits on the bubble's tint: it takes the text colour, in both themes. */
+.vb-bubble .vb-addr, .vb-bubble .vb-addr .addr-head { color: var(--text-high); }
+/* A post image that opens full size is a target of its own, even before the image has loaded. */
+.md-body a.md-img-open { min-width: 24px; min-height: 24px; }
+/* The author pill in a discussion row is a link: at least 24px tall. */
+.gov-disc-meta .addr-pill { min-height: 24px; align-items: center; }
+
+/* ============ DEPOSITS ============ */
+/* A referendum's deposits in its Status section, and an account's Deposits list (components/gov/Deposits.tsx). */
+.gov-ref-status-deposits.gov-dep-place { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: -4px 0 14px; }
+.gov-dep-note { font-size: 12px; color: var(--text-low); }
+.gov-ref-status-deposits.gov-dep-lines { list-style: none; margin: -6px 0 14px; padding: 0; display: grid; gap: 4px; }
+.gov-dep-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 12.5px; color: var(--text-medium); }
+.gov-dep-open { color: var(--text-high); font-weight: 600; }
+.gov-dep-acts { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gov-btn.gov-btn-sm { height: 28px; padding: 0 12px; font-size: 12px; }
+.gov-dep-cart { font-size: 12px; min-height: 24px; }
+.gov-dep-cart[aria-pressed="true"] { color: var(--text-medium); }
+/* Each deposit's label and value are a pair of cells in the details grid, not one cell. */
+.gov-dep-fact { display: contents; }
+.gov-dep-fact .dd { flex-wrap: wrap; gap: 4px; align-items: center; }
+.gov-dep-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin: 2px 0 8px; }
+.gov-dep-list { list-style: none; margin: 0; padding: 0; }
+.gov-dep-row { display: flex; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 10px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.gov-dep-row:last-child { border-bottom: 1px solid var(--border); }
+.gov-dep-main { display: grid; gap: 2px; min-width: 0; flex: 1 1 260px; }
+.gov-dep-main .gov-deadline-title { overflow-wrap: anywhere; }
+.gov-dep-meta { font-size: 12px; color: var(--text-low); }
+.gov-dep-hash { font-size: 13px; color: var(--text-high); }
+.gov-deposits-sec .gov-h3 .gov-info { margin-left: 4px; }
+.action-list .cart-title { overflow-wrap: anywhere; }
+.action-summary { margin: 0 0 6px; font-size: 13.5px; color: var(--text-high); line-height: 1.5; }
+.action-all { margin-top: 2px; }
+.action-all .cart-list { max-height: 320px; overflow-y: auto; }
+.action-steps { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 2px; font-size: 12.5px; color: var(--text-low); }
+.action-step { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+.action-step-mark { width: 12px; flex: none; text-align: center; font-family: 'GeistMono', ui-monospace, monospace; }
+.action-step.current { color: var(--text-high); font-weight: 600; }
+.action-step.done { color: var(--text-medium); }
+.action-step.done .action-step-mark { color: var(--green-text); }
+.action-step.stopped { color: var(--red-text); }
+
+/* ============ STATS ============ */
+/* The hub's Stats view (components/gov/GovStats.tsx). */
+.treas-ribbon-sk { height: 74px; border-radius: 14px; margin: 0 0 24px; }
+.gov-hub-head-actions { display: inline-flex; align-items: center; gap: 10px; }
+.gov-hub-head-actions .gov-btn { height: 30px; font-size: 12px; }
+.stats-turnout svg { touch-action: pan-y; cursor: crosshair; }
+.stats-bar { display: inline-flex; align-items: center; gap: 10px; min-width: 160px; }
+.stats-bar-track { flex: 1 1 auto; height: 6px; border-radius: 3px; background: var(--separator); overflow: hidden; min-width: 80px; }
+.stats-bar-fill { display: block; height: 100%; border-radius: 3px; background: var(--chart-neutral); }
+.gov-stats .pf-card .gov-fineprint { margin: 8px 2px 0; }
+@media (max-width: 720px) {
+  .gov-stats .hdx-ax { font-size: 30px; }
+  .stats-bar { min-width: 0; width: 100%; }
+}
+
+/* ============ PROPOSE ============ */
+/* /governance/propose: a five-step stepper (a real sequence), one step's form below it. */
+.gov-propose { max-width: 860px; }
+.pp-steps { list-style: none; margin: 4px 0 28px; padding: 0 0 2px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--separator); }
+.pp-steps::-webkit-scrollbar { display: none; }
+.pp-steps li { flex: 0 0 auto; }
+.pp-step { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 10px 8px 2px; font-size: 13.5px; color: var(--text-low); background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; font-family: inherit; }
+button.pp-step { cursor: pointer; color: var(--text-medium); }
+button.pp-step:hover { color: var(--text-high); }
+.pp-steps li.on .pp-step { color: var(--text-high); font-weight: 600; border-bottom-color: var(--accent); }
+.pp-step-n { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); font-family: 'GeistMono', monospace; font-size: 11.5px; color: var(--text-medium); }
+.pp-steps li.on .pp-step-n { border-color: var(--text-high); color: var(--text-high); }
+.pp-steps li.done .pp-step-n { background: var(--bg-elev2); }
+/* Choices are a neutral filled state, as on the other governance pages (pink marks navigation only). */
+.gov-propose .activity-chip.on { background: color-mix(in srgb, var(--text-high) 10%, transparent); border-color: color-mix(in srgb, var(--text-high) 24%, transparent); color: var(--text-high); }
+.pp-step-body { display: grid; gap: 16px; }
+.pp-step-body > .gov-h2 { margin: 0; }
+.pp-lede { margin: -6px 0 0; color: var(--text-medium); font-size: 14px; max-width: 64ch; }
+.pp-meta { font-size: 12px; color: var(--text-low); }
+.pp-meta a { text-decoration: underline; text-decoration-color: var(--separator); text-underline-offset: 2px; }
+.pp-form { display: grid; gap: 16px; }
+.pp-amount { display: flex; align-items: center; gap: 8px; max-width: 320px; }
+.pp-unit { font-size: 13px; color: var(--text-medium); }
+.pp-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-medium); }
+.pp-inline .pe-input.pp-narrow { width: 160px; flex: 0 0 auto; }
+.pp-area { height: auto; padding: 10px 12px; resize: vertical; line-height: 1.45; }
+textarea.pp-area.mono { font-size: 13px; word-break: break-all; }
+.pp-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+.pp-hint { font-size: 12.5px; color: var(--text-low); }
+.pp-from { display: grid; gap: 8px; padding-top: 8px; }
+.pp-from-list { list-style: none; margin: 0; padding: 0; }
+.pp-from-list li { display: flex; flex-wrap: nowrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; padding: 8px 0; border-top: 1px solid var(--separator); }
+.pp-from-list .link-btn { text-align: left; min-height: 24px; flex: 1 1 0; min-width: 0; }
+.pp-from-list .pp-meta { flex: 0 0 auto; white-space: nowrap; }
+.pp-preview { display: grid; gap: 8px; padding-top: 4px; }
+.pp-preview .gov-h3 { margin: 0; }
+.pp-facts { display: grid; gap: 0; margin: 0; }
+.pp-facts > div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-top: 1px solid var(--separator); font-size: 14px; }
+.pp-facts > div:last-child { border-bottom: 1px solid var(--separator); }
+.pp-facts dt { color: var(--text-low); font-size: 12.5px; padding-top: 1px; }
+.pp-facts dd { margin: 0; min-width: 0; color: var(--text-high); }
+.pp-break { overflow-wrap: anywhere; }
+.pp-tracks { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.pp-track { display: grid; gap: 4px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text-high); font: inherit; cursor: pointer; min-height: 44px; }
+.pp-track:hover:not(:disabled) { border-color: var(--text-low); }
+.pp-track.on { border-color: var(--text-high); box-shadow: inset 0 0 0 1px var(--text-high); }
+.pp-track:disabled { cursor: not-allowed; background: transparent; }
+.pp-track:disabled .pp-track-name { color: var(--text-medium); }
+.pp-cannot { color: var(--red-text); }
+.pp-track-name { font-size: 14px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
+.pp-tag { font-size: 11px; font-weight: 500; color: var(--text-medium); border: 1px solid var(--separator); border-radius: 999px; padding: 0 7px; }
+.pp-rules { display: grid; gap: 10px; }
+.pp-rules .gov-ribbon { margin: 0; }
+.pp-check { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; color: var(--text-high); }
+.pp-check input { margin-top: 3px; width: 16px; height: 16px; }
+.pp-sign { padding-top: 4px; }
+/* On the page (not a sheet) Sign stays in the flow: a bar stuck to the screen's foot would cover the deposits it follows. */
+.gov-propose .pp-sign .vote-sign-bar { position: static; margin: 0; padding: 0; border-top: 0; background: none; }
+.pp-deposits { display: grid; gap: 0; margin: 0; }
+.pp-deposits > div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--separator); font-size: 13.5px; }
+.pp-deposits dt { color: var(--text-medium); }
+.pp-deposits dd { margin: 0; text-align: right; color: var(--text-high); }
+.pp-deposits dd .mono { font-size: 13px; }
+.pp-deposits dd .muted { font-size: 12px; }
+.pp-deposits-total { border-bottom: 1px solid var(--separator); font-weight: 600; }
+.pp-done { display: grid; gap: 12px; justify-items: start; padding: 4px 0; }
+.pp-spend { margin: 0; font-size: 14px; color: var(--text-high); }
+.pp-warn { margin: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 8%, transparent); color: var(--text-high); font-size: 13.5px; display: grid; gap: 10px; justify-items: start; }
+.pp-warn p { margin: 0; }
+.pp-deposit-next { display: grid; gap: 6px; justify-items: start; }
+.pp-deposit-next .pp-meta, .pp-done .pp-meta { margin: 0; }
+.pp-done p { margin: 0; }
+.pp-draft-note { margin-top: 32px; }
+@media (max-width: 720px) {
+  .pp-facts > div { grid-template-columns: 1fr; gap: 2px; }
+  .pp-deposits > div { flex-direction: column; gap: 2px; }
+  .pp-deposits dd { text-align: left; }
+  .pp-step { font-size: 13px; padding-right: 6px; }
+}

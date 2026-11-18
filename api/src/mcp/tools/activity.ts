@@ -82,47 +82,46 @@ function ceilingFor(scope: Scope, type: string, windowed: boolean): Ceiling | nu
 /* ============ schema ============ */
 
 const SHAPE = {
-  scope: z.enum(['global', 'account', 'tag', 'asset', 'block', 'extrinsic']).optional().describe('Optional, and normally inferred from whichever target you set. Pass it only to state the intent explicitly; it must agree with the target.'),
-  account: z.string().min(1).max(128).optional().describe('An address in any form (SS58 of any prefix, AccountId32, EVM H160). Rows are scoped to the account\'s whole RELATED set — its proxies, its bound EVM account, the multisigs it belongs to.'),
-  tag: z.string().min(1).max(64).optional().describe('A system tag id (e.g. `treasury`). Rows are every tagged member\'s activity.'),
-  asset: z.string().min(1).max(64).optional().describe('An asset id or symbol. This is a SCOPE SWITCH, not a filter: it moves the read to that asset\'s FULL history instead of the recent global window (and costs up to ~40 s on a cold read). To filter a feed by asset without changing the scope, use `token` instead.'),
-  block: z.number().int().min(0).optional().describe('A block height. Returns that block\'s whole classified activity, unpaged; the other filters do not apply.'),
-  extrinsic: z.string().min(1).max(128).optional().describe('An extrinsic hash or a `height-index` coordinate. Returns the activity that one extrinsic produced; the other filters do not apply.'),
-  type: z.enum(ACTIVITY_TYPES).optional().describe('Activity family (default all). Read the traps in this description first: type=dca does NOT narrow to DCA, and type=trade is a family.'),
-  action: z.string().min(1).max(32).optional().describe('Sub-filter within a type; the accepted values are listed per type in this description. An unrecognised value is NOT an error upstream — it silently matches nothing.'),
-  token: z.string().min(1).max(64).optional().describe('An asset symbol or id the row must reference. Matches every asset the source event touched, including nested pool assets and both legs of a pair. A Hydrated pool\'s product name (GDOT, HUSDT, HEURC…) or its wrapper id names the pool share displayed under it too, so its add/remove-liquidity rows and trades routed through it match; the share\'s own id names the share alone. An unknown token silently returns nothing.'),
+  scope: z.enum(['global', 'account', 'tag', 'asset', 'block', 'extrinsic']).optional().describe('Normally inferred from the target you set; if passed it must agree with it.'),
+  account: z.string().min(1).max(128).optional().describe('Any address form (SS58 any prefix, AccountId32, H160); scoped to its whole related set.'),
+  tag: z.string().min(1).max(64).optional().describe('A system tag id (e.g. `treasury`): every member\'s activity.'),
+  asset: z.string().min(1).max(64).optional().describe('Asset id or symbol. A SCOPE SWITCH to its FULL history (up to ~40 s cold), not a filter — use `token` to filter.'),
+  block: z.number().int().min(0).optional().describe('A block height: its whole activity, unpaged; other filters do not apply.'),
+  extrinsic: z.string().min(1).max(128).optional().describe('Extrinsic hash or `height-index`: its activity; other filters do not apply.'),
+  type: z.enum(ACTIVITY_TYPES).optional().describe('Activity family (default all). type=dca does NOT narrow to DCA; type=trade is a family.'),
+  action: z.string().min(1).max(32).optional().describe('Sub-filter within a type; values listed per type in the description.'),
+  token: z.string().min(1).max(64).optional().describe('Symbol or id the row must reference: any asset the event touched, nested pool assets and both legs included. A Hydrated pool\'s product name (GDOT, HUSDT…) or wrapper id also matches its pool share\'s liquidity rows and routed trades; the share\'s own id names the share alone. An unknown token silently returns nothing.'),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Inclusive lower day bound, `YYYY-MM-DD`.'),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Inclusive upper day bound, `YYYY-MM-DD`.'),
-  minUsd: z.number().optional().describe('Floor on the row\'s own value. In USD unless `unit` is `token`, in which case it is a floor on the token amount.'),
-  minRevenueUsd: z.number().optional().describe('Floor on the PROTOCOL REVENUE of the row\'s extrinsic, always in USD — a different quantity from the row\'s own value.'),
+  minUsd: z.number().optional().describe('Floor on the row\'s own value: USD, or token amount when `unit` is `token`.'),
+  minRevenueUsd: z.number().optional().describe('Floor on the PROTOCOL REVENUE of the row\'s extrinsic, USD — not the row\'s value.'),
   unit: z.enum(['usd', 'token']).optional().describe('What `minUsd` means (default usd).'),
-  identity: z.enum(['named', 'unnamed']).optional().describe('Keep only rows whose actor the explorer can name (`named`) or cannot (`unnamed`).'),
+  identity: z.enum(['named', 'unnamed']).optional().describe('Only rows whose actor the explorer can (`named`) or cannot (`unnamed`) name.'),
   limit: z.number().int().min(1).max(100).optional().describe(`Rows per page (default ${DEFAULT_LIMIT}, max 100).`),
-  offset: z.number().int().min(0).optional().describe('Rows to skip. Hard-capped per category — see the ceilings in this description; the tool refuses past them and says how to narrow.'),
+  offset: z.number().int().min(0).optional().describe('Rows to skip; capped per category (see OFFSET CEILINGS).'),
   format: formatParam,
 }
 const ACTION_TABLE = Object.entries(ACTIVITY_ACTIONS)
   .map(([type, actions]) => `  - type=${type}: ${actions.join(', ')}`)
   .join('\n')
 
-const DESCRIPTION = `The classified Hydration activity feed: what people actually DID, one economic action per row, with the internal plumbing legs suppressed, every amount scaled and named, valued in USD, and linked to its own Explorer page.
+const DESCRIPTION = `The classified Hydration activity feed: what people actually DID, one economic action per row (plumbing legs suppressed), amounts scaled and named, valued in USD, each linked to its Explorer page.
 
-This is the tool for "what happened" — recently, in a block or extrinsic, to an account or tag, or over one asset's history. It is NOT a raw event log: a DCA execution is one trade line, not four transfers, and a router swap one swap, not its hops. For the interpreted record of a single thing you already identified, use inspect_entity; for an account's balance sheet, use get_account.
+Use it for "what happened" — recently, in a block or extrinsic, to an account or tag, or over one asset's history. Not a raw event log: a DCA execution is one trade line, a router swap one swap. For one identified thing use inspect_entity; for a balance sheet, get_account.
 
-SCOPE is chosen by whichever target you set, and you may set at most one: nothing = the recent global feed; \`account\` = that address's feed (scoped to its whole related set — proxies, bound EVM account, multisigs); \`tag\` = every member of a system tag; \`block\` = that block's whole activity, unpaged; \`extrinsic\` = what one extrinsic produced. \`asset\` is a SCOPE SWITCH, not a filter: that asset's FULL history, expensive cold. To filter a feed by asset, keep the scope and pass \`token\`.
+SCOPE is whichever single target you set: none = recent global feed; \`account\` = that address's whole related set (proxies, bound EVM account, multisigs); \`tag\` = every tagged member; \`block\` = the whole block, unpaged; \`extrinsic\` = what one extrinsic produced. \`asset\` is a SCOPE SWITCH to that asset's FULL history (slow cold), not a filter — to filter by asset keep the scope and pass \`token\`.
 
 TYPE vocabulary (default \`all\`): ${ACTIVITY_TYPES.join(', ')}.
 
-ACTION needs a TYPE and is checked here against that type's list, because upstream an \`action\` without a \`type\` is ignored and an unknown one is no error (an empty page; on the global feed ~45 s and a 503):
+ACTION needs a TYPE and is checked here, because upstream an action without a type is ignored and an unknown one silently returns an empty page (on the global feed ~45 s and a 503):
 ${ACTION_TABLE}
-Liquidity \`Rebalance\` and \`Compound\` are a Gamma vault keeper's acts, credited to the keeper; a Compound's amount is the fees it collected and reinvested.
-Juicer: harvest/rebalance is the vault's; unwind/settle/claim the request owner's. BIL: settle/claim are the request controller's.
+Liquidity \`Rebalance\`/\`Compound\` are a Gamma vault keeper's acts, credited to the keeper (a Compound's amount is the fees reinvested). Juicer harvest/rebalance is the vault's; unwind/settle/claim the request owner's. BIL settle/claim are the request controller's.
 
-${ACTIVITY_TYPE_NOTES} For DCA fills only, pass \`type=trade, action=dca\`, or keep the rows flagged \`dca\`. A ROW's own \`type\` is one of ${ACTIVITY_ROW_TYPES.join(', ')} — not the query vocabulary above.
+${ACTIVITY_TYPE_NOTES} For DCA fills only pass \`type=trade, action=dca\`. A ROW's own \`type\` is one of ${ACTIVITY_ROW_TYPES.join(', ')} — not the query vocabulary.
 
-Two more traps. Rows marked **unconfirmed** are not facts yet, in TWO kinds never quoted alike: a transaction-pool row has no block (a zero placeholder height, never printed; dry-run amounts), while a row above the finalized head is in a real block whose height IS quotable — only that block's survival is provisional. The answer states which kind. And there is NO total row count (the upstream counts only votes): never present a page count or "N results found" — page with \`offset\` until a page comes back short.
+Rows marked **unconfirmed** are not facts yet, in TWO kinds: a transaction-pool row has no block (dry-run amounts; never invent a height), while a row above the finalized head sits in a real block whose height IS quotable — only its survival is provisional. There is NO total row count: never say "N results"; page with \`offset\` until a page comes back short.
 
-OFFSET CEILINGS, enforced here: 2,500 on the global feed's wide types (${[...WIDE_TYPES].join(', ')}), 250,000 on its others; 900,000 on an account or tag feed with \`minUsd\` or \`identity\`, else 5,000,000. Past one, move \`from\`/\`to\` rather than paging deeper.`
+OFFSET CEILINGS: 2,500 on the global feed's wide types (${[...WIDE_TYPES].join(', ')}), 250,000 on its others; 900,000 on an account or tag feed with \`minUsd\` or \`identity\`, else 5,000,000. Past one, move \`from\`/\`to\` instead.`
 
 /* ============ handler ============ */
 

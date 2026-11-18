@@ -337,7 +337,7 @@ describe('inspect_entity detection', () => {
   it('reads a pallet-qualified referendum, and always sends summary=1 for a tag', async () => {
     const asReferendum = fake({
       '/explorer/referendum/opengov/410': {
-        pallet: 'opengov', index: 410, title: 'Reduce the weight cap', proposer: null, subsquareUrl: 'https://s.test/410',
+        pallet: 'opengov', index: 410, title: 'Reduce the weight cap', proposer: null,
         track: 1, proposalHash: null, proposalCall: null, status: 'ongoing', enactment: null,
         submittedAt: null, concludedAt: null, asset: HDX, onChainTally: null,
         directTally: { ayes: '0', nays: '0', rawAyes: '0', rawNays: '0', support: '0', ayeVoters: 0, nayVoters: 0, splitVoters: 0, voters: 0 },

@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from '../src/services/explorerAssets.ts'
-import { pageMeta, renderHead, renderPage, renderBody, PUBLIC_URL, UNBOUNDED_PREFIXES, ACTIVITY_PAGES, FIXED_PAGE_PATHS, __testing } from '../src/routes/seo.ts'
+import { setForumSnapshotForTest, type ForumPostMeta } from '../src/services/forumStore.ts'
+import { pageMeta, renderHead, renderPage, renderBody, pagePreloads, parseRouteChunks, renderPreloads, PUBLIC_URL, UNBOUNDED_PREFIXES, ACTIVITY_PAGES, FIXED_PAGE_PATHS, __testing, setReferendumStatusesForTest } from '../src/routes/seo.ts'
 
 // The real shell this rewrites, not a stand-in: what matters is that the regex
 // finds the tags THIS file actually ships, so the test has to read it.
@@ -386,5 +387,130 @@ describe('asset head without a registry name', () => {
     expect(meta.title).toBe('XYZ')
     expect(meta.description).toMatch(/^XYZ on Hydration — /)
     expect(pageMeta('/holders/77777').description).toBe('Who holds XYZ on Hydration, largest first.')
+  })
+})
+
+describe('governance forum pages', () => {
+  const meta = (p: Partial<ForumPostMeta> & { postId: string }): ForumPostMeta => ({
+    kind: 'discussion', title: 't', excerpt: '', bodyFormat: 'markdown', bodyLength: 1, tldr: '', labels: [], linked: [],
+    authorAccountId: '', authorLegacyName: '', authority: 'subsquare', source: 'subsquare', sourceId: 'x', sourceCid: '',
+    sourceRemoved: false, bannerCid: '', pollJson: '', revision: 0, hidden: false, hiddenReason: '', deleted: false, locked: false, moderated: false,
+    createdAt: 0, editedAt: null, lastActivityAt: 0, updatedAt: 0, ...p,
+  })
+  afterEach(() => setForumSnapshotForTest(null))
+
+  it('titles a discussion from the forum store and escapes its hostile text', () => {
+    setForumSnapshotForTest({
+      posts: new Map([
+        ['s5', meta({ postId: 's5', title: 'Fund "x"<b>', excerpt: 'A plan' })],
+        ['s6', meta({ postId: 's6', title: 'Test"><img src=x>', hidden: true, hiddenReason: 'imported-hidden' })],
+        ['council:7', meta({ postId: 'council:7', kind: 'council', title: 'Close the motion' })],
+        ['tc:12', meta({ postId: 'tc:12', kind: 'tc', title: 'Fast-track $& the fix $\'' })],
+      ]),
+    })
+    const visible = pageMeta('/discussions/s5')
+    expect(visible.title).toBe('Fund "x"<b>')
+    expect(visible.crumbs).toEqual([['Home', '/'], ['Governance', '/governance'], ['Discussions', '/discussions']])
+    expect(renderHead(visible, '/discussions/s5')).not.toContain('<b>')
+    // A hidden post: none of its text reaches the head, and it is kept out of the index.
+    const hidden = pageMeta('/discussions/s6')
+    expect(JSON.stringify(hidden)).not.toContain('img')
+    expect(hidden.notFound).toBe(true)
+    expect(pageMeta('/discussions/s999').notFound).toBe(true)
+    expect(pageMeta('/governance/motion/council/7').title).toBe('Close the motion')
+    // A TC motion by its index, and the two index-less early ones by hash@block.
+    expect(pageMeta('/governance/motion/tc/425').notFound).toBe(true)
+    expect(pageMeta(`/governance/motion/tc/0x${'a'.repeat(64)}@1839287`).notFound).toBe(true)
+    expect(pageMeta('/governance/motion/tc/12x').crumbs).toEqual([['Home', '/'], ['Governance', '/governance']])
+    expect(pageMeta('/governance/motion/council/x').notFound).toBe(true)
+  })
+
+  it('routes a TC motion by its index and keeps `$` patterns in a title literal', () => {
+    setForumSnapshotForTest({ posts: new Map([['tc:12', meta({ postId: 'tc:12', kind: 'tc', title: 'Fast-track $& the fix' })]]) })
+    expect(pageMeta('/governance/motion/tc/12').title).toBe('Fast-track $& the fix')
+    const html = renderPage('<html><head><title>x</title></head><body><div id="root"></div></body></html>', '/governance/motion/tc/12')
+    expect(html).toContain('<title>Fast-track $&amp; the fix · Hydration Explorer</title>')
+    expect(html.match(/<\/head>/g)).toHaveLength(1)
+  })
+
+  it('cards a discussion as an article with its dates, and a referendum with its verdict', () => {
+    setForumSnapshotForTest({
+      posts: new Map([['s8', meta({ postId: 's8', title: 'Dated', excerpt: 'Body', createdAt: Date.parse('2026-03-01T10:00:00Z'), editedAt: Date.parse('2026-03-02T10:00:00Z') })]]),
+    })
+    const head = renderHead(pageMeta('/discussions/s8'), '/discussions/s8')
+    expect(head).toContain('<meta property="og:type" content="article" />')
+    expect(head).toContain('<meta property="article:published_time" content="2026-03-01T10:00:00.000Z" />')
+    expect(head).toContain('<meta property="article:modified_time" content="2026-03-02T10:00:00.000Z" />')
+    // A rendered page carries each managed tag once, article dates included.
+    const page = renderPage(renderPage(shell, '/discussions/s8'), '/discussions/s8')
+    expect(page.match(/article:published_time/g)).toHaveLength(1)
+    expect(page.match(/property="og:type"/g)).toHaveLength(1)
+
+    setReferendumStatusesForTest(new Map([['opengov:411', 'confirming']]))
+    try {
+      const ref = pageMeta('/referendum/opengov/411')
+      expect(ref.description.startsWith('Confirming. ')).toBe(true)
+      expect(ref.facts).toContainEqual(['Status', 'confirming'])
+      expect(renderHead(ref, '/referendum/opengov/411')).toContain('content="website"')
+    } finally {
+      setReferendumStatusesForTest(null)
+    }
+  })
+
+  it('says nothing it cannot know before the forum store has loaded', () => {
+    setForumSnapshotForTest(null)
+    expect(pageMeta('/discussions/s5').notFound).toBeUndefined()
+  })
+
+  it('gives the removed tracks, calendar and treasury pages no head of their own', () => {
+    for (const p of ['/governance/tracks', '/governance/tracks/0', '/governance/calendar', '/governance/treasury']) {
+      expect(pageMeta(p).title, p).not.toMatch(/track|calendar|treasury/i)
+    }
+    expect(pageMeta('/governance/me').sessionOnly).toBe(true)
+  })
+})
+
+describe('a page head preloads what its first render needs', () => {
+  const chunks = parseRouteChunks({
+    entry: 'assets/index-Abc123.js',
+    pages: { Referendum: ['assets/Referendum-X1.js', 'assets/markdown-Y2.js', 'assets/forum-Z3.css'], Discussions: ['assets/Discussions-Q.js'] },
+  })
+
+  it('names exactly the api reads the app makes on a fresh load', () => {
+    // These strings are what explorer-ui/src/api/explorer.ts requests: change both together.
+    expect(pagePreloads('/referendum/opengov/450')).toEqual({
+      page: 'Referendum',
+      api: ['/api/explorer/referendum/opengov/450?limit=200', '/api/explorer/forum/post/opengov%3A450', '/api/explorer/forum/thread/opengov%3A450?sort=old&limit=20'],
+    })
+    expect(pagePreloads('/discussions/s160').api).toEqual(['/api/explorer/forum/post/s160', '/api/explorer/forum/thread/s160?sort=old&limit=20'])
+    expect(pagePreloads('/discussions')).toEqual({ page: 'Discussions', api: [] })
+    expect(pagePreloads('/discussions/new').api).toEqual([])
+    expect(pagePreloads('/governance/me').page).toBe('GovernanceMe')
+    expect(pagePreloads('/governance/motion/tc/425').page).toBe('Forum')
+    expect(pagePreloads('/blocks')).toEqual({ page: null, api: [] })
+  })
+
+  it('emits module, style and fetch preloads from the manifest', () => {
+    const links = renderPreloads('/referendum/opengov/450', chunks)
+    expect(links).toContain('<link rel="modulepreload" crossorigin href="/assets/Referendum-X1.js" data-route />')
+    expect(links).toContain('<link rel="preload" as="style" href="/assets/forum-Z3.css" data-route />')
+    expect(links).toContain('<link rel="preload" as="fetch" crossorigin="anonymous" href="/api/explorer/referendum/opengov/450?limit=200" data-route />')
+    // Without a manifest only the api reads are named.
+    expect(renderPreloads('/referendum/opengov/450', null).every(l => l.includes('as="fetch"'))).toBe(true)
+  })
+
+  it('rejects a malformed manifest whole', () => {
+    expect(parseRouteChunks({ entry: 'assets/index-Abc123.js', pages: { Referendum: ['https://evil.example/x.js'] } })).toBeNull()
+    expect(parseRouteChunks({ entry: 'index.js', pages: {} })).toBeNull()
+    expect(parseRouteChunks({ entry: 'assets/index-Abc123.js', pages: { 'a"b': [] } })).toBeNull()
+    expect(parseRouteChunks(null)).toBeNull()
+  })
+
+  it('stays idempotent: a re-render replaces its preloads and keeps the shell\'s own', () => {
+    const once = renderPage(shell, '/referendum/opengov/450', chunks)
+    const twice = renderPage(once, '/referendum/opengov/450', chunks)
+    expect(twice.match(/data-route/g)?.length).toBe(once.match(/data-route/g)?.length)
+    const own = shell.match(/rel="modulepreload"/g)?.length ?? 0
+    expect(twice.match(/rel="modulepreload"[^>]*data-route/g)?.length ?? 0).toBe(twice.match(/rel="modulepreload"/g)!.length - own)
   })
 })

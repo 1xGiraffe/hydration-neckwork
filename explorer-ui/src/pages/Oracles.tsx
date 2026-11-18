@@ -281,9 +281,9 @@ export function Oracles() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Oracles' }]} />
-        <div className="page-title">Oracles <span className="sub">
+        <h1 className="page-title">Oracles <span className="sub">
           {k ? `${F.int(k.liveFeeds)} feeds live · ${F.int(k.staleFeeds)} stale in use · ${F.int(k.updates24h)} updates in the last 24H` : 'the prices Hydration reads, who delivers them, and how fresh they are'}
-        </span></div>
+        </span></h1>
       </div>
 
       {isError && <LoadError title="Couldn’t load the oracles" onRetry={() => { void refetch() }} />}

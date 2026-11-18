@@ -55,7 +55,7 @@ export function Assets() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets' }]} />
-        <div className="page-title">Assets <span className="sub">{rows.length} tokens</span></div>
+        <h1 className="page-title">Assets <span className="sub">{rows.length} tokens</span></h1>
       </div>
 
       {/* The 7-day sparkline in each row is a glance, not a chart. Preis is the

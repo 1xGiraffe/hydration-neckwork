@@ -5,6 +5,7 @@ export function createClickHouseClient() {
   return createClient({
     url: config.CLICKHOUSE_URL,
     database: config.CLICKHOUSE_DB,
+    username: config.CLICKHOUSE_USER,
     password: config.CLICKHOUSE_PASSWORD,
     clickhouse_settings: {
       do_not_merge_across_partitions_select_final: 1,

@@ -1,145 +1,66 @@
-import { useMemo } from 'react'
-import { useGovernanceMotions, useGovernanceOverview, useGovernanceReferenda, useGovernanceTips, useSecurityDashboard, useStats } from '../hooks/useExplorerData'
+import { Suspense, useMemo } from 'react'
+import { useQueries } from '@tanstack/react-query'
+import { useGovernanceMotions, useGovernanceOverview, useGovernanceReferenda, useGovernanceTips, useTechCommittee } from '../hooks/useExplorerData'
+import { snapshotRetry, useDiscussions, useGovCalendar, useGovClock, waitingForSnapshot } from '../hooks/useGovernance'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, setQuery, useQuery, useQueryValue } from '../router'
-import { AddrPill, Amt, Crumbs, Dash, DetailTabs, EmptyRow, F, MomentLink, Pager, pendingRows, rowNav, TableSkeleton } from '../components/ui'
+import { AddrPill, Amt, ChartSkeleton, Crumbs, Dash, DetailTabs, EmptyRow, F, MomentLink, Pager, pendingRows, rowNav, TableSkeleton } from '../components/ui'
 import { NotifyButton } from '../components/NotifyButton'
-import { estimateBlockCountdown } from '../utils/blockCountdown'
-import { blockSeconds, fmtDuration } from '../utils/dca'
-import { ayeSharePct } from '../utils/referendumVotes'
-import type { ActiveReferendumCard, CollectiveMotionRow, ExplorerStats, GovernanceReferendumRow, TreasuryTipRow } from '../types'
+import { StatusBadge, NotReady, MomentText, humanDate, trackLabel, SubscribeUrl } from '../components/gov/GovUi'
+import { DeadlineList, DiscussionItem, VoteSplit } from '../components/gov/GovLists'
+import { useReaderVotes } from '../components/gov/readerVotes'
+import { GovTerms, InfoTip } from '../components/gov/Disclosure'
+import { ActiveCard, Meter } from '../components/gov/LiveCard'
+import { govApi } from '../api/explorer'
+import { SUBJECT_ROUTES, forumPostPath } from '../governanceSubjects'
+import type { ListedPostKind } from '../governanceTypes'
+import type { ActiveReferendumCard, CollectiveMotionRow, GovernanceReferendumRow, TreasuryTipRow } from '../types'
+import { lazyWithReload } from '../lazyWithReload'
 
-// /governance — every way this chain decides, on one page. The live OpenGov
-// referenda lead (they are what a visitor can still act on), the full OpenGov
-// and Democracy directories sit behind exact-counted tabs, and the committee
-// motions and pre-OpenGov archive stay one tab away rather than a menu tree
-// deep: Hydration's governance history is small enough to be one page, so the
-// page is the information architecture.
+// The Stats view's charts are their own chunk: the other tabs never load them.
+const GovStats = lazyWithReload(() => import('../components/gov/GovStats'))
+
+// /governance — the hub. It is ordered by what needs attention: the referenda being
+// decided now (each with its verdict and the reader's own state: how they voted, or
+// a Vote button), the conversation, and what closes soonest or is scheduled ahead.
+// The full directories (OpenGov, the technical committee, the pre-OpenGov archive)
+// sit one tab away.
 
 const PAGE = 25
 
-// Track names come from the runtime snake_cased; the page prints them as words.
-const trackLabel = (name: string) => name.replace(/_/g, ' ')
-
-// One status vocabulary → one visual language, shared by referenda, motions and
-// tips: green settled-yes, a second green for confirming (almost settled-yes),
-// red settled-no, neutral for anything still open, grey for the rest. Nothing
-// in flight is red — red is reserved for outcomes and for a tally that cannot
-// pass (the caller says so via `failing`).
-function statusTone(status: string): 'good' | 'almost' | 'bad' | 'neutral' | 'quiet' {
-  if (/^(approved|executed|passed|closed)$/.test(status)) return 'good'
-  if (status === 'confirming') return 'almost'
-  if (/^(rejected|not passed|disapproved|failed|killed|vetoed|timed out|cancelled|retracted)$/.test(status)) return 'bad'
-  if (/^(deciding|open|closing|submitted|started)$/.test(status)) return 'neutral'
-  return 'quiet'
-}
-function StatusBadge({ status, failing, failedCall }: { status: string; failing?: boolean; failedCall?: boolean }) {
-  // A deciding referendum whose tally can never clear the decaying bars is the
-  // one in-flight state worth a red word: it says where things are HEADED.
-  if (failing) return <span className="badge gov-status bad" title={`Still ${status}, but as voted today it cannot pass`}>not passing</span>
-  // Approved and enacted, but the dispatched call errored: the same word, red.
-  if (failedCall) return <span className="badge gov-status bad" title="Enacted, but the dispatched call failed">{status}</span>
-  return <span className={`badge gov-status ${statusTone(status)}`}>{status}</span>
-}
-
-/* ---- the live cards ---- */
-
-// Where the referendum is on its clock, in one line: the phase and the moment
-// it resolves, at the chain's measured pace.
-// The clock says what happens NEXT, in OpenGov's own logic: a confirming
-// referendum confirms; a deciding one that trails the (decaying) bars names the
-// moment those bars meet today's tally — trailing them is the healthy normal,
-// not a warning; only a tally the bars can never meet is called out (in the
-// card foot, not here).
-function CardClock({ card, stats, now }: { card: ActiveReferendumCard; stats: ExplorerStats; now: number }) {
-  const progress = card.progress
-  if (!progress) return null
-  const projection = progress.projection
-  const [target, verb] = progress.phase === 'confirming' ? [progress.confirmEndBlock, 'confirms']
-    : progress.phase === 'deciding'
-      ? (projection?.state === 'on-track' ? [projection.confirmableAtBlock, 'can confirm']
-        : projection?.state === 'passing' ? [null, 'entering confirmation'] : [progress.decisionEndBlock, 'decision ends'])
-      : [progress.earliestDecisionBlock, 'decision opens']
-  if (target == null) return <span className="gov-card-clock muted">{verb !== 'decision opens' ? verb : progress.phase}</span>
-  const eta = estimateBlockCountdown(target, stats.headBlock, stats.headTime, now, blockSeconds(stats.avgBlockSec))
-  if (!eta) return <span className="gov-card-clock muted">{progress.phase}</span>
-  return <span className="gov-card-clock">{verb} in ~{fmtDuration(eta.secondsUntil)}</span>
-}
-
-// Calm by default: a card is an index, a title, and a clock. The one colored
-// element is the exception — a referendum that would FAIL as things stand says
-// so; a passing one needs no decoration. (The status badge went too: the
-// clock's verb — "confirms in", "decision ends in" — already names the phase.)
-function ActiveCard({ card, stats, now }: { card: ActiveReferendumCard; stats: ExplorerStats | undefined; now: number }) {
-  const ayePct = card.tally ? ayeSharePct(card.tally.ayes, card.tally.nays) : null
-  // Only a tally the decaying bars can never meet is a warning; a referendum
-  // merely trailing them is on its normal path and stays undecorated.
-  const short = card.progress?.projection?.state === 'short'
-  const approval = card.progress?.approval
-  const support = card.progress?.support
-  const shortDetail = [
-    approval?.passing === false ? `approval ${(approval.currentPerbill! / 1e7).toFixed(1)}% — the bar never falls below ${(approval.thresholdPerbill / 1e7).toFixed(1)}% enough` : null,
-    support?.passing === false ? `support ${(support.currentPerbill! / 1e7).toFixed(2)}%` : null,
-  ].filter(Boolean).join(' · ')
-  return (
-    <Link to={paths.referendum('opengov', card.index)} className="gov-card">
-      <div className="gov-card-head">
-        <span className="mono muted">#{card.index}{card.track ? ` · ${trackLabel(card.track.name)}` : ''}</span>
-        {stats && <CardClock card={card} stats={stats} now={now} />}
-      </div>
-      <div className="gov-card-title">{card.title ?? `Referendum #${card.index}`}</div>
-      <div className="gov-card-foot">
-        {ayePct != null && (
-          <span className="gov-card-tally" title={card.tally!.source === 'live' ? 'The pallet’s live tally' : 'The decision-start snapshot — votes since are not in it'}>
-            <span className="gov-tallybar" aria-hidden="true"><span style={{ width: `${ayePct}%` }} /></span>
-            <span className="mono muted">{ayePct.toFixed(1)}% aye</span>
-          </span>
-        )}
-        {short && <span className="badge gov-status bad" title={`As voted today this cannot pass: ${shortDetail}`}>not passing</span>}
-        {card.proposer && <span className="gov-card-proposer"><AddrPill account={card.proposer} noCopy /></span>}
-      </div>
-    </Link>
-  )
-}
-
 /* ---- referenda table ---- */
 
-function ReferendaTable({ pallet, page, onPage, shortIndexes }: { pallet: 'opengov' | 'democracy'; page: number; onPage: (p: number) => void; shortIndexes?: Set<number> }) {
+const DEMOCRACY_STATUSES = ['started', 'passed', 'not passed', 'executed', 'cancelled', 'vetoed']
+
+function ReferendaTable({ pallet, page, onPage, shortIndexes, live }: { pallet: 'opengov' | 'democracy'; page: number; onPage: (p: number) => void; shortIndexes?: Set<number>; live?: Map<number, ActiveReferendumCard> }) {
   const now = useNow()
+  const reader = useReaderVotes()
+  const showMine = pallet === 'opengov' && reader.mine.length > 0
+  // The reader's accounts' votes on a live referendum: their sides, "not yet" while one still has to vote.
+  const mineOn = (i: number) => reader.voted.get(i)?.size ? [...reader.voted.get(i)!].join(', ') : reader.missing.has(i) ? 'not yet' : null
+  // Only the pre-OpenGov table (the archive's Democracy referenda) filters by status.
   const status = useQueryValue('status', '')
-  const track = useQueryValue('track', '')
-  const trackNum = /^\d+$/.test(track) ? Number(track) : undefined
-  const { data, isFetching, isPlaceholderData } = useGovernanceReferenda(pallet, status || undefined, trackNum, page * PAGE)
+  const { data, isFetching, isPlaceholderData } = useGovernanceReferenda(pallet, pallet === 'democracy' && status ? status : undefined, page * PAGE)
   const rows = data?.rows ?? []
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE))
-  // The filter options come from the rows the directory actually contains —
-  // an unfiltered first page fetch would be needed for exact option lists, but
-  // the status vocabulary is small and fixed per pallet, so it is inlined.
-  const statusOptions = pallet === 'opengov'
-    ? ['submitted', 'deciding', 'confirming', 'approved', 'executed', 'rejected', 'cancelled', 'timed out', 'killed']
-    : ['started', 'passed', 'not passed', 'executed', 'cancelled', 'vetoed']
-  const trackOptions = ['root', 'whitelisted_caller', 'referendum_canceller', 'referendum_killer', 'general_admin', 'treasurer', 'spender', 'tipper', 'omnipool_admin', 'economic_parameters']
+  const cols = 4 + (showMine ? 1 : 0)
   return (
     <>
       <div className="filters gov-filters">
-        <select aria-label="Status" value={status} onChange={e => setQuery({ status: e.target.value || null, page: null })}>
-          <option value="">Any status</option>
-          {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
-        {pallet === 'opengov' && (
-          <select aria-label="Track" value={track} onChange={e => setQuery({ track: e.target.value || null, page: null })}>
-            <option value="">Any track</option>
-            {trackOptions.map((name, id) => <option key={name} value={String(id)}>{trackLabel(name)}</option>)}
+        {pallet === 'democracy' ? (
+          <select aria-label="Status" value={status} onChange={e => setQuery({ status: e.target.value || null, page: null })}>
+            <option value="">Any status</option>
+            {DEMOCRACY_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
-        )}
+        ) : <SubscribeUrl kind="feed" label="Referenda feed" url={`${window.location.origin}/feeds/referenda.atom`} note="Follow referenda in a feed reader; an entry is re-dated on every status change." />}
       </div>
-      <div className="panel"><table className="tbl">
-        <thead><tr><th style={{ width: 70 }}>#</th><th>Title</th>{pallet === 'opengov' && <><th>Track</th><th>Proposer</th></>}<th>Status</th><th className="r">Last activity</th></tr></thead>
+      <div className="panel"><table className="tbl gov-list-tbl">
+        <thead><tr><th style={{ width: 70 }}>#</th><th>Title</th><th>Status</th>{showMine && <th title="Your accounts' votes on live referenda">Your vote</th>}<th className="r">When</th></tr></thead>
         <tbody {...pendingRows(isPlaceholderData)}>
-          {isFetching && !rows.length ? <TableSkeleton cols={pallet === 'opengov' ? 6 : 4} rows={10} />
-            : !rows.length ? <EmptyRow cols={pallet === 'opengov' ? 6 : 4}>No referenda match</EmptyRow>
-              : rows.map(r => <RefRow key={`${r.pallet}:${r.index}`} r={r} now={now} showTrack={pallet === 'opengov'} failing={shortIndexes?.has(r.index) && r.status === 'deciding'} />)}
+          {isFetching && !rows.length ? <TableSkeleton cols={cols} rows={10} />
+            : !rows.length ? <EmptyRow cols={cols}>No referenda match</EmptyRow>
+              : rows.map(r => <RefRow key={`${r.pallet}:${r.index}`} r={r} now={now} failing={shortIndexes?.has(r.index) && r.status === 'deciding'} live={pallet === 'opengov' ? live?.get(r.index) : undefined} mine={showMine ? mineOn(r.index) : undefined} />)}
         </tbody>
       </table></div>
       <Pager page={page} totalPages={totalPages} hasNext={page + 1 < totalPages} onPage={onPage} />
@@ -147,15 +68,25 @@ function ReferendaTable({ pallet, page, onPage, shortIndexes }: { pallet: 'openg
   )
 }
 
-function RefRow({ r, now, showTrack, failing }: { r: GovernanceReferendumRow; now: number; showTrack: boolean; failing?: boolean }) {
+function RefRow({ r, now, failing, live, mine }: { r: GovernanceReferendumRow; now: number; failing?: boolean; live?: ActiveReferendumCard; mine?: string | null }) {
+  const a = live?.progress?.approval, s = live?.progress?.support
   return (
     <tr {...rowNav(paths.referendum(r.pallet, r.index))}>
       <td data-label="#" className="mono"><Link to={paths.referendum(r.pallet, r.index)} className="hash">#{r.index}</Link></td>
-      <td data-label="Title" className="gov-title-cell">{r.title ?? <span className="muted">—</span>}</td>
-      {showTrack && <td data-label="Track" className="muted">{r.track ? trackLabel(r.track.name) : <Dash />}</td>}
-      {showTrack && <td data-label="Proposer">{r.proposer ? <AddrPill account={r.proposer} noCopy /> : <Dash />}</td>}
+      <td data-label="Title" className="gov-title-cell">
+        {r.title ?? <span className="muted">—</span>}
+        {(r.commentsCount ?? 0) > 0 && <span className="gov-row-talk" title={`${r.commentsCount} ${r.commentsCount === 1 ? 'comment' : 'comments'} in its discussion`}> · 💬 {r.commentsCount}</span>}
+        {r.track && <div className="gov-cell-sub">{trackLabel(r.track.name)}</div>}
+        {(a || s) && (
+          <div className="gov-row-meters">
+            {a && <Meter label="Approval" current={a.currentPerbill} threshold={a.thresholdPerbill} projection={live?.progress?.projection?.state} />}
+            {s && <Meter label="Support" current={s.currentPerbill} threshold={s.thresholdPerbill} projection={live?.progress?.projection?.state} />}
+          </div>
+        )}
+      </td>
       <td data-label="Status"><StatusBadge status={r.status} failing={failing} failedCall={r.enactment === 'failed'} /></td>
-      <td data-label="Last activity" className="r mono"><MomentLink at={{ blockHeight: r.blockHeight, extrinsicIndex: null, timestamp: r.timestamp }} now={now} /></td>
+      {mine !== undefined && <td data-label="Your vote" className={mine && mine !== 'not yet' ? 'gov-row-mine' : 'muted'}>{mine ?? '—'}</td>}
+      <td data-label="When" className="r mono"><MomentLink at={{ blockHeight: r.blockHeight, extrinsicIndex: null, timestamp: r.timestamp }} now={now} /></td>
     </tr>
   )
 }
@@ -169,12 +100,12 @@ function MotionsTable({ body, page, onPage }: { body: 'tc' | 'council'; page: nu
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE))
   return (
     <>
-      <div className="panel"><table className="tbl">
+      <div className="panel"><table className="tbl gov-list-tbl">
         <thead><tr><th style={{ width: 60 }}>#</th><th>Proposes</th><th>Proposer</th><th className="r">Votes</th><th>Status</th><th className="r">When</th></tr></thead>
         <tbody {...pendingRows(isPlaceholderData)}>
           {isFetching && !rows.length ? <TableSkeleton cols={6} rows={10} />
             : !rows.length ? <EmptyRow cols={6}>No motions</EmptyRow>
-              : rows.map(m => <MotionRow key={`${m.proposedAt.blockHeight}-${m.index}`} m={m} now={now} />)}
+              : rows.map(m => <MotionRow key={`${m.proposedAt.blockHeight}-${m.index}`} m={m} now={now} body={body} />)}
         </tbody>
       </table></div>
       <Pager page={page} totalPages={totalPages} hasNext={page + 1 < totalPages} onPage={onPage} />
@@ -182,18 +113,19 @@ function MotionsTable({ body, page, onPage }: { body: 'tc' | 'council'; page: nu
   )
 }
 
-function MotionRow({ m, now }: { m: CollectiveMotionRow; now: number }) {
-  // The row IS its propose extrinsic — that page renders the full decoded call
-  // tree, so a motion needs no detail page of its own.
-  const to = m.proposedAt.extrinsicIndex != null ? paths.extrinsic(`${m.proposedAt.blockHeight}-${m.proposedAt.extrinsicIndex}`) : null
+function MotionRow({ m, now, body }: { m: CollectiveMotionRow; now: number; body: 'tc' | 'council' }) {
+  // A council motion's imported record is addressed by its index; the row itself
+  // stays its propose extrinsic, which decodes the full call.
+  const record = body === 'council' && m.index >= 0 ? `/governance/motion/council/${m.index}` : null
+  const to = m.proposedAt.extrinsicIndex != null ? paths.extrinsic(`${m.proposedAt.blockHeight}-${m.proposedAt.extrinsicIndex}`) : record
   return (
     <tr {...(to ? rowNav(to) : {})}>
-      <td data-label="#" className="mono muted">{m.index >= 0 ? m.index : '—'}</td>
+      <td data-label="#" className="mono muted">{record ? <Link to={record} className="hash" title="Its discussion">{m.index}</Link> : m.index >= 0 ? m.index : '—'}</td>
       <td data-label="Proposes" className="gov-title-cell">
         {m.call ? <span className="mono gov-call">{m.call}</span> : <span className="mono muted">{m.hash.slice(0, 10)}…{m.hash.slice(-6)}</span>}
       </td>
       <td data-label="Proposer">{m.proposer ? <AddrPill account={m.proposer} noCopy /> : <Dash />}</td>
-      <td data-label="Votes" className="r mono">{m.ayes}<span className="muted">/{m.threshold}</span>{m.nays > 0 && <span className="vb-nay-text"> · {m.nays} nay</span>}</td>
+      <td data-label="Votes" className="r mono">{m.ayes}<span className="muted"> of {m.threshold}</span>{m.nays > 0 && <span className="vb-nay-text"> · {m.nays} nay</span>}</td>
       <td data-label="Status"><StatusBadge status={m.status} /></td>
       <td data-label="When" className="r mono"><MomentLink at={m.closedAt ?? m.proposedAt} now={now} /></td>
     </tr>
@@ -205,8 +137,6 @@ function MotionRow({ m, now }: { m: CollectiveMotionRow; now: number }) {
 function TipsTable() {
   const now = useNow()
   const query = useQuery()
-  // Tips page independently of the council table above them; two pagers on one
-  // tab must not fight over one ?page.
   const requested = Number.parseInt(query.get('tpage') ?? '', 10)
   const page = Number.isFinite(requested) && requested > 0 ? requested : 0
   const onPage = (next: number) => setQuery({ tpage: next > 0 ? String(next) : null })
@@ -215,7 +145,7 @@ function TipsTable() {
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE))
   return (
     <>
-      <div className="panel"><table className="tbl">
+      <div className="panel"><table className="tbl gov-list-tbl">
         <thead><tr><th>Reason</th><th>Beneficiary</th><th className="r">Paid out</th><th>Status</th><th className="r">When</th></tr></thead>
         <tbody {...pendingRows(isPlaceholderData)}>
           {isFetching && !rows.length ? <TableSkeleton cols={5} rows={10} />
@@ -229,14 +159,12 @@ function TipsTable() {
 }
 
 function TipRow({ t, now }: { t: TreasuryTipRow; now: number }) {
-  // Tip reasons are URLs by convention (a forum/subsquare post); a reason that
-  // is one opens in a new tab, anything else renders as the text it is.
   const isUrl = t.reason != null && /^https?:\/\/\S+$/.test(t.reason)
   return (
     <tr>
       <td data-label="Reason" className="gov-title-cell">
         {t.reason == null ? <Dash />
-          : isUrl ? <a href={t.reason} target="_blank" rel="noopener" className="hash">{t.reason.replace(/^https?:\/\//, '')}</a>
+          : isUrl ? <a href={t.reason} target="_blank" rel="noopener noreferrer nofollow" className="hash">{t.reason.replace(/^https?:\/\//, '')}</a>
             : t.reason}
       </td>
       <td data-label="Beneficiary">{t.beneficiary ? <AddrPill account={t.beneficiary} noCopy /> : <Dash />}</td>
@@ -247,34 +175,28 @@ function TipRow({ t, now }: { t: TreasuryTipRow; now: number }) {
   )
 }
 
-/* ---- the committee roster (the /security/guardians view, in brief) ---- */
-
-// Who the committee IS, right above what it has done — the same roster and
-// thresholds the security page's Guardians section shows, linking there for the
-// full control matrix (which lever needs which majority).
-function TcMembersCard() {
-  const { data } = useSecurityDashboard()
-  const tc = data?.guardians.techCommittee
-  if (!tc) return null
+function TcMembers() {
+  const { data, isLoading } = useTechCommittee()
+  const tc = data?.techCommittee
+  // The row's room is held while it loads, so the motions below do not jump when it lands.
+  if (!tc) return isLoading ? <div className="skeleton gov-tc-card-sk" aria-hidden="true" /> : null
   return (
-    <div className="pf-card gov-tc-card">
-      <div className="sec-meter-head">
-        <span className="sec-sub" style={{ margin: 0 }}>Members</span>
-        <span className="mono muted" style={{ fontSize: 12 }}>
-          {tc.size > 0 ? `${tc.majority} of ${tc.size} to act · ${tc.superMajority} of ${tc.size} for XCM channels` : 'membership unavailable'}
-        </span>
-      </div>
-      {tc.members.length > 0 && <div className="sec-pills">{tc.members.map(m => <AddrPill key={m.accountId} account={m} />)}</div>}
-      <div className="hdx-note" style={{ marginTop: 10 }}>
-        A simple majority takes effect the moment a motion closes — no referendum, no waiting period.{' '}
-        <Link to={paths.security('guardians')} className="hash">Which lever needs which majority →</Link>
-      </div>
+    <div className="gov-tc-members">
+      <span className="gov-tc-label">
+        Members{tc.size > 0 ? <span className="muted"> · {tc.majority} of {tc.size} to act</span> : <span className="muted"> · membership unavailable</span>}
+        {tc.size > 0 && (
+          <InfoTip label="About the committee's majorities">
+            {tc.majority} of {tc.size} members pass an ordinary motion, {tc.superMajority} of {tc.size} one that opens or closes an XCM channel. It takes effect the moment the motion closes: no referendum, no waiting period.{' '}
+            <Link to={paths.security('guardians')} className="hash">Which lever needs which majority</Link>
+          </InfoTip>
+        )}
+      </span>
+      {tc.members.length > 0 && <span className="sec-pills">{tc.members.map(m => <AddrPill key={m.accountId} account={m} />)}</span>}
+      <NotifyButton variant="icon" label="Alert me about technical committee motions" title="Alert me when the technical committee proposes or resolves a motion" rule={{ kind: 'tc-motion', params: {}, name: 'TC motions' }} />
     </div>
   )
 }
 
-// Council motions page independently inside the archive tab — three tables on
-// one tab must not fight over one ?page.
 function CouncilMotions() {
   const query = useQuery()
   const requested = Number.parseInt(query.get('cpage') ?? '', 10)
@@ -282,36 +204,129 @@ function CouncilMotions() {
   return <MotionsTable body="council" page={page} onPage={next => setQuery({ cpage: next > 0 ? String(next) : null })} />
 }
 
-/* ---- the page ---- */
+/* ---- the archive ---- */
 
-export function Governance() {
-  useDocumentTitle('Governance')
+// The pre-OpenGov era (and the treasury), one collection at a time: each body's
+// imported records (title, description, discussion) as a list, and where the chain
+// keeps a table of it (Democracy referenda, Council and TC motions, tips) that table
+// one toggle away. `?kind=` picks the collection, `?show=table` the table.
+const COLLECTIONS: { key: string; label: string; kind?: ListedPostKind; table?: 'democracy' | 'council' | 'tc' | 'tips' }[] = [
+  { key: 'democracy', label: 'Democracy referenda', table: 'democracy' },
+  { key: 'council', label: 'Council motions', kind: 'council', table: 'council' },
+  { key: 'tip', label: 'Treasury tips', kind: 'tip', table: 'tips' },
+  { key: 'democracy_proposal', label: 'Democracy proposals', kind: 'democracy_proposal' },
+  { key: 'external', label: 'External', kind: 'external' },
+  { key: 'tc', label: 'TC motions', kind: 'tc', table: 'tc' },
+  { key: 'treasury_proposal', label: 'Treasury proposals', kind: 'treasury_proposal' },
+  { key: 'treasury_spend', label: 'Spends', kind: 'treasury_spend' },
+]
+
+function ArchiveRecords({ kind }: { kind: ListedPostKind }) {
+  const now = useNow(60_000)
+  const subject = SUBJECT_ROUTES.find(s => s.kind === kind) ?? SUBJECT_ROUTES[0]
+  const q = useDiscussions({ sort: 'new', kind })
+  const rows = q.data?.pages.flatMap(p => p.rows) ?? []
+  if (waitingForSnapshot(q)) return <NotReady what="forum" />
+  // Six rows of a row's own height, so the list's arrival moves nothing a reader is looking at.
+  if (q.isLoading) return <div className="gov-skeleton-list gov-archive-sk" aria-busy="true">{Array.from({ length: 6 }, (_, i) => <div key={i} className="skeleton" />)}</div>
+  if (!rows.length) return <p className="gov-empty">No {subject.plural.toLowerCase()} were imported.</p>
+  return (
+    <>
+      <ul className={`gov-discs${q.isPlaceholderData ? ' rows-pending' : ''}`}>{rows.map(r => <DiscussionItem key={r.postId} row={r} now={now} />)}</ul>
+      {q.hasNextPage && <button type="button" className="gov-more" onClick={() => q.fetchNextPage()} disabled={q.isFetchingNextPage}>{q.isFetchingNextPage ? 'Loading…' : 'Show more'}</button>}
+    </>
+  )
+}
+
+function Archive({ counts, page, onPage }: { counts?: { democracy: number; councilMotions: number; tips: number; tcMotions: number }; page: number; onPage: (p: number) => void }) {
+  const requested = useQueryValue('kind', 'democracy')
+  const show = useQueryValue('show', '')
+  const coll = COLLECTIONS.find(c => c.key === requested) ?? COLLECTIONS[0]
+  // Each collection's size for its chip: the imported records' total (the chain table's count for Democracy referenda).
+  const totals = useQueries({
+    queries: COLLECTIONS.filter(c => c.kind).map(c => ({
+      queryKey: ['forum-kind-total', c.kind],
+      queryFn: ({ signal }: { signal: AbortSignal }) => govApi.discussions({ sort: 'new', kind: c.kind, limit: 1 }, signal),
+      staleTime: 300_000,
+      ...snapshotRetry,
+    })),
+  })
+  const countOf = (key: string): number | undefined => {
+    if (key === 'democracy') return counts?.democracy
+    const i = COLLECTIONS.filter(c => c.kind).findIndex(c => c.key === key)
+    return totals[i]?.data?.total
+  }
+  const asTable = coll.table != null && (!coll.kind || show === 'table')
+  return (
+    <>
+      <div className="activity-chips gov-archive-chips" role="group" aria-label="Collection">
+        {COLLECTIONS.map(c => {
+          const n = countOf(c.key)
+          return (
+            <button key={c.key} type="button" aria-pressed={c.key === coll.key} className={`activity-chip${c.key === coll.key ? ' on' : ''}`}
+              onClick={() => setQuery({ kind: c.key === 'democracy' ? null : c.key, show: null, page: null, cpage: null, tpage: null, status: null })}>
+              {c.label}{n != null && <span className="gov-chip-n">{F.int(n)}</span>}
+            </button>
+          )
+        })}
+      </div>
+      {coll.kind && coll.table && (
+        <div className="gov-view-toggle" role="group" aria-label="View">
+          <button type="button" aria-pressed={!asTable} className={!asTable ? 'on' : ''} onClick={() => setQuery({ show: null, page: null })}>List</button>
+          <button type="button" aria-pressed={asTable} className={asTable ? 'on' : ''} onClick={() => setQuery({ show: 'table', page: null })}>Table</button>
+        </div>
+      )}
+      {!asTable ? <ArchiveRecords kind={coll.kind!} />
+        : coll.table === 'democracy' ? <ReferendaTable pallet="democracy" page={page} onPage={onPage} />
+          : coll.table === 'council' ? <CouncilMotions />
+            : coll.table === 'tc' ? <MotionsTable body="tc" page={page} onPage={onPage} />
+              : <TipsTable />}
+    </>
+  )
+}
+
+/* ---- the overview ---- */
+
+/** The scheduled dates ahead other than the referendum deadlines; null when there are none (the column is then hidden). */
+function useComingUp(now: number) {
+  const from = new Date(now - 86_400_000).toISOString().slice(0, 10)
+  const to = new Date(now + 21 * 86_400_000).toISOString().slice(0, 10)
+  const q = useGovCalendar(from, to)
+  // The referendum deadlines are the cards' countdowns (or "closing soon"); this is the rest of what is scheduled.
+  const upcoming = (q.data?.events ?? []).filter(e => !['concluded', 'decision-end', 'confirm-end', 'timeout'].includes(e.kind) && Date.parse(e.at.ts) >= now - 3_600_000).slice(0, 6)
+  return { loading: q.isLoading, upcoming }
+}
+
+const CAL_WORD: Record<string, string> = {
+  'decision-end': 'decision ends', 'confirm-end': 'confirmation ends', timeout: 'times out', 'prepare-end': 'decision can start',
+  enactment: 'enacts', 'spend-valid': 'spend claimable', 'spend-expire': 'spend expires',
+}
+
+function ComingUp({ events, now }: { events: ReturnType<typeof useComingUp>['upcoming']; now: number }) {
+  return (
+    <ul className="gov-cal-strip">
+      {events.map((e, i) => (
+        <li key={i}>
+          <span className="gov-cal-date">{humanDate(e.at.ts, false).replace(/ \d{4}$/, '')}</span>
+          <span className="gov-cal-what">
+            {e.referendum ? <Link to={paths.referendum('opengov', e.referendum.index)} className="hash">#{e.referendum.index}</Link> : e.spend ? <Link to={forumPostPath(`spend:${e.spend.index}`) ?? paths.governance()} className="hash">Spend #{e.spend.index}{/^\d+$/.test(e.spend.amount) ? <> · <Amt raw={e.spend.amount} dec={12} /> HDX</> : null}</Link> : null}
+            {' '}{CAL_WORD[e.kind] ?? e.kind} <MomentText at={e.at} now={now} relative />
+          </span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** "#450 and #448" */
+const refList = (ids: number[]) => ids.length === 1 ? `#${ids[0]}` : `${ids.slice(0, -1).map(i => `#${i}`).join(', ')} and #${ids[ids.length - 1]}`
+
+function Overview() {
   const now = useNow()
   const overview = useGovernanceOverview()
-  const { data: stats } = useStats(Boolean(overview.data?.active.length))
-  const view = useQueryValue('view', 'opengov')
-  const query = useQuery()
-  const requestedPage = Number.parseInt(query.get('page') ?? '', 10)
-  const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
-  const setPage = (next: number) => setQuery({ page: next > 0 ? String(next) : null })
-
-  const counts = overview.data?.counts
-  const tabs = useMemo(() => [
-    { key: 'opengov', label: 'OpenGov', ...(counts ? { count: counts.opengov } : {}) },
-    { key: 'tc', label: 'Technical committee', ...(counts ? { count: counts.tcMotions } : {}) },
-    { key: 'archive', label: 'Archive' },
-  ], [counts])
-  // Democracy folded into the archive; an old ?view=democracy link lands there.
-  const activeView = view === 'democracy' ? 'archive' : tabs.some(t => t.key === view) ? view : 'opengov'
-
-  // The deciding referenda whose tallies cannot pass as voted — the table's
-  // status column says "not passing" for exactly these.
-  const shortIndexes = useMemo(() => new Set(
-    (overview.data?.active ?? []).filter(c => c.progress?.projection?.state === 'short').map(c => c.index),
-  ), [overview.data])
-
-  // Resolution order: what settles soonest leads — a confirming referendum is
-  // hours from its verdict, a deciding one days.
+  const clock = useGovClock().data
+  const reader = useReaderVotes()
+  const coming = useComingUp(now)
   const active = useMemo(() => {
     const rows = overview.data?.active ?? []
     const urgency = (c: ActiveReferendumCard) =>
@@ -320,68 +335,139 @@ export function Governance() {
           : 2e9
     return [...rows].sort((a, b) => urgency(a) - urgency(b))
   }, [overview.data])
+  const discussions = overview.data?.discussions
+  // The reader's state on each card: the Vote button while any of their accounts has
+  // not voted, else how they voted.
+  const mineOn = (c: ActiveReferendumCard) => {
+    if (!reader.known.length) return undefined
+    if (reader.missing.has(c.index)) return <VoteSplit index={c.index} title={c.title ?? null} track={c.track?.id ?? null} />
+    const sides = reader.voted.get(c.index)
+    return sides?.size ? <span className="gov-card-voted">Voted {[...sides].join(', ')}</span> : undefined
+  }
+  // With several accounts a card's Vote button can hide that only some of them voted: said once under the cards.
+  const partial = reader.known.length > 1 ? active.filter(c => reader.missing.has(c.index)).map(c => c.index) : []
+  const whose = reader.watchOnly ? 'the accounts you follow' : `your ${reader.known.length} accounts`
+  const sideColumn = active.length > 3 || coming.loading || coming.upcoming.length > 0
+  return (
+    <>
+      <section className="gov-hub-live" aria-labelledby="hub-live">
+        <div className="gov-hub-head">
+          <h2 id="hub-live" className="gov-h2">Being decided now{active.length > 0 && <span className="gov-count" aria-label={`${active.length} live`}>{active.length}</span>}</h2>
+          <span className="gov-hub-head-actions">
+            <Link to={paths.governancePropose()} className="gov-btn">New proposal</Link>
+            <NotifyButton variant="icon" label="Alert me about new referenda" title="Alert me about new referenda" rule={{ kind: 'referendum', params: {}, name: 'New referenda' }} />
+          </span>
+        </div>
+        {overview.isLoading ? <div className={`gov-cards n-2`}><div className="skeleton gov-card-sk" /><div className="skeleton gov-card-sk" /></div>
+          : active.length === 0 ? <p className="gov-empty">Nothing is being decided right now.</p>
+            : <div className={`gov-cards n-${Math.min(active.length, 3)}`}>{active.map(card => <ActiveCard key={card.index} card={card} clock={clock} now={now} mine={mineOn(card)} />)}</div>}
+        {partial.length > 0 && (
+          <p className="gov-hub-partial">
+            {partial.length === 1 ? `${reader.missing.get(partial[0])} of ${whose} still need to vote on ${refList(partial)}` : `Not all of ${whose} have voted on ${refList(partial)}`}
+            {' · '}<Link to={paths.governanceMe()}>My governance</Link>
+          </p>
+        )}
+      </section>
+
+      <div className={`gov-hub-grid${sideColumn ? '' : ' gov-hub-grid-one'}`}>
+        <section className="gov-hub-col" aria-labelledby="hub-discussions">
+          <div className="gov-hub-card-head"><h2 id="hub-discussions" className="gov-h3">Recent discussions</h2><Link to={paths.discussions()} className="gov-more-link">All discussions</Link></div>
+          {discussions === null ? <NotReady what="forum" />
+            : !discussions ? <div className="gov-skeleton-list" aria-busy="true"><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></div>
+              : !discussions.length ? <p className="gov-empty">No discussions yet.</p>
+                : <ul className="gov-discs">{discussions.slice(0, 4).map(d => <DiscussionItem key={d.postId} row={d} now={now} compact />)}</ul>}
+        </section>
+        {sideColumn && (
+          <section className="gov-hub-col" aria-labelledby="hub-ending">
+            {/* With three or fewer live referenda the cards above already are the closing order. */}
+            {active.length > 3 && (
+              <>
+                <div className="gov-hub-card-head"><h2 id="hub-ending" className="gov-h3">Closing soon</h2></div>
+                {!overview.data ? <p className="gov-empty">The deadlines could not be loaded.</p>
+                  : <DeadlineList rows={(overview.data.endingSoon ?? []).slice(0, 4)} now={now} empty="No referendum is open, so nothing is closing." />}
+              </>
+            )}
+            {coming.loading ? <div className="gov-skeleton-list" aria-busy="true"><div className="skeleton" /><div className="skeleton" /></div>
+              : coming.upcoming.length > 0 && (
+                <>
+                  <div className="gov-hub-card-head">{active.length > 3 ? <h3 className="gov-h3">Coming up</h3> : <h2 id="hub-ending" className="gov-h3">Coming up</h2>}</div>
+                  <ComingUp events={coming.upcoming} now={now} />
+                </>
+              )}
+          </section>
+        )}
+      </div>
+
+      <nav className="gov-hub-foot" aria-label="More governance">
+        <Link to={paths.governanceMe()}>My governance</Link>
+        <Link to={paths.discussions()}>Discussions</Link>
+        <Link to={paths.governancePropose()}>New proposal</Link>
+        <a href="/feeds/referenda.atom">Referenda feed</a>
+      </nav>
+    </>
+  )
+}
+
+/* ---- the page ---- */
+
+const TABS = ['overview', 'referenda', 'committee', 'archive', 'stats'] as const
+
+export function Governance() {
+  useDocumentTitle('Governance')
+  const overview = useGovernanceOverview()
+  const query = useQuery()
+  const requestedTab = query.get('tab') ?? query.get('view') ?? 'overview'
+  // Older links: ?view=opengov (the referenda table), ?view=tc, ?view=democracy.
+  const legacy: Record<string, string> = { opengov: 'referenda', tc: 'committee', democracy: 'archive' }
+  const tab = (TABS as readonly string[]).includes(legacy[requestedTab] ?? requestedTab) ? (legacy[requestedTab] ?? requestedTab) : 'overview'
+  const requestedPage = Number.parseInt(query.get('page') ?? '', 10)
+  const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
+  const setPage = (next: number) => setQuery({ page: next > 0 ? String(next) : null })
+
+  const counts = overview.data?.counts
+  const tabs = useMemo(() => [
+    { key: 'overview', label: 'Overview' },
+    { key: 'referenda', label: 'Referenda', ...(counts ? { count: counts.opengov } : {}) },
+    { key: 'committee', label: 'Committee', title: 'The technical committee', ...(counts ? { count: counts.tcMotions } : {}) },
+    { key: 'archive', label: 'Archive', title: 'Democracy, Council and treasury tips before OpenGov' },
+    { key: 'stats', label: 'Stats', title: 'Turnout, active voters, HDX locked in votes and pass rates' },
+  ], [counts])
+
+  const liveByIndex = useMemo(() => new Map((overview.data?.active ?? []).map(c => [c.index, c])), [overview.data])
+  const shortIndexes = useMemo(() => new Set(
+    (overview.data?.active ?? []).filter(c => c.progress?.projection?.state === 'short').map(c => c.index),
+  ), [overview.data])
 
   return (
-    <div className="wrap">
+    <div className="wrap gov-hub">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Governance' }]} />
-        <div className="page-title">
+        <h1 className="page-title">
           Governance
-          <span className="sub">OpenGov referenda · technical committee motions · the pre-OpenGov archive</span>
-        </div>
+          <span className="sub">referenda, the committee and the forum</span>
+        </h1>
       </div>
+      {(tab === 'overview' || tab === 'referenda') && <GovTerms terms={['approval', 'support', 'confirming', 'tracks']} className="gov-head-terms" />}
+      {tab === 'stats' && <GovTerms terms={['turnout', 'locks', 'tracks']} className="gov-head-terms" />}
 
-      {/* The same chain-wide watches the detail pages offer, where the reader
-          actually is: referenda phase alerts here, committee motions on their
-          own tab below. */}
-      <div className="ext-link-row">
-        <NotifyButton
-          variant="link"
-          label="Watch referenda"
-          title="Alert me when a referendum enters a new phase"
-          rule={{ kind: 'referendum', params: {}, name: 'New referenda' }}
-        />
-      </div>
+      <DetailTabs tabs={tabs} active={tab} onChange={k => setQuery({ tab: k === 'overview' ? null : k, view: null, page: null, status: null, kind: null, show: null, cpage: null, tpage: null })} />
 
-      {active.length > 0 && (
+      {tab === 'overview' && <Overview />}
+
+      {tab === 'referenda' && <ReferendaTable pallet="opengov" page={page} onPage={setPage} shortIndexes={shortIndexes} live={liveByIndex} />}
+
+      {tab === 'committee' && (
         <>
-          <div className="sec-title">Deciding now
-            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {active.length} open {active.length === 1 ? 'referendum' : 'referenda'}, soonest to resolve first</span>
-          </div>
-          <div className="gov-cards">
-            {active.map(card => <ActiveCard key={card.index} card={card} stats={stats} now={now} />)}
-          </div>
-        </>
-      )}
-
-      <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'opengov' ? null : k, page: null, status: null, track: null })} />
-
-      {activeView === 'opengov' && <ReferendaTable pallet="opengov" page={page} onPage={setPage} shortIndexes={shortIndexes} />}
-
-      {activeView === 'tc' && (
-        <>
-          <div className="ext-link-row" style={{ marginTop: 2 }}>
-            <NotifyButton
-              variant="link"
-              label="Watch TC motions"
-              title="Alert me when the technical committee proposes or resolves a motion"
-              rule={{ kind: 'tc-motion', params: {}, name: 'TC motions' }}
-            />
-          </div>
-          <p className="gov-era-note">The technical committee fast-tracks upkeep the runtime trusts it with — registry updates, parameter changes, emergency actions. Each motion links to its propose transaction, where the full call is decoded.</p>
-          <TcMembersCard />
+          <p className="gov-era-note">Fast-tracks upkeep the runtime trusts it with. A majority acts immediately. Each motion links to its propose transaction, where the call is decoded.</p>
+          <TcMembers />
           <MotionsTable body="tc" page={page} onPage={setPage} />
         </>
       )}
-      {activeView === 'archive' && (
+      {tab === 'stats' && <Suspense fallback={<ChartSkeleton h={220} />}><GovStats /></Suspense>}
+      {tab === 'archive' && (
         <>
-          <p className="gov-era-note">The pre-OpenGov era, kept readable rather than just kept: Democracy referenda (July 2022 – August 2025), Council motions and treasury tips (both until January 2025).</p>
-          <div className="sec-title" style={{ marginTop: 18 }}>Democracy referenda{counts ? ` · ${F.int(counts.democracy)}` : ''}</div>
-          <ReferendaTable pallet="democracy" page={page} onPage={setPage} />
-          <div className="sec-title" style={{ marginTop: 22 }}>Council motions{counts ? ` · ${F.int(counts.councilMotions)}` : ''}</div>
-          <CouncilMotions />
-          <div className="sec-title" style={{ marginTop: 22 }}>Treasury tips{counts ? ` · ${F.int(counts.tips)}` : ''}</div>
-          <TipsTable />
+          <p className="gov-era-note">Pre-OpenGov governance, July 2022 – August 2025, read-only.</p>
+          <Archive counts={counts} page={page} onPage={setPage} />
         </>
       )}
     </div>

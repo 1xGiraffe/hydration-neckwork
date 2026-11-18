@@ -4,6 +4,8 @@ import { allExplorerAssets } from '../services/explorerAssets.ts'
 import { allTags } from '../services/tagService.ts'
 import { publicLists, publicListTags } from '../services/userListService.ts'
 import { referendumTitles } from '../services/referendumTitleService.ts'
+import { forumReady } from '../services/forumStore.ts'
+import { listDiscussions } from '../services/forumRead.ts'
 import { getAccounts } from '../services/explorerService.ts'
 import { PUBLIC_URL, UNBOUNDED_PREFIXES } from './seo.ts'
 
@@ -112,7 +114,7 @@ function paginate(section: Section, urls: SitemapUrl[]): Map<string, string> {
 // is a real route in explorer-ui/src/router.tsx.
 const CORE_PATHS = [
   '/', '/activity', '/blocks', '/extrinsics', '/events', '/accounts', '/contracts', '/assets',
-  '/governance', '/tags', '/tags/hydration', '/lists', '/omnipool', '/liquidity',
+  '/governance', '/discussions', '/tags', '/tags/hydration', '/lists', '/omnipool', '/liquidity',
   '/hdx', '/hollar', '/intents', '/juicer', '/bil', ...BOND_FAMILIES.map(f => bondFamilyPath(f.key)), '/revenue', '/revenue/users', '/revenue/protocol', '/volume', '/oracles', '/security', '/mcp',
 ]
 
@@ -150,6 +152,11 @@ async function collect(): Promise<Record<Section, SitemapUrl[]>> {
       ? [at(`/referendum/${pallet}/${index}`)]
       : []
   })
+  // Every visible discussion (a hidden one renders as a stub and is no page to
+  // list), dated by its last activity.
+  if (forumReady()) {
+    governance.push(...listDiscussions({ sort: 'new', offset: 0, limit: Number.MAX_SAFE_INTEGER }).rows.map(r => at(`/discussions/${r.postId}`, r.lastActivityAt)))
+  }
 
   // The ranked head of the directory (see SITEMAP_ACCOUNT_LIMIT). `lastBlock` is
   // a block height, not a time, so no lastmod is claimed for these.

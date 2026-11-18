@@ -28,6 +28,7 @@ describe('004_user.sql', () => {
       'user_list_subscriptions', 'user_list_order',
       'user_notification_channels', 'user_notification_rules', 'user_notification_inbox', 'user_notification_state',
       'user_api_tokens', 'user_api_limits', 'user_api_usage',
+      'user_forum_reports', 'user_forum_sanctions',
     ]
     for (const t of tables) {
       const stmt = statements.find(s => s.includes(`price_data.${t}`))

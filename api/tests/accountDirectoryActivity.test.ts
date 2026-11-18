@@ -94,10 +94,15 @@ describe('the directory activity column is the feed total', () => {
     expect(at).toBeGreaterThan(-1)
     const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
 
-    expect(body).toContain('price_data.account_activity_v3')
-    expect(body).toContain('ORDER BY count() DESC')
-    expect(body).toContain('ACTIVITY_LEADERBOARD_POOL + 1')
+    expect(body).toContain('activityLeaderboardTopRefs(ACTIVITY_LEADERBOARD_POOL + 1)')
     expect(body).toContain('refsOutside')
+    // The ranking itself: per key range of the table, merged (activityPoolRanges.test.ts).
+    const topAt = explorerService.indexOf('async function activityLeaderboardTopRefs')
+    expect(topAt).toBeGreaterThan(-1)
+    const top = explorerService.slice(topAt, explorerService.indexOf('\n}\n', topAt))
+    expect(top).toContain('price_data.account_activity_v3')
+    expect(top).toContain('ORDER BY count() DESC')
+    expect(top).toContain('mergeTopRefs(lists, limit)')
   })
 
   // Building the ranking is minutes of work; a request must never trigger it.

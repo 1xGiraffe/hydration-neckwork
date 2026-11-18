@@ -249,31 +249,6 @@ services:
       "--cycle-minutes=${REFERENDUM_PROPOSAL_CYCLE_MINUTES:-2}",
       "--max=${REFERENDUM_PROPOSAL_MAX:-200}"]
 
-  # Referendum titles from SubSquare. The chain has no human title for a
-  # referendum, so "#369" is all the explorer could show without this. Live
-  # referenda are re-read every LIVE_REFRESH_MINUTES (Hydration usually has 0-2
-  # open); concluded ones are fetched once and then never requested again, which is
-  # what keeps the 576 settled referenda from being re-crawled every cycle.
-  referendum-titles:
-    <<: *service
-    image: hydration-neckwork-indexer:latest
-    build: .
-    container_name: hydration-neckwork-referendum-titles
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-      schema-bootstrap:
-        condition: service_completed_successfully
-    environment:
-      - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
-      - SUBSQUARE_BASE_URL=${SUBSQUARE_BASE_URL:-https://hydration.subsquare.io}
-    command: ["src/scripts/snapshot-referendum-titles.ts", "--loop",
-      "--cycle-minutes=${REFERENDUM_TITLE_CYCLE_MINUTES:-15}",
-      "--live-refresh-minutes=${REFERENDUM_TITLE_LIVE_REFRESH_MINUTES:-30}",
-      "--max-fetches=${REFERENDUM_TITLE_MAX_FETCHES:-40}",
-      "--delay-ms=${REFERENDUM_TITLE_DELAY_MS:-1500}"]
-
   # Seed current balances for every account, including dormant accounts with no
   # events in the indexed range (a database never seeded gets the full write), then
   # reconcile weekly: compare every System.Account/Tokens.Accounts entry at
@@ -458,6 +433,114 @@ services:
       schema-bootstrap:
         condition: service_completed_successfully
 
+  # The governance forum's IPFS node (kubo): the store of every image a forum post
+  # references — uploads later, and the images the Subsquare import re-hosts. Pinned by
+  # version AND digest (v0.43.1, released 2026-09-15). Its own hardening, not the api
+  # anchor: non-root (the image's ipfs user, uid 1000), no capabilities,
+  # no-new-privileges, a read-only root filesystem with only its repo volume and /tmp
+  # writable, and a memory ceiling. ops/ipfs-init.sh applies its whole configuration on
+  # every start (gateway serves local blocks only, no relay or AutoNAT service for
+  # others, bounded connections). The RPC (:5001, full admin power) and the gateway
+  # (:8080) sit on `ipfs-internal` alone — an internal network only the api, the sync
+  # and the forum backup join — and NO port is published on the host, swarm included:
+  # the node reaches the IPFS network over outbound connections on `ipfs-egress`
+  # (DHT client providing, relay reservations, hole punching). IPFS_ANNOUNCE=false
+  # makes it local-only.
+  ipfs:
+    <<: *service
+    image: ipfs/kubo:v0.43.1@sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48
+    container_name: hydration-neckwork-ipfs
+    user: "1000:100"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    networks:
+      - ipfs-internal
+      - ipfs-egress
+    # The image's own command plus --enable-gc: blocks no pin holds are removed
+    # (ops/ipfs-init.sh sets the ceiling and period).
+    command: ["daemon", "--migrate=true", "--agent-version-suffix=docker", "--enable-gc"]
+    environment:
+      - IPFS_ANNOUNCE=${IPFS_ANNOUNCE:-true}
+    volumes:
+      - ipfs_data:/data/ipfs
+      - ./ops/ipfs-init.sh:/container-init.d/001-forum-config.sh:ro
+
+  # Subsquare → forum import and sync (src/governance/subsquare/,
+  # src/scripts/sync-subsquare-content.ts): a resumable full import, then a batch
+  # every SUBSQUARE_CYCLE_MINUTES — head pass, new-uid probe, rolling re-sweep —
+  # into the forum_* tables (021_forum.sql), re-hosting the images bodies reference
+  # onto the `ipfs` node. Polite by construction: one request in flight, at most
+  # SUBSQUARE_RPS, an identifying User-Agent, backoff and a circuit breaker.
+  # SUBSQUARE_SYNC_ENABLED=false is the kill switch (the loop idles; content already
+  # imported stays, attributed). Its own image tag built from the indexer Dockerfile,
+  # so building it never moves hydration-neckwork-indexer:latest under the
+  # supervisor's workers. Hardened like the api family — it fetches URLs strangers
+  # wrote (the SSRF guard in src/governance/subsquare/safeFetch.ts is the first line).
+  governance-content-sync:
+    <<: [*service, *hardened]
+    image: hydration-neckwork-governance-sync
+    build: .
+    container_name: hydration-neckwork-governance-content-sync
+    # It parses strangers' JSON and images: bounded like the ipfs node (about 110 MiB
+    # and 40 threads in use), no swap, so a runaway answer kills only this container.
+    mem_limit: 768m
+    memswap_limit: 768m
+    pids_limit: 128
+    networks:
+      - neckwork
+      - ipfs-internal
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
+      ipfs:
+        condition: service_started
+    environment:
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      # Its own user, holding SELECT/INSERT on the forum_* tables and nothing else
+      # (created by the host's grants tooling from 021_forum.sql); never `default`.
+      - CLICKHOUSE_USER=governance_sync
+      # `:-`, never `:?` — the supervisor's nested compose parses this file without
+      # the host .env, and a required-variable error there would stop every worker.
+      - CLICKHOUSE_PASSWORD=${GOVERNANCE_SYNC_CLICKHOUSE_PASSWORD:-}
+      - SUBSQUARE_API_URL=${SUBSQUARE_API_URL:-https://hydration-api.subsquare.io}
+      - SUBSQUARE_SYNC_ENABLED=${SUBSQUARE_SYNC_ENABLED:-true}
+      - SUBSQUARE_RPS=${SUBSQUARE_RPS:-1}
+      - SUBSQUARE_SWEEP_HOURS=${SUBSQUARE_SWEEP_HOURS:-24}
+      - IPFS_API_URL=http://hydration-neckwork-ipfs:5001
+    command: ["src/scripts/sync-subsquare-content.ts", "--loop", "--cycle-minutes=${SUBSQUARE_CYCLE_MINUTES:-10}"]
+
+  # Nightly export of the forum tables (021_forum.sql) — public, but authored by the
+  # api and the Subsquare import, so no projection rebuild can regenerate them — plus
+  # every forum image as a CAR file from the ipfs node. Mirrors contract-backup; see
+  # ops/backup-forum-tables.sh for the export/retention/restore procedure.
+  forum-backup:
+    <<: *service
+    build: ./clickhouse
+    container_name: hydration-neckwork-forum-backup
+    entrypoint: ["/bin/sh", "/backup-forum-tables.sh"]
+    networks:
+      - neckwork
+      - ipfs-internal
+    volumes:
+      - ./ops/backup-forum-tables.sh:/backup-forum-tables.sh:ro
+      - forum_backups:/backups
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - IPFS_API_URL=http://hydration-neckwork-ipfs:5001
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
+
   api:
     <<: [*service, *hardened]
     build:
@@ -468,6 +551,12 @@ services:
     # rebuild of `api` leaves derivations/api-public/api-data on the stale tag.
     image: hydration-neckwork-api
     container_name: hydration-neckwork-api
+    # ipfs-internal: /forum/media/:cid streams pinned forum images from the ipfs
+    # node's gateway, and forum uploads are added, pinned, unpinned and collected
+    # through its RPC (services/forumMedia.ts).
+    networks:
+      - neckwork
+      - ipfs-internal
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -541,6 +630,14 @@ services:
       - ADMIN_ACCOUNT_IDS=${ADMIN_ACCOUNT_IDS:-}
       - DATA_API_DEFAULT_PER_MINUTE=${DATA_API_DEFAULT_PER_MINUTE:-}
       - DATA_API_DEFAULT_PER_DAY=${DATA_API_DEFAULT_PER_DAY:-}
+      # Governance forum writes (routes/forum.ts): moderators are ADMIN_ACCOUNT_IDS
+      # plus these (0x AccountId32 hex, comma-separated); the stake an account needs
+      # to comment and to start a discussion (HDX); and the forum's IPFS node RPC,
+      # where uploads are pinned (ipfs-internal only).
+      - FORUM_MODERATOR_ACCOUNT_IDS=${FORUM_MODERATOR_ACCOUNT_IDS:-}
+      - FORUM_MIN_HDX_COMMENT=${FORUM_MIN_HDX_COMMENT:-1}
+      - FORUM_MIN_HDX_POST=${FORUM_MIN_HDX_POST:-100}
+      - IPFS_API_URL=http://hydration-neckwork-ipfs:5001
       # Wormhole NTT backing check. Optional origin-chain RPC map (JSON keyed by
       # Wormhole chain id) for reading the custody that backs the bridged supply;
       # empty disables custody reads and the affected assets report as
@@ -549,9 +646,6 @@ services:
       - WORMHOLE_ORIGIN_RPC_URLS=${WORMHOLE_ORIGIN_RPC_URLS:-}
       # Unset-only default (no colon): setting it EMPTY is the disable switch.
       - WORMHOLE_SCAN_URL=${WORMHOLE_SCAN_URL-https://api.wormholescan.io}
-      # Read by governanceService for referendum links; the titles snapshotter
-      # reads the same variable, and the two must name the same site.
-      - SUBSQUARE_BASE_URL=${SUBSQUARE_BASE_URL:-https://hydration.subsquare.io}
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
       - EXPLORER_EXTRA_MM_CONTRACT_ASSET=${EXPLORER_EXTRA_MM_CONTRACT_ASSET:-}
 
@@ -797,9 +891,21 @@ volumes:
     name: ${CLICKHOUSE_VOLUME_NAME:-hydration-neckwork-clickhouse-data}
   user_backups:
   contract_backups:
+  forum_backups:
+  ipfs_data:
   solidity_compilers:
 
 networks:
   neckwork:
     name: hydration-neckwork-network
+    driver: bridge
+  # The forum IPFS node's RPC and gateway: internal (no route out), joined only by
+  # ipfs, api, governance-content-sync and forum-backup.
+  ipfs-internal:
+    name: hydration-neckwork-ipfs-internal
+    driver: bridge
+    internal: true
+  # The ipfs node's own outbound path to the IPFS network; nothing else joins it.
+  ipfs-egress:
+    name: hydration-neckwork-ipfs-egress
     driver: bridge

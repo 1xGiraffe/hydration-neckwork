@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { initExplorerService, search } from '../src/services/explorerService.ts'
 import { initGovernanceService } from '../src/services/governanceService.ts'
-import { initReferendumTitleService } from '../src/services/referendumTitleService.ts'
 
 // An ICE intent is found by its whole u128 id or by the "#n" handle its pages print
 // (the id's low 64 bits, the pallet's incremental counter).
@@ -24,7 +23,6 @@ function init(seen: { query: string; params?: Record<string, unknown> }[]): void
   }
   initExplorerService(client as never)
   initGovernanceService(client as never)
-  initReferendumTitleService(client as never)
 }
 
 describe('search: ICE intents', () => {

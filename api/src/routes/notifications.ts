@@ -19,6 +19,7 @@ import { deliveryCounters, sendToChannel, vapidPublicKey, webPushConfigured, tel
 import { evaluatorStatus } from '../notifications/evaluator.ts'
 import { isApiAdmin } from '../services/userApiTokenService.ts'
 import { createTelegramLink, telegramLinkStatus, telegramBotUsername } from '../notifications/telegramBot.ts'
+import { forumPost } from '../services/forumStore.ts'
 
 // Per-account notification management. Everything lives under
 // /user/notifications/ so the nginx uncached /api/user/ location and this
@@ -64,6 +65,8 @@ function ruleRef(r: NotificationRule) {
       assetId => displayDescriptor(assetId).symbol,
       t => resolveActivityTarget(r.accountId, t),
       key => mmMarketByKey(key)?.label ?? null,
+      // A followed thread by its title, only while the thread's post is shown.
+      threadKey => { const p = forumPost(threadKey); return p && !p.hidden && !p.deleted && p.title ? p.title : null },
     ),
     params: r.params,
     channels: r.channels,
@@ -82,10 +85,15 @@ function ruleRef(r: NotificationRule) {
 
 // The address a rule watches, whichever kind carries one. `activityTargetOf`
 // answers for the two kinds the EVALUATOR groups by; a liquidation rule targets
-// an account too and its row deserves the same pill.
+// an account too, and the governance kinds name one by a bare `address` — their
+// rows deserve the same pill.
 function addressTargetOf(r: NotificationRule): string | null {
   const activity = activityTargetOf(r.kind, r.params)
   if (activity?.kind === 'address') return activity.address
+  if (r.kind === 'gov-unvoted' || r.kind === 'gov-unlockable') {
+    const address = (r.params as { address?: unknown }).address
+    return typeof address === 'string' ? address : null
+  }
   if (r.kind !== 'liquidation') return null
   const t = (r.params as { target?: { kind?: string; address?: string } }).target
   return t?.kind === 'address' && typeof t.address === 'string' ? t.address : null

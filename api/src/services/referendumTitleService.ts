@@ -1,66 +1,48 @@
-import type { ClickHouseClient } from '../db/client.ts'
+import { forumGeneration, forumPosts, forumReady } from './forumStore.ts'
 
 // Referendum titles, kept in memory.
 //
-// A title says what a referendum is; "#369" does not. They come from SubSquare via
-// the referendum-titles service and land in price_data.referendum_titles, a table of
-// at most a few hundred short strings — so the API holds the whole thing in a Map
-// and refreshes it on an interval, the same shape identityService uses. That keeps
-// title lookup free on every vote row the explorer renders, instead of joining a
-// table into every activity query.
+// A title says what a referendum is; "#369" does not. The chain has none, so they
+// come from the governance forum: the description post of each on-chain subject
+// (forum_posts, post_id 'opengov:<i>' / 'democracy:<i>', 021_forum.sql), imported
+// from Subsquare by the governance-content-sync service or written natively by the
+// proposer. They are read from the api's in-process forum snapshot (forumStore.ts),
+// rebuilt whenever its `generation` moves — which every native write and moderation
+// action does at once (the snapshot is patched before the write answers), and every
+// reload of the tables within FORUM_REFRESH_MS — so a hidden or deleted description
+// stops lending its title to every surface (vote rows, search, share cards, feeds,
+// notifications, the MCP through the explorer routes) within seconds. Lookup stays a
+// synchronous Map read on every vote row the explorer renders. Titles are
+// user-authored and HOSTILE: rendered as text, never markup.
 //
 // Keys are `${pallet}:${index}`: Hydration voted through both pallets and both
-// index from 0 (Democracy 0-206, OpenGov 0-369), so a bare number would collide.
-let client: ClickHouseClient
-let byRef = new Map<string, string>()
-let refreshTimer: ReturnType<typeof setInterval> | null = null
-let loadInflight: Promise<void> | null = null
+// index from 0, so a bare number would collide — and they are exactly the forum's
+// post ids. While the snapshot has not loaded there are no titles, never stale ones.
 
-export function initReferendumTitleService(c: ClickHouseClient): void { client = c }
+const SUBJECT_KINDS = new Set(['opengov', 'democracy'])
+let built: { generation: string; byRef: Map<string, string> } | null = null
 
 export function referendumTitleKey(pallet: string, index: number | string): string {
   return `${pallet}:${index}`
 }
 
-async function loadUncached(): Promise<void> {
-  const res = await client.query({
-    query: `SELECT pallet, ref_index, title FROM price_data.referendum_titles FINAL WHERE title != ''`,
-    format: 'JSONEachRow',
-  })
-  const rows = await res.json<{ pallet: string; ref_index: number; title: string }>()
-  const next = new Map<string, string>()
-  for (const row of rows) {
-    if (!row.pallet || !row.title) continue
-    next.set(referendumTitleKey(row.pallet, Number(row.ref_index)), row.title)
+function titleMap(): ReadonlyMap<string, string> {
+  if (!forumReady()) return new Map()
+  const generation = forumGeneration()
+  if (built?.generation === generation) return built.byRef
+  const byRef = new Map<string, string>()
+  for (const post of forumPosts()) {
+    if (!SUBJECT_KINDS.has(post.kind) || post.hidden || post.deleted) continue
+    // Stored verbatim (whitespace included); a title is shown trimmed.
+    const title = post.title.trim()
+    if (title) byRef.set(post.postId, title)
   }
-  byRef = next
-}
-
-export function loadReferendumTitles(): Promise<void> {
-  if (loadInflight) return loadInflight
-  const request = loadUncached().finally(() => { if (loadInflight === request) loadInflight = null })
-  loadInflight = request
-  return request
-}
-
-// The fetcher re-reads a LIVE referendum's title every 30 min, so a 5-minute
-// refresh here means an edited title shows up promptly without the API ever
-// querying the table per request.
-export function startReferendumTitleRefresh(intervalMs = 5 * 60 * 1000): void {
-  if (refreshTimer) return
-  refreshTimer = setInterval(() => { loadReferendumTitles().catch(() => { /* keep the stale map on error */ }) }, intervalMs)
-  refreshTimer.unref()
-}
-
-export function stopReferendumTitleRefresh(): void {
-  if (!refreshTimer) return
-  clearInterval(refreshTimer)
-  refreshTimer = null
+  built = { generation, byRef }
+  return byRef
 }
 
 export async function referendumTitles(): Promise<ReadonlyMap<string, string>> {
-  if (!byRef.size) await loadReferendumTitles().catch(() => { /* absent titles are absent, not fatal */ })
-  return byRef
+  return titleMap()
 }
 
 // The highest index this pallet is known to have reached, or null while the map
@@ -70,7 +52,7 @@ export async function referendumTitles(): Promise<ReadonlyMap<string, string>> {
 // one without a query. Null means "cannot say", never "nothing exists".
 export function highestReferendumIndex(pallet: string): number | null {
   let highest: number | null = null
-  for (const key of byRef.keys()) {
+  for (const key of titleMap().keys()) {
     const [keyPallet, index] = key.split(':')
     if (keyPallet !== pallet) continue
     const n = Number(index)
@@ -84,13 +66,13 @@ export function highestReferendumIndex(pallet: string): number | null {
 // the UI falls back to the index instead of showing an invented name.
 export function referendumTitleFor(pallet: string, index: number | string | null | undefined): string | null {
   if (index == null || index === '') return null
-  return byRef.get(referendumTitleKey(pallet, index)) ?? null
+  return titleMap().get(referendumTitleKey(pallet, index)) ?? null
 }
 
 // Whether a title says anything a reader could not have worked out from the index.
 //
-// What this table holds is SubSquare's page title, and for a referendum nobody
-// wrote a post for that is the platform's own placeholder: the bare
+// An imported title is Subsquare's, and for a referendum nobody wrote a post for
+// that is the platform's own placeholder: the bare
 // "Referendum #123", sometimes with the track in brackets ahead of it, sometimes
 // literally "Untitled". A message whose subject line is that placeholder repeats
 // the index its own headline already carries, which is why the submitted-phase

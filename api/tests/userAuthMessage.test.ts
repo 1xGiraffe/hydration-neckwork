@@ -19,6 +19,12 @@ describe('buildLoginMessage', () => {
     expect(msg).toContain(`Issued At: ${ISSUED}`)
     expect(msg).toContain('no transaction')
   })
+
+  it('names the purpose and when the request stops being accepted', () => {
+    const msg = buildLoginMessage('explorer.example.org', '15DajY…', '15DajY…', NONCE, ISSUED, '2026-07-28T12:15:00.000Z')
+    expect(msg).toContain('Purpose: sign in to the Hydration Explorer at explorer.example.org')
+    expect(msg).toContain('Expires At: 2026-07-28T12:15:00.000Z')
+  })
 })
 
 describe('verifySignedLogin (substrate)', () => {

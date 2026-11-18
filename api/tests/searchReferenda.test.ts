@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { initExplorerService, search, type SearchResult } from '../src/services/explorerService.ts'
 import { initGovernanceService, referendumStatusFrom } from '../src/services/governanceService.ts'
-import { initReferendumTitleService } from '../src/services/referendumTitleService.ts'
+import { setForumSnapshotForTest, type ForumPostMeta } from '../src/services/forumStore.ts'
 
 // A fixed referendum directory shared by every test below. `getReferenda` (which
 // search() reaches for both the index and title matchers) is single-flight cached
@@ -40,9 +40,6 @@ function clientFor(blockHitHeight: number | null) {
           })),
         }
       }
-      if (opts.query.includes('price_data.referendum_titles')) {
-        return { json: async () => DIRECTORY.filter(r => r.title).map(r => ({ pallet: r.pallet, ref_index: r.index, title: r.title })) }
-      }
       if (opts.query.includes('price_data.raw_blocks')) {
         const h = opts.query_params?.h
         return { json: async () => [{ c: blockHitHeight != null && h === blockHitHeight ? '1' : '0' }] }
@@ -56,7 +53,14 @@ function init(blockHitHeight: number | null = null): void {
   const client = clientFor(blockHitHeight)
   initExplorerService(client as never)
   initGovernanceService(client as never)
-  initReferendumTitleService(client as never)
+  // Titles come from the forum snapshot's description posts.
+  setForumSnapshotForTest({
+    posts: new Map(DIRECTORY.filter(r => r.title).map(r => [`${r.pallet}:${r.index}`, {
+      postId: `${r.pallet}:${r.index}`, kind: r.pallet, title: r.title!, excerpt: '', bodyFormat: 'markdown', bodyLength: 1, tldr: '', labels: [], linked: [],
+      authorAccountId: '', authorLegacyName: '', authority: 'subsquare', source: 'subsquare', sourceId: '', sourceCid: '', sourceRemoved: false, bannerCid: '',
+      pollJson: '', revision: 0, hidden: false, hiddenReason: '', deleted: false, locked: false, moderated: false, createdAt: 1, editedAt: null, lastActivityAt: 1, updatedAt: 0,
+    } satisfies ForumPostMeta])),
+  })
 }
 
 const refs = (results: SearchResult[]) => results.filter(r => r.type === 'referendum')

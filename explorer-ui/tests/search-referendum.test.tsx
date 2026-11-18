@@ -63,3 +63,17 @@ describe('SearchResultBody (referendum)', () => {
     expect(html).toContain('submitted')
   })
 })
+
+describe('discussion hits', () => {
+  const imported: SearchResult = { type: 'discussion', value: 's248', label: '<img src=x onerror=alert(1)> Fee rework', desc: 'Discussion · 3 comments' }
+  it('routes to the discussion page by post id', () => {
+    expect(routeFor(imported)).toBe('/discussions/s248')
+    expect(TYPE_LABEL.discussion).toBe('Discussion')
+  })
+  it('renders the user-authored title as text, never markup', () => {
+    const html = renderToStaticMarkup(<SearchResultBody r={imported} />)
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt; Fee rework')
+    expect(html).not.toContain('<img')
+    expect(html).toContain('3 comments')
+  })
+})

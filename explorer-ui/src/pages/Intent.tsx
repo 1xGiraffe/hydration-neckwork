@@ -155,9 +155,9 @@ export function Intent({ intentId }: { intentId: string }) {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Intents', to: paths.intents() }, { label: title }]} />
-        <div className="page-title">{title}
+        <h1 className="page-title">{title}
           {data && <span className="sub">{data.status}</span>}
-        </div>
+        </h1>
       </div>
       {isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Intent not found</div>
         : isLoading || !data ? <div className="detail-card"><SkeletonRows rows={5} /></div> : (

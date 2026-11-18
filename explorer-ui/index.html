@@ -9,6 +9,7 @@
     <link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48" href="/favicon.ico" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.json" />
+    <link rel="alternate" type="application/atom+xml" title="Hydration referenda" href="/feeds/referenda.atom" />
     <meta name="theme-color" content="#030816" />
     <!-- Both names, deliberately: Chromium deprecated the apple- prefixed one
          and warns in the console, while iOS Safari still reads only that one.
@@ -16,7 +17,7 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <!-- The two fonts a page title is made of: the Gazpacho label and the GeistMono
          id beside it (.page-title / .num, both weight 500). Their fallbacks are much
          narrower, so a title that fits one line before the swap wraps to two after
@@ -31,9 +32,14 @@
          is ~1.4s of the pipe — it costs ~0.4s of LCP to buy the stable layout.
          Only the `-latin` halves are preloaded: a title is Latin text, and the
          `-ext` halves exist for the rare accented or Cyrillic name, so preloading
-         them would spend the pipe on bytes the page almost never draws. -->
+         them would spend the pipe on bytes the page almost never draws.
+         GeistMono Regular (18kB) joins them: it sets a title's subtitle, the filter
+         chips and inline code, and once the route chunk and its api read are
+         preloaded too (seo.ts), the page paints before it arrives and its swap
+         re-wraps those lines — up to 0.07 of shift on a governance page at 390px. -->
     <link rel="preload" href="/fonts/GazpachoMedium-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/GeistMonoMedium-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/GeistMonoRegular-latin.woff2" as="font" type="font/woff2" crossorigin />
     <script>
       (function () {
         // A saved choice wins; without one, follow the OS setting.

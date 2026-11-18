@@ -42,9 +42,9 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={crumbs} />
-        <div className="page-title">DCA execution <span className="num">{height}-e{eventIndex}</span>
+        <h1 className="page-title">DCA execution <span className="num">{height}-e{eventIndex}</span>
           {data && <span className="sub">{data.status === 'failed' ? 'failed attempt' : 'executed'}</span>}
-        </div>
+        </h1>
       </div>
 
       {isLoading || !data ? <div className="detail-card"><SkeletonRows rows={5} /></div> : (

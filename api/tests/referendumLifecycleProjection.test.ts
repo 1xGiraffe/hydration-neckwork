@@ -24,11 +24,10 @@ describe('the referendum lifecycle projection replaces the raw_events scans', ()
     expect(occurrences(governanceService, '{prefix:String}')).toBe(0)
   })
 
-  it('reads the lifecycle from the projection at both of its API sites', () => {
-    // The detail page and the directory. The title fetcher's inventory runs the same
-    // shape on a fifteen-minute loop and is guarded in its own workspace
-    // (tests/governance/referendumInventory.test.ts).
-    expect(occurrences(governanceService, 'price_data.referendum_lifecycle_events')).toBe(2)
+  it('reads the lifecycle from the projection at each of its API sites', () => {
+    // The detail page, the directory and the whole-OpenGov read the governance hub's
+    // tracks, calendar and vote state share (allOpengovLifecycle).
+    expect(occurrences(governanceService, 'price_data.referendum_lifecycle_events')).toBe(3)
   })
 
   it('looks a referendum up by its decoded key rather than re-parsing args_json', () => {
@@ -48,8 +47,8 @@ describe('the referendum lifecycle projection replaces the raw_events scans', ()
   // has to be collapsed, which is what FINAL does — re-running the backfill doubled the
   // physical rows to 5,292 and an un-FINAL read of referendum 368 returned 10 rows for its
   // 5 events, while every FINAL read stayed byte-identical.
-  it('reads the projection with FINAL at both sites', () => {
-    expect(occurrences(governanceService, 'price_data.referendum_lifecycle_events FINAL')).toBe(2)
+  it('reads the projection with FINAL at every site', () => {
+    expect(occurrences(governanceService, 'price_data.referendum_lifecycle_events FINAL')).toBe(3)
   })
 
   // The last lifecycle event's block is not unique across referenda: 84 of the 580 share

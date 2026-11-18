@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../../db/client.ts'
+import { foldTreasury, type SpendFold, type TreasuryEventRow } from '../../services/treasurySpends.ts'
 import { iso } from '../schemas/common.ts'
 import { accountRefOrNull, type AccountRef } from './address.ts'
 import { parseJsonColumn } from './chainCore.ts'
@@ -9,6 +10,11 @@ import type { Order } from './feed.ts'
 // three-granule table), which is the same seam the explorer's referenda
 // surfaces read; votes come from governance_vote_calls (ref-first) and its
 // voter-first twin governance_vote_calls_by_voter (009_data.sql).
+//
+// The folds carry no title (null): a referendum's title is its forum
+// description's, laid over the cached fold at serve time from the process's
+// forum snapshot (services/forum.ts), so a moderator's hide drops it as soon as
+// the snapshot reloads rather than when a fold cache expires.
 
 export type ReferendumPallet = 'opengov' | 'democracy'
 
@@ -155,35 +161,17 @@ export function foldReferendum(pallet: ReferendumPallet, refIndex: number, order
   return { pallet, refIndex, title, status, track, proposalHash, tally, submittedAt, submittedAtBlock, decidedAt }
 }
 
-async function loadTitles(client: ClickHouseClient): Promise<Map<string, string>> {
-  const res = await client.query({
-    query: `-- data:governance:titles
-        SELECT pallet, ref_index, title
-        FROM price_data.referendum_titles FINAL
-        WHERE title != ''`,
-    format: 'JSONEachRow',
-  })
-  const titles = new Map<string, string>()
-  for (const row of await res.json<{ pallet: string; ref_index: number; title: string }>()) {
-    titles.set(`${row.pallet}:${row.ref_index}`, row.title)
-  }
-  return titles
-}
-
 // The whole referenda directory in one read: the lifecycle table is tiny by
 // construction (see its 001_tables.sql note), so the fold is cheaper than any
 // per-page slicing in SQL would be. Sorted newest submission first.
 export async function loadReferenda(client: ClickHouseClient): Promise<ReferendumSummary[]> {
-  const [res, titles] = await Promise.all([
-    client.query({
-      query: `-- data:governance:referenda
-          SELECT ${LIFECYCLE_COLUMNS_SQL}
-          FROM price_data.referendum_lifecycle_events
-          ORDER BY pallet, ref_index, block_height, event_index, ingested_at DESC`,
-      format: 'JSONEachRow',
-    }),
-    loadTitles(client),
-  ])
+  const res = await client.query({
+    query: `-- data:governance:referenda
+        SELECT ${LIFECYCLE_COLUMNS_SQL}
+        FROM price_data.referendum_lifecycle_events
+        ORDER BY pallet, ref_index, block_height, event_index, ingested_at DESC`,
+    format: 'JSONEachRow',
+  })
   const rows = dedupLifecycle(await res.json<LifecycleRow>())
   const grouped = new Map<string, LifecycleRow[]>()
   for (const row of rows) {
@@ -195,7 +183,7 @@ export async function loadReferenda(client: ClickHouseClient): Promise<Referendu
   const out: ReferendumSummary[] = []
   for (const [key, group] of grouped) {
     const [pallet, refIndex] = key.split(':')
-    out.push(foldReferendum(pallet as ReferendumPallet, Number(refIndex), group, titles.get(key) ?? null))
+    out.push(foldReferendum(pallet as ReferendumPallet, Number(refIndex), group, null))
   }
   return out.sort((a, b) => (b.submittedAtBlock ?? 0) - (a.submittedAtBlock ?? 0)
     || a.pallet.localeCompare(b.pallet)
@@ -203,29 +191,18 @@ export async function loadReferenda(client: ClickHouseClient): Promise<Referendu
 }
 
 export async function loadReferendum(client: ClickHouseClient, pallet: ReferendumPallet, refIndex: number): Promise<ReferendumDetail | null> {
-  const [res, titleRes] = await Promise.all([
-    client.query({
-      query: `-- data:governance:referendum
-          SELECT ${LIFECYCLE_COLUMNS_SQL}
-          FROM price_data.referendum_lifecycle_events
-          WHERE pallet = {pallet:String} AND ref_index = {refIndex:UInt32}
-          ORDER BY block_height, event_index, ingested_at DESC`,
-      query_params: { pallet, refIndex },
-      format: 'JSONEachRow',
-    }),
-    client.query({
-      query: `-- data:governance:title
-          SELECT title FROM price_data.referendum_titles FINAL
-          WHERE pallet = {pallet:String} AND ref_index = {refIndex:UInt32} AND title != ''
-          LIMIT 1`,
-      query_params: { pallet, refIndex },
-      format: 'JSONEachRow',
-    }),
-  ])
+  const res = await client.query({
+    query: `-- data:governance:referendum
+        SELECT ${LIFECYCLE_COLUMNS_SQL}
+        FROM price_data.referendum_lifecycle_events
+        WHERE pallet = {pallet:String} AND ref_index = {refIndex:UInt32}
+        ORDER BY block_height, event_index, ingested_at DESC`,
+    query_params: { pallet, refIndex },
+    format: 'JSONEachRow',
+  })
   const rows = dedupLifecycle(await res.json<LifecycleRow>())
   if (rows.length === 0) return null
-  const title = (await titleRes.json<{ title: string }>())[0]?.title ?? null
-  const summary = foldReferendum(pallet, refIndex, rows, title)
+  const summary = foldReferendum(pallet, refIndex, rows, null)
   const proposal = summary.proposalHash ? await loadProposal(client, summary.proposalHash) : null
   return {
     ...summary,
@@ -415,4 +392,21 @@ export async function votesForVoter(client: ClickHouseClient, voterAccountId: st
     format: 'JSONEachRow',
   })
   return dedupAndSortVotes(await res.json<VoteRow>())
+}
+
+// ---- treasury spends ----
+
+/**
+ * The treasury's spends, folded by the explorer's own fold (services/treasurySpends.ts)
+ * from treasury_events at the indexed head — one definition of a spend's state.
+ */
+export async function loadTreasurySpends(client: ClickHouseClient, headBlock: number): Promise<SpendFold[]> {
+  const res = await client.query({
+    query: `-- data:governance:treasury-spends
+      SELECT event_name, block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, args_json
+      FROM price_data.treasury_events FINAL ORDER BY block_height, event_index`,
+    format: 'JSONEachRow',
+  })
+  const rows = (await res.json<TreasuryEventRow>()).map(r => ({ ...r, block_height: Number(r.block_height), event_index: Number(r.event_index) }))
+  return foldTreasury(rows, headBlock).spends
 }

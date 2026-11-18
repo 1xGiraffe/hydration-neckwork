@@ -155,7 +155,7 @@ export function feedPage<T>(items: T[], hasMore: boolean, position: (last: T) =>
 // a 429, the docs/token URLs on a 401 (concept § 6).
 // ---------------------------------------------------------------------------
 
-export type DataErrorCode = 'unauthorized' | 'rate_limited' | 'bad_request' | 'not_found' | 'internal'
+export type DataErrorCode = 'unauthorized' | 'rate_limited' | 'bad_request' | 'not_found' | 'unavailable' | 'internal'
 
 export interface DataErrorEnvelope {
   error: { code: DataErrorCode; message: string; context?: Record<string, unknown> }

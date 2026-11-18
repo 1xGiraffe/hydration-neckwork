@@ -1,6 +1,10 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { getCollectiveMotions, getGovernanceOverview, getGovernanceReferenda, getReferenda, getReferendum, getTreasuryTips, parseReferendumPallet } from '../services/governanceService.ts'
+import { referendumDeposits } from '../services/governanceDeposits.ts'
+import { highlightDiscussions, subjectForumRef } from '../services/forumRead.ts'
+import { forumReady } from '../services/forumStore.ts'
+import { getNeedsVote } from '../services/governanceRead.ts'
 import { extrinsicEncoded } from '../services/extrinsicBytes.ts'
 import { evmTransactionReceipt } from '../services/evmReceipt.ts'
 import {
@@ -43,7 +47,7 @@ import {
 } from '../services/positionsPresence.ts'
 import { ORDER_HISTORY_MAX_LIMIT } from '../services/orderHistory.ts'
 import { getIceDashboard, getOpenIntents } from '../services/iceService.ts'
-import { getSecurityDashboard } from '../services/securityService.ts'
+import { getSecurityDashboard, getTechCommittee } from '../services/securityService.ts'
 import { getWormholeBridgeDetail } from '../services/wormholeNttService.ts'
 import { countLiquiditySources } from '../services/poolService.ts'
 import { ACCOUNT_AFFINITY_BUSY_CODE, getCloseAccounts, getCloseAccountsForTag } from '../services/accountAffinityService.ts'
@@ -454,11 +458,23 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const limit = limitParam(req.query as Record<string, unknown>, 500)
     const detail = await getReferendum(pallet, params.data.index, limit)
     if (!detail) return reply.status(404).send({ error: 'Referendum not found' })
-    return detail
+    // The forum record (description post, thread, counts) from the in-memory forum
+    // store; the body itself is /explorer/forum/post/:postId.
+    // null until the forum store has loaded — never an empty record that reads as real.
+    // Its deposits are read at serve time from their one-block ledger (a refund lands long
+    // after the detail's own cache window began); Democracy predates them.
+    const deposits = pallet === 'opengov' ? await referendumDeposits(params.data.index) : null
+    return { ...detail, forum: forumReady() ? subjectForumRef(`${pallet}:${params.data.index}`) : null, deposits }
   })
 
-  // The /governance page: live OpenGov cards + per-body counts.
-  fastify.get('/explorer/governance', async () => getGovernanceOverview())
+  // The /governance page: live OpenGov cards + per-body counts, and the latest
+  // discussions from the forum store.
+  fastify.get('/explorer/governance', async () => ({
+    ...await getGovernanceOverview(),
+    discussions: forumReady() ? highlightDiscussions(5) : null,
+    // The live referenda by their next deadline (decision/confirm end, or timeout).
+    endingSoon: (await getNeedsVote([])).referenda,
+  }))
 
   // The unified referendum directory (OpenGov + the historical Democracy),
   // filterable and exactly counted — the page's tables.
@@ -470,7 +486,16 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (offset == null) return badOffset(reply)
     const status = typeof q.status === 'string' && q.status.length <= 24 ? q.status : undefined
     const track = typeof q.track === 'string' && /^\d+$/.test(q.track) ? Number(q.track) : undefined
-    return getGovernanceReferenda(pallet, status, track, limitParam(q, 25), offset)
+    const page = await getGovernanceReferenda(pallet, status, track, limitParam(q, 25), offset)
+    // Each row's comment count from the in-memory forum store.
+    return {
+      ...page,
+      rows: page.rows.map(row => {
+        if (!forumReady()) return { ...row, commentsCount: null }
+        const f = subjectForumRef(`${row.pallet}:${row.index}`)
+        return { ...row, commentsCount: f.commentsCount }
+      }),
+    }
   })
 
   fastify.get('/explorer/governance/motions', async (req, reply) => {
@@ -1296,6 +1321,8 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/security', async () => {
     return getSecurityDashboard()
   })
+
+  fastify.get('/explorer/security/committee', async () => getTechCommittee())
 
   fastify.get('/explorer/security/wormhole', async () => {
     return getWormholeBridgeDetail()

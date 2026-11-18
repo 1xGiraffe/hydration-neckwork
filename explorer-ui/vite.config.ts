@@ -12,10 +12,50 @@ const API_PROXY = {
     changeOrigin: true,
     rewrite: (path: string) => path.replace(/^\/api/, ''),
   },
+  // Forum images: nginx maps /ipfs/<cid> onto the api's /forum/media/<cid> (nginx.conf).
+  '^/ipfs/': {
+    target: 'http://localhost:3000',
+    changeOrigin: true,
+    rewrite: (path: string) => path.replace(/^\/ipfs\//, '/forum/media/'),
+  },
+}
+
+// route-chunks.json: for each lazily loaded page (src/pages/<Name>.tsx), the chunks
+// and stylesheets its first render needs beyond what index.html already loads. The
+// api's head renderer (api/src/routes/seo.ts) reads it beside the shell and names
+// them in a page's <head> as modulepreload/preload links, so a cold load fetches the
+// route's code alongside the entry instead of after it. `entry` ties the file to the
+// index.html it was built with; the renderer ignores a file that names another.
+const routeChunksManifest = {
+  name: 'route-chunks-manifest',
+  apply: 'build' as const,
+  generateBundle(_options: unknown, bundle: Record<string, { type: string; fileName: string; isEntry?: boolean; isDynamicEntry?: boolean; facadeModuleId?: string | null; imports?: string[]; viteMetadata?: { importedCss?: Set<string> } }>) {
+    const chunks = Object.values(bundle).filter(c => c.type === 'chunk')
+    const byFile = new Map(chunks.map(c => [c.fileName, c]))
+    const closure = (file: string, seen = new Set<string>()): Set<string> => {
+      if (seen.has(file)) return seen
+      seen.add(file)
+      for (const i of byFile.get(file)?.imports ?? []) closure(i, seen)
+      return seen
+    }
+    const entry = chunks.find(c => c.isEntry && /\/index\.html$|src\/main\.tsx$/.test(c.facadeModuleId ?? ''))
+    if (!entry) return
+    const eager = closure(entry.fileName)
+    const pages: Record<string, string[]> = {}
+    for (const c of chunks) {
+      const m = c.isDynamicEntry ? /\/src\/pages\/([A-Za-z0-9]+)\.tsx$/.exec(c.facadeModuleId ?? '') : null
+      if (!m) continue
+      const files = [...closure(c.fileName)].filter(f => !eager.has(f))
+      const css = files.flatMap(f => [...(byFile.get(f)?.viteMetadata?.importedCss ?? [])])
+      pages[m[1]] = [...files, ...new Set(css)]
+    }
+    ;(this as unknown as { emitFile: (f: { type: 'asset'; fileName: string; source: string }) => void })
+      .emitFile({ type: 'asset', fileName: 'route-chunks.json', source: JSON.stringify({ entry: entry.fileName, pages }) })
+  },
 }
 
 export default defineConfig({
-  plugins: [react(), {
+  plugins: [react(), routeChunksManifest, {
     // The authored index.html carries engineering rationale (favicon fallback,
     // font-preload CLS math) that documents the file for the repo — but none of
     // it belongs in the HTML every visitor downloads. Strip comments from the
@@ -47,7 +87,15 @@ export default defineConfig({
         manualChunks: (id) => {
           if (/\/node_modules\/(viem|abitype|ox)\//.test(id)) return 'abi-codec'
           if (/\/node_modules\/(dedot|@dedot|smoldot)\//.test(id)) return 'dedot'
-          return id.includes('/node_modules/') ? 'vendor' : undefined
+          // The forum renderer (markdown-it and DOMPurify) loads with the governance
+          // pages that show forum text, never with the landing page.
+          if (/\/node_modules\/(markdown-it|dompurify|linkify-it|mdurl|uc\.micro|punycode\.js|entities|@types\/trusted-types)\//.test(id)) return 'markdown'
+          // Only the runtime every route needs is pinned to the eager vendor chunk.
+          // Every other package (the Radix dialog stack, the QR encoder and decoder,
+          // the hashing and codec libraries dedot and viem share) is left to the
+          // bundler, so it follows its lazy importers instead of riding on every route.
+          if (/\/node_modules\/(react|react-dom|scheduler|@tanstack\/query-core|@tanstack\/react-query)\//.test(id)) return 'vendor'
+          return undefined
         },
       },
     },

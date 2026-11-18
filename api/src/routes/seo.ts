@@ -7,6 +7,8 @@ import { getTag as getSystemTag, allTags } from '../services/tagService.ts'
 import { publicTagById, publicListSummary } from '../services/userListService.ts'
 import { referendumTitleFor, isGenericReferendumTitle, highestReferendumIndex } from '../services/referendumTitleService.ts'
 import { getPlatformVolume } from '../services/volumeHistory.ts'
+import { forumPost, forumReady } from '../services/forumStore.ts'
+import { getReferenda } from '../services/governanceService.ts'
 
 // The explorer is a client-rendered SPA: nginx answers every page URL with one
 // static index.html, and the real title only appears once React has run. That is
@@ -59,6 +61,43 @@ const SHELL_TTL_MS = 60_000
 // fetch, not one per wave of requests.
 const SHELL_MISMATCH_TTL_MS = 1_500
 let shell: { html: string; at: number } | null = null
+// The UI build's route-chunks.json (explorer-ui/vite.config.ts), read beside the
+// shell: per lazily loaded page, the chunks its first render needs beyond the
+// entry. Kept only while it names the entry the shell it came with loads.
+const ROUTE_CHUNKS_URL = process.env.EXPLORER_ROUTE_CHUNKS_URL ?? SHELL_URL.replace(/index\.html$/, 'route-chunks.json')
+export interface RouteChunks { entry: string; pages: Record<string, string[]> }
+let routeChunks: RouteChunks | null = null
+const CHUNK_FILE_RE = /^assets\/[A-Za-z0-9_.-]{1,120}\.(?:js|css)$/
+const PAGE_NAME_RE = /^[A-Za-z0-9]{1,60}$/
+
+// Anything malformed is dropped whole: a page without preloads is today's page.
+export function parseRouteChunks(raw: unknown): RouteChunks | null {
+  if (!raw || typeof raw !== 'object') return null
+  const { entry, pages } = raw as { entry?: unknown; pages?: unknown }
+  if (typeof entry !== 'string' || !/^assets\/index-[A-Za-z0-9_-]{4,64}\.js$/.test(entry)) return null
+  if (!pages || typeof pages !== 'object') return null
+  const out: Record<string, string[]> = Object.create(null)
+  for (const [name, files] of Object.entries(pages as Record<string, unknown>)) {
+    if (!PAGE_NAME_RE.test(name) || !Array.isArray(files) || files.length > 60) return null
+    if (!files.every(f => typeof f === 'string' && CHUNK_FILE_RE.test(f))) return null
+    out[name] = files as string[]
+  }
+  return { entry, pages: out }
+}
+
+async function fetchRouteChunks(): Promise<RouteChunks | null> {
+  try {
+    const res = await fetch(ROUTE_CHUNKS_URL, { signal: AbortSignal.timeout(2_000) })
+    return res.ok ? parseRouteChunks(await res.json()) : null
+  } catch {
+    return null
+  }
+}
+
+/** The route-chunk manifest, if the one held belongs to this shell. */
+export function routeChunksFor(html: string): RouteChunks | null {
+  return routeChunks && html.includes(`/${routeChunks.entry}`) ? routeChunks : null
+}
 let shellInflight: Promise<string> | null = null
 let mismatch: { bundleId: string; until: number } | null = null
 
@@ -84,6 +123,8 @@ function fetchShell(): Promise<string> {
       if (!res.ok) throw new Error(`shell ${res.status}`)
       const html = await res.text()
       if (!html.includes('</head>')) throw new Error('shell has no head')
+      const chunks = await fetchRouteChunks()
+      routeChunks = chunks && html.includes(`/${chunks.entry}`) ? chunks : null
       shell = { html, at: Date.now() }
       return html
     } finally {
@@ -187,6 +228,9 @@ export interface PageMeta {
   canonicalPath?: string
   // Trail for the BreadcrumbList, page itself excluded — [label, path] pairs.
   crumbs?: [string, string][]
+  // A forum post's page is an article: its card carries og:type article and the
+  // dates (ISO 8601) a reader's unfurler shows beside the title. Absent: a website.
+  article?: { publishedTime: string; modifiedTime: string | null }
   // A session-only surface that IS reachable logged out — the notification
   // centre and the API-token page, which a crawler only ever sees as the
   // logged-out teaser. Kept out of the index with a robots meta tag rather than
@@ -205,6 +249,7 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/contracts': { title: 'Contracts', description: 'EVM contracts deployed on Hydration, with verified sources where available.' },
   '/assets': { title: 'Assets', description: 'Every asset in the Hydration registry — price, 24-hour volume, liquidity, holders and origin chain.' },
   '/governance': { title: 'Governance', description: 'Hydration OpenGov and Democracy referenda, technical committee motions and treasury spending.' },
+  '/discussions': { title: 'Discussions', description: 'The Hydration governance forum: proposals in the making, community debate and the full history of Hydration’s governance discussions.' },
   '/tags': { title: 'Tags', description: 'Named accounts and cohorts on Hydration — exchanges, protocol pots, pools and treasuries.' },
   '/tags/hydration': { title: 'Hydration tags', description: 'The protocol\u2019s own accounts: Omnipool, treasury, staking, money market and the pallet pots behind them.' },
   '/lists': { title: 'Lists', description: 'Public account lists curated on the Hydration Explorer.' },
@@ -232,6 +277,70 @@ const HUBS: Record<string, { title: string; description: string }> = {
 const SESSION_PAGES: Record<string, { title: string; description: string }> = {
   '/notifications': { title: 'Notifications', description: 'Alerts for Hydration accounts, assets and the protocol, delivered as browser push or on Telegram.' },
   '/api-tokens': { title: 'API tokens', description: 'Create and manage tokens for the Hydration Data API.' },
+  // Personal: the referenda the reader's own accounts have not voted on, their votes and locks.
+  '/governance/me': { title: 'My governance', description: 'What needs your vote on Hydration, your conviction votes, locks and unlock dates.' },
+  // The proposal wizard (it signs with a connected wallet).
+  '/governance/propose': { title: 'New proposal', description: 'Propose a Hydration referendum: describe it, build the call, store its preimage and submit it to a track.' },
+  // The editor for a new forum discussion (signed in).
+  '/discussions/new': { title: 'Start a discussion', description: 'Start a discussion in the Hydration governance forum.' },
+}
+
+/**
+ * The archive subject pages (explorer-ui router: /governance/<route>/<id>) and the
+ * forum post that holds each one's imported record. One table on both sides.
+ */
+const SUBJECT_ROUTES: Record<string, { kind: string; prefix: string; label: string; idRe: RegExp }> = {
+  'motion/council': { kind: 'council', prefix: 'council', label: 'Council motion', idRe: /^\d{1,9}$/ },
+  // A TC motion is addressed by its index; the two early ones the chain gave no index
+  // are `<hash>@<block>`.
+  'motion/tc': { kind: 'tc', prefix: 'tc', label: 'Technical committee motion', idRe: /^(\d{1,9}|0x[0-9a-f]{64}@\d{1,10})$/ },
+  tip: { kind: 'tip', prefix: 'tip', label: 'Treasury tip', idRe: /^0x[0-9a-f]{64}@\d{1,10}$/ },
+  'treasury/proposal': { kind: 'treasury_proposal', prefix: 'treasury', label: 'Treasury proposal', idRe: /^\d{1,9}$/ },
+  'treasury/spend': { kind: 'treasury_spend', prefix: 'spend', label: 'Treasury spend', idRe: /^\d{1,9}$/ },
+  'democracy/proposal': { kind: 'democracy_proposal', prefix: 'democracy_proposal', label: 'Democracy proposal', idRe: /^\d{1,9}$/ },
+  'democracy/external': { kind: 'external', prefix: 'external', label: 'External proposal', idRe: /^0x[0-9a-f]{64}@\d{1,10}$/ },
+}
+
+const CRUMB_GOVERNANCE: [string, string] = ['Governance', '/governance']
+
+/** A forum post's page head from the in-memory store: its title and excerpt, never a hidden item's text. */
+function forumPageMeta(postId: string, fallbackTitle: string, about: string, crumbs: [string, string][]): PageMeta {
+  if (!forumReady()) return unknownYet(crumbs)
+  const post = forumPost(postId)
+  if (!post) return missing(crumbs)
+  // A hidden or deleted item renders as a stub: no title or text of its own reaches the head.
+  if (post.hidden || post.deleted) return { title: fallbackTitle, description: `${fallbackTitle} — hidden by moderation.`, notFound: true, crumbs }
+  const title = post.title.trim() || fallbackTitle
+  return {
+    title: clamp(title, 90),
+    description: clamp(post.excerpt.trim() ? `${title} — ${post.excerpt}` : `${title} — ${about}`),
+    crumbs,
+    ...(post.createdAt ? { article: { publishedTime: new Date(post.createdAt).toISOString(), modifiedTime: post.editedAt ? new Date(post.editedAt).toISOString() : null } } : {}),
+  }
+}
+
+// Each referendum's lifecycle word ('deciding', 'confirming', 'executed', …) for the
+// share card, copied out of the referendum directory the governance pages read — the
+// same single-flight cache entry (`explorer:referenda:directory`, via getReferenda),
+// so this asks ClickHouse nothing of its own — by a refresh nothing awaits: the head
+// is built synchronously from memory. Until the first copy lands a card simply
+// carries no status.
+let referendumStatuses: Map<string, string> | null = null
+let referendumStatusesAt = 0
+const REFERENDUM_STATUS_MS = 60_000
+
+export function refreshReferendumStatuses(now = Date.now()): void {
+  if (now - referendumStatusesAt < REFERENDUM_STATUS_MS) return
+  referendumStatusesAt = now
+  getReferenda(Number.MAX_SAFE_INTEGER, 0).then(rows => {
+    referendumStatuses = new Map(rows.map(r => [`${r.pallet}:${r.index}`, r.status]))
+  }).catch(err => { console.error('[seo] referendum status snapshot failed:', err) })
+}
+
+/** For tests: install the status map directly (null clears it). */
+export function setReferendumStatusesForTest(m: Map<string, string> | null): void {
+  referendumStatuses = m
+  referendumStatusesAt = m ? Date.now() : 0
 }
 
 // /volume's figures: the routed volume per window, the 24 hours' trades, and
@@ -441,7 +550,13 @@ export function pageMeta(path: string): PageMeta {
   if (session) return { ...session, sessionOnly: true, crumbs: [CRUMB_HOME] }
   const hub = HUBS[clean]
   // The Revenue overview's two subpages sit under it in the trail.
-  if (hub) return { ...hub, crumbs: clean === '/' ? [] : clean.startsWith('/revenue/') ? [CRUMB_HOME, ['Revenue', '/revenue']] : [CRUMB_HOME] }
+  if (hub) {
+    return {
+      ...hub,
+      crumbs: clean === '/' ? [] : clean.startsWith('/revenue/') ? [CRUMB_HOME, ['Revenue', '/revenue']]
+        : clean.startsWith('/governance/') || clean === '/discussions' ? [CRUMB_HOME, CRUMB_GOVERNANCE] : [CRUMB_HOME],
+    }
+  }
 
   const parts = clean.replace(/^\//, '').split('/').filter(Boolean)
   const [head, a, b] = parts
@@ -604,6 +719,24 @@ export function pageMeta(path: string): PageMeta {
     return missing([CRUMB_HOME, ['Lists', '/lists']])
   }
 
+  // A discussion: /discussions/<post id> (s<uid> for an imported one).
+  if (head === 'discussions' && a && parts.length === 2) {
+    const crumbs: [string, string][] = [CRUMB_HOME, CRUMB_GOVERNANCE, ['Discussions', '/discussions']]
+    if (!/^[A-Za-z0-9]{1,40}$/.test(a)) return missing(crumbs)
+    return forumPageMeta(a, 'Discussion', 'a Hydration governance discussion and its comments.', crumbs)
+  }
+
+  if (head === 'governance' && a) {
+    const route = parts.length === 4 ? `${parts[1]}/${parts[2]}` : parts.length === 3 ? parts[1] : ''
+    const subject = SUBJECT_ROUTES[route]
+    const id = parts[parts.length - 1]
+    if (subject && id) {
+      const crumbs: [string, string][] = [CRUMB_HOME, CRUMB_GOVERNANCE]
+      if (!subject.idRe.test(id)) return missing(crumbs)
+      return forumPageMeta(`${subject.prefix}:${id}`, `${subject.label} ${id.length > 20 ? `${id.slice(0, 10)}…` : `#${id}`}`, `a ${subject.label.toLowerCase()} from Hydration's governance archive and its discussion.`, crumbs)
+    }
+  }
+
   if (head === 'referendum' && (a === 'opengov' || a === 'democracy') && b) {
     const index = Number(b)
     if (Number.isFinite(index)) {
@@ -615,11 +748,19 @@ export function pageMeta(path: string): PageMeta {
       }
       const title = referendumTitleFor(a, index)
       const named = title && !isGenericReferendumTitle(title) ? title : null
+      // The description post's plain-text excerpt (hostile text, escaped by renderHead), when it is shown.
+      const post = forumReady() ? forumPost(`${a}:${index}`) : null
+      const excerpt = post && !post.hidden && !post.deleted ? post.excerpt.trim() : ''
+      // The verdict leads the card's text, so a link shared mid-vote says where it stands.
+      refreshReferendumStatuses()
+      const status = referendumStatuses?.get(`${a}:${index}`) ?? null
+      const verdict = status ? `${status.charAt(0).toUpperCase()}${status.slice(1)}. ` : ''
       return {
         title: named ? `${named} · ${label} #${index}` : `${label} referendum #${index}`,
         description: named
-          ? clamp(`${named} — Hydration ${label} referendum #${index}: votes, support, turnout and the accounts behind them.`)
-          : `Hydration ${label} referendum #${index}: votes, support, turnout and the accounts behind them.`,
+          ? clamp(excerpt ? `${named} — ${verdict}${excerpt}` : `${named} — ${verdict}Hydration ${label} referendum #${index}: votes, support, turnout and the accounts behind them.`)
+          : clamp(`${verdict}Hydration ${label} referendum #${index}: votes, support, turnout and the accounts behind them.`),
+        ...(status ? { facts: [['Referendum', `${label} #${index}`], ['Status', status]] as [string, string][] } : {}),
         crumbs: [CRUMB_HOME, ['Governance', '/governance']],
       }
     }
@@ -705,7 +846,7 @@ export function pageMeta(path: string): PageMeta {
 // The shell already carries a title and a static Open Graph set. Both are
 // replaced wholesale rather than appended to — two og:title tags is not a page
 // with a better title, it is a page whose title a crawler has to guess.
-const MANAGED_TAG_RE = /[ \t]*<(?:title[^>]*>[\s\S]*?<\/title|meta[^>]*(?:name="(?:description|robots|twitter:[^"]*)"|property="og:[^"]*")[^>]*\/?|link[^>]*rel="canonical"[^>]*\/?)>\n?/g
+const MANAGED_TAG_RE = /[ \t]*<(?:title[^>]*>[\s\S]*?<\/title|meta[^>]*(?:name="(?:description|robots|twitter:[^"]*)"|property="(?:og|article):[^"]*")[^>]*\/?|link[^>]*rel="canonical"[^>]*\/?|link[^>]*\bdata-route\b[^>]*\/?)>\n?/g
 
 export function renderHead(meta: PageMeta, path: string): string {
   const canonical = `${PUBLIC_URL}${meta.canonicalPath ?? (path === '/' ? '/' : path)}`
@@ -724,7 +865,13 @@ export function renderHead(meta: PageMeta, path: string): string {
     `<meta property="og:title" content="${esc(title)}" />`,
     `<meta property="og:description" content="${esc(meta.description)}" />`,
     `<meta property="og:url" content="${esc(canonical)}" />`,
-    `<meta property="og:type" content="website" />`,
+    `<meta property="og:type" content="${meta.article ? 'article' : 'website'}" />`,
+    ...(meta.article
+      ? [
+        `<meta property="article:published_time" content="${esc(meta.article.publishedTime)}" />`,
+        ...(meta.article.modifiedTime ? [`<meta property="article:modified_time" content="${esc(meta.article.modifiedTime)}" />`] : []),
+      ]
+      : []),
     `<meta property="og:site_name" content="${esc(SITE_NAME)}" />`,
     `<meta property="og:image" content="${PUBLIC_URL}/og-image.png" />`,
     `<meta property="og:image:width" content="1200" />`,
@@ -788,12 +935,60 @@ export function renderBody(meta: PageMeta): string {
   return `<noscript><h1>${esc(meta.title)}</h1><p>${esc(meta.description)}</p><dl>${rows}</dl></noscript>`
 }
 
-export function renderPage(shellHtml: string, path: string): string {
+// What a cold load of a page needs first, named in its head so the browser fetches
+// it alongside the entry chunk rather than after the app has booted and routed:
+// the page's own chunks (from route-chunks.json) and its main api reads. The api
+// URLs must be exactly what the app requests on a fresh load (explorer-ui
+// src/api/explorer.ts: the referendum detail with its top-voter limit, a forum post,
+// and a thread's first page in its default order), or the preload is a wasted
+// download. Only reads whose URL depends on the path alone: the page HTML is cached
+// per path, never per query string.
+const REFERENDUM_TOP_VOTERS = 200
+const THREAD_PAGE = 20
+const threadFirstPage = (key: string): string => `/api/explorer/forum/thread/${encodeURIComponent(key)}?sort=old&limit=${THREAD_PAGE}`
+const forumPostUrl = (id: string): string => `/api/explorer/forum/post/${encodeURIComponent(id)}`
+
+export function pagePreloads(path: string): { page: string | null; api: string[] } {
+  const p = path.replace(/\/+$/, '') || '/'
+  let m: RegExpExecArray | null
+  if ((m = /^\/referendum\/(opengov|democracy)\/(\d{1,10})$/.exec(p))) {
+    const key = `${m[1]}:${m[2]}`
+    return { page: 'Referendum', api: [`/api/explorer/referendum/${m[1]}/${m[2]}?limit=${REFERENDUM_TOP_VOTERS}`, forumPostUrl(key), threadFirstPage(key)] }
+  }
+  if (p === '/discussions') return { page: 'Discussions', api: [] }
+  if (p === '/discussions/new') return { page: 'Forum', api: [] }
+  if ((m = /^\/discussions\/([A-Za-z0-9]{1,40})$/.exec(p))) return { page: 'Forum', api: [forumPostUrl(m[1]), threadFirstPage(m[1])] }
+  if (p === '/governance') return { page: 'Governance', api: [] }
+  if (p === '/governance/me') return { page: 'GovernanceMe', api: [] }
+  if (p === '/governance/propose') return { page: 'GovernancePropose', api: [] }
+  if (p === '/governance/moderation') return { page: 'ForumModeration', api: [] }
+  if (/^\/governance\/[a-z]+\/[^/]+(?:\/[^/]+)?$/.test(p)) return { page: 'Forum', api: [] }
+  if (/^\/account\/[^/]+$/.test(p)) return { page: 'Account', api: [] }
+  return { page: null, api: [] }
+}
+
+export function renderPreloads(path: string, chunks: RouteChunks | null): string[] {
+  const { page, api } = pagePreloads(path)
+  const files = page && chunks ? chunks.pages[page] ?? [] : []
+  return [
+    ...files.map(f => f.endsWith('.css')
+      ? `<link rel="preload" as="style" href="/${esc(f)}" data-route />`
+      : `<link rel="modulepreload" crossorigin href="/${esc(f)}" data-route />`),
+    ...api.map(u => `<link rel="preload" as="fetch" crossorigin="anonymous" href="${esc(u)}" data-route />`),
+  ]
+}
+
+export function renderPage(shellHtml: string, path: string, chunks: RouteChunks | null = null): string {
   const meta = pageMeta(path)
   const body = renderBody(meta)
   const stripped = shellHtml.replace(MANAGED_TAG_RE, '')
-  const withHead = stripped.replace('</head>', `${renderHead(meta, path)}\n  </head>`)
-  return body ? withHead.replace('<div id="root"></div>', `<div id="root"></div>\n    ${body}`) : withHead
+  // Function replacers: the head carries user-written text, and a string replacement
+  // would expand any `$&`, `$'` or `` $` `` in it into pieces of the shell.
+  // A page that is not found preloads nothing.
+  const preloads = meta.notFound ? [] : renderPreloads(path, chunks)
+  const head = [renderHead(meta, path), ...preloads.map(l => `    ${l}`)].join('\n')
+  const withHead = stripped.replace('</head>', () => `${head}\n  </head>`)
+  return body ? withHead.replace('<div id="root"></div>', () => `<div id="root"></div>\n    ${body}`) : withHead
 }
 
 export async function seoRoutes(fastify: FastifyInstance): Promise<void> {
@@ -829,11 +1024,11 @@ export async function seoRoutes(fastify: FastifyInstance): Promise<void> {
       // copy regardless (seo_page.conf ignores this header for its cache). The
       // server-wide cache-control hook only stamps replies that carry none.
       .header('cache-control', 'no-cache, must-revalidate')
-      .send(renderPage(shellHtml, path))
+      .send(renderPage(shellHtml, path, routeChunksFor(shellHtml)))
   })
 }
 
 export const __testing = {
-  loadShellReset: () => { shell = null; shellInflight = null; mismatch = null },
+  loadShellReset: () => { shell = null; shellInflight = null; mismatch = null; routeChunks = null },
   setVolumeSnapshot: (s: VolumeSnapshot | null) => { volumeSnapshot = s },
 }

@@ -10,7 +10,7 @@ import { AccountsTable } from '../components/AccountsTable'
 import { NotifyButton } from '../components/NotifyButton'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
-import { VotesTab } from '../components/VotesTab'
+import { TagGovernance } from '../components/gov/TagGovernance'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { UserRevenueTab } from '../components/UserRevenueTab'
 import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart, VolumeSection } from '../components/AccountSections'
@@ -86,7 +86,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
     return (
       <div className="wrap">
         <div className="page-head"><Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tag' }]} /></div>
-        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Log in to view this tag.</div>
+        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Sign in to view this tag.</div>
       </div>
     )
   }
@@ -212,7 +212,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
 
                 {activeView === 'events' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="events" />}
 
-                {activeView === 'votes' && <VotesTab scope={{ kind: 'list-tag', listId, tagId }} />}
+                {activeView === 'governance' && <TagGovernance scope={{ kind: 'list-tag', listId, tagId }} votesCount={votesTotal.data?.total ?? undefined} />}
 
                 {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'list-tag', listId, tagId }} />}
                 {activeView === 'user-revenue' && <UserRevenueTab scope={{ kind: 'list-tag', listId, tagId }} />}

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import { initExplorerService } from '../src/services/explorerService.ts'
-import { initReferendumTitleService } from '../src/services/referendumTitleService.ts'
 import {
   convictionName,
   convictionTenths,
@@ -17,7 +16,6 @@ import {
   parseReferendumPallet,
   referendumEnactmentTaskId,
   referendumStatusFrom,
-  subsquareUrl,
   tallyFromArgs,
   tallyVoters,
   toVoter,
@@ -84,12 +82,6 @@ describe('conviction weighting', () => {
 describe('referendum identity', () => {
   // Hydration voted through both pallets and both index from 0 (Democracy 0-206,
   // OpenGov 0-369), so pallet is part of the identity, not decoration.
-  it('routes each pallet to its own SubSquare path', () => {
-    expect(subsquareUrl('opengov', 369)).toMatch(/\/referenda\/369$/)
-    expect(subsquareUrl('democracy', 206)).toMatch(/\/democracy\/referenda\/206$/)
-    expect(subsquareUrl('opengov', 0)).not.toBe(subsquareUrl('democracy', 0))
-  })
-
   it('accepts only the two known pallets', () => {
     expect(parseReferendumPallet('opengov')).toBe('opengov')
     expect(parseReferendumPallet('democracy')).toBe('democracy')
@@ -483,6 +475,18 @@ describe('withdrawal ordering', () => {
     expect(tallyVoters([toVoter(voteRow, withdrawals, null, 12)]).ayes).toBe('0')
   })
 
+  it('orders a removal and a vote in one extrinsic by their events, where both have one', () => {
+    const same = (eventIndex: number | null): VotePosition => ({ blockHeight: voteRow.block_height, extrinsicIndex: 2, eventIndex })
+    // remove_vote then vote in one batch: the vote (event 12) stands.
+    expect(toVoter(voteRow, new Map([[voteRow.who, same(10)]]), null, 12).removed).toBe(false)
+    // vote then remove_vote: withdrawn.
+    expect(toVoter(voteRow, new Map([[voteRow.who, same(14)]]), null, 12).removed).toBe(true)
+    // A removal known only by its call leaves the vote of its extrinsic standing.
+    expect(toVoter(voteRow, new Map([[voteRow.who, same(null)]]), null, 12).removed).toBe(false)
+    expect(isAfter(same(14), same(12))).toBe(true)
+    expect(isAfter(same(12), same(12))).toBe(false)
+  })
+
   it('ignores a removal by some other account', () => {
     const withdrawals = new Map([['0x'.padEnd(66, 'b'), at(9_999_999, 0)]])
 
@@ -578,7 +582,6 @@ describe('directory enactment upgrade', () => {
     }))
     initGovernanceService({ query } as never)
     initExplorerService({ query } as never)
-    initReferendumTitleService({ query } as never)
 
     const byIndex = new Map((await getReferenda(123, 0)).map(row => [row.index, row]))
     expect(byIndex.get(40)).toMatchObject({ status: 'executed', enactment: 'ok' })
@@ -610,7 +613,6 @@ describe('detail page enactment upgrade', () => {
     }))
     initGovernanceService({ query } as never)
     initExplorerService({ query } as never)
-    initReferendumTitleService({ query } as never)
 
     const detail = await getReferendum('opengov', 230, 7)
     expect(detail).toMatchObject({ status: 'executed', enactment: 'failed' })
@@ -654,7 +656,6 @@ describe('referendum page read bounds', () => {
     })
     initGovernanceService({ query } as never)
     initExplorerService({ query } as never)
-    initReferendumTitleService({ query } as never)
 
     const detail = await getReferendum('opengov', 204, 7)
     expect(detail?.votesTotal).toBe(1)
@@ -730,7 +731,6 @@ describe('democracy proposal hash from the enactment block', () => {
     const query = answer(rows)
     initGovernanceService({ query } as never)
     initExplorerService({ query } as never)
-    initReferendumTitleService({ query } as never)
     return getReferendum('democracy', index, 10)
   }
 

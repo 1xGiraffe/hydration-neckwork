@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Suspense, useState } from 'react'
 import { userApi } from '../api/explorer'
 import { useSession } from '../session'
 import { useNotificationMutation, useNotificationsOverview } from '../hooks/useNotifications'
@@ -6,7 +6,11 @@ import { deleteRuleConfirmBody, findEquivalentRule, subscribedLabel } from '../n
 import { requestConnect } from '../connectDialog'
 import { stashPendingNotification, type PendingNotification } from '../pendingNotification'
 import { Link, paths } from '../router'
-import { ConfirmDialog } from './ConfirmDialog'
+import { lazyWithReload } from '../lazyWithReload'
+
+// The confirm step (and the Radix dialog stack under it) loads the first time a
+// reader asks to delete an alert, not with every page that carries the button.
+const ConfirmDialog = lazyWithReload(() => import('./ConfirmDialog').then(m => ({ default: m.ConfirmDialog })))
 
 // The subscribe affordance every surface carries: one click turns whatever the
 // reader is looking at — a safety timeline, an address, a tag, a token, the
@@ -22,15 +26,16 @@ import { ConfirmDialog } from './ConfirmDialog'
 // Logged out it is still a real button: the intended rule is parked in local
 // storage and the login dialog opens, and the handoff (see
 // usePendingNotificationHandoff) creates it and lands them on the alerts tab
-// once the wallet round trip finishes. That is the point — a "log in first"
+// once the wallet round trip finishes. That is the point — a "sign in first"
 // dead end would lose exactly the context that made the alert worth wanting.
 export function NotifyButton({ rule, label = 'Get notified', title, variant = 'btn', manage = true }: {
   rule: PendingNotification
   label?: string
   title?: string
   // 'link' matches the quiet `ext-link` row a detail page already has ("Open in
-  // preis ↗"); 'btn' is the small pill used beside a section title or filter.
-  variant?: 'btn' | 'link'
+  // preis ↗"); 'btn' is the small pill used beside a section title or filter;
+  // 'icon' is the bell alone (its name is `title`, else `label`), for a header row.
+  variant?: 'btn' | 'link' | 'icon'
   // The alerts tab is where a subscribed button leads for anything more than
   // switching it off — except on the alerts tab itself, which passes false.
   manage?: boolean
@@ -44,7 +49,10 @@ export function NotifyButton({ rule, label = 'Get notified', title, variant = 'b
   // OFF direction asks first, in the same words and through the same dialog the
   // rules table uses. (Switching it on is idempotent and reversible: no confirm.)
   const [confirming, setConfirming] = useState(false)
-  const className = variant === 'link' ? 'ext-link notify-link' : 'btn sm notify-btn'
+  // Stays mounted once opened, so the dialog closes (and returns focus) as usual.
+  const [confirmLoaded, setConfirmLoaded] = useState(false)
+  if (confirming && !confirmLoaded) setConfirmLoaded(true)
+  const className = variant === 'link' ? 'ext-link notify-link' : variant === 'icon' ? 'gov-icon-btn notify-icon' : 'btn sm notify-btn'
   const existing = session ? findEquivalentRule(overview.data?.rules ?? [], rule) : undefined
   const busy = create.isPending || remove.isPending
 
@@ -57,7 +65,7 @@ export function NotifyButton({ rule, label = 'Get notified', title, variant = 'b
         aria-pressed={existing ? true : undefined}
         title={existing
           ? 'Alerting — click to stop'
-          : (title ?? (session ? 'Create an alert for this' : 'Log in to get alerts for this'))}
+          : (title ?? (session ? 'Create an alert for this' : 'Sign in to get alerts for this'))}
         onClick={() => {
           setError(null)
           if (existing) { setConfirming(true); return }
@@ -70,15 +78,17 @@ export function NotifyButton({ rule, label = 'Get notified', title, variant = 'b
             .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Couldn’t create the alert'))
         }}
       >
-        <BellIcon /> {existing ? subscribedLabel(label) : label}
+        {variant === 'icon'
+          ? <><BellIcon /><span className="sr-only">{existing ? subscribedLabel(label) : (title ?? label)}</span></>
+          : <><BellIcon /> {existing ? subscribedLabel(label) : label}</>}
       </button>
       {existing && manage && (
         <Link to={paths.notifications('alerts')} className="notify-manage" title="Manage your alerts">Manage</Link>
       )}
       {/* While the confirm is open it carries the error itself. */}
       {error && !confirming && <span className="notify-error" role="alert">{error}</span>}
-      {existing && (
-        <ConfirmDialog
+      {existing && confirmLoaded && (
+        <Suspense fallback={null}><ConfirmDialog
           open={confirming}
           onOpenChange={setConfirming}
           title="Delete alert"
@@ -91,7 +101,7 @@ export function NotifyButton({ rule, label = 'Get notified', title, variant = 'b
               .then(() => setConfirming(false))
               .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Couldn’t remove the alert'))
           }}
-        />
+        /></Suspense>
       )}
     </span>
   )

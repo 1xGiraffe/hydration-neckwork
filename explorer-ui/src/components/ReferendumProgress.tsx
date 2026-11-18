@@ -3,6 +3,7 @@ import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, fmtDuration } from '../utils/dca'
 import { MomentLink } from './ui'
 import { Link, paths } from '../router'
+import { perbillPct } from './gov/GovUi'
 import type { ExplorerStats, ReferendumProgress, ReferendumTimelineEntry, ReferendumTrackRef } from '../types'
 
 // Where a running OpenGov referendum stands on its track — the Subsquare-style
@@ -16,12 +17,6 @@ import type { ExplorerStats, ReferendumProgress, ReferendumTimelineEntry, Refere
 // nominal slot time, so those convert through blockSeconds' nominal fallback.
 
 const PERBILL = 1_000_000_000
-
-function pctText(perbill: number): string {
-  const pct = perbill / (PERBILL / 100)
-  const text = pct >= 99.995 ? '100' : pct.toFixed(pct >= 10 ? 1 : 2)
-  return `${text}%`
-}
 
 // "Tue 26 Aug · 14:32 UTC" — F.datetime without the seconds, for moments that
 // are estimates to begin with.
@@ -51,11 +46,15 @@ function Countdown({ target, stats, now, prefix }: { target: number; stats: Expl
   return <>{prefix} in ~{fmtDuration(eta.secondsUntil)} <span className="ref-eta-date">· {fmtEta(eta.etaMs)}</span></>
 }
 
-export function ReferendumProgressCard({ progress, track, stats, now }: {
+export function ReferendumProgressCard({ progress, track, stats, now, gauges = true, bare = false }: {
   progress: ReferendumProgress
   track: ReferendumTrackRef
   stats: ExplorerStats
   now: number
+  /** The approval and support gauges under the phases; off where the page shows them elsewhere. */
+  gauges?: boolean
+  /** Without its card: the phases sit straight on the section (the referendum page's Status). */
+  bare?: boolean
 }) {
   const head = stats.headBlock
   // Two clocks, deliberately distinct (see ExplorerStats): a track period is a
@@ -130,7 +129,7 @@ export function ReferendumProgressCard({ progress, track, stats, now }: {
   }
 
   return (
-    <div className="detail-card ref-progress">
+    <div className={`ref-progress${bare ? ' bare' : ' detail-card'}`}>
       <div className="ref-phases">
         {segments.map(seg => (
           <div key={seg.key} className={`ref-phase ${seg.state}`}>
@@ -142,10 +141,10 @@ export function ReferendumProgressCard({ progress, track, stats, now }: {
           </div>
         ))}
       </div>
-      {(progress.approval || progress.support) && (
+      {gauges && (progress.approval || progress.support) && (
         <div className="ref-gauges">
-          {progress.approval && <Gauge label="Approval" hint="conviction-weighted ayes as a share of all votes" gauge={progress.approval} />}
-          {progress.support && <Gauge label="Support" hint="pre-conviction capital behind the referendum, as a share of active issuance" gauge={progress.support} />}
+          {progress.approval && <Gauge label="Approval" hint="conviction-weighted ayes as a share of all votes" gauge={progress.approval} projection={progress.projection} stats={stats} now={now} />}
+          {progress.support && <Gauge label="Support" hint="pre-conviction capital behind the referendum, as a share of active issuance" gauge={progress.support} projection={progress.projection} stats={stats} now={now} />}
         </div>
       )}
     </div>
@@ -155,22 +154,31 @@ export function ReferendumProgressCard({ progress, track, stats, now }: {
 // One threshold gauge: the referendum's current share against the bar the track
 // curve sets at this moment of the decision period. The tick is the threshold;
 // it slides toward zero (support) or 50% (approval) as the period elapses.
-function Gauge({ label, hint, gauge }: { label: string; hint: string; gauge: NonNullable<ReferendumProgress['approval']> }) {
+// The fill is the measure's own colour (approval green, support blue) while it clears
+// the bar; under it, amber while the falling bar is projected to meet it, red when not.
+function Gauge({ label, hint, gauge, projection, stats, now }: {
+  label: string; hint: string; gauge: NonNullable<ReferendumProgress['approval']>
+  projection: ReferendumProgress['projection']; stats: ExplorerStats; now: number
+}) {
   const current = gauge.currentPerbill
-  const state = gauge.passing == null ? 'unknown' : gauge.passing ? 'pass' : 'fail'
+  const below = gauge.passing === false
+  const state = gauge.passing == null ? 'unknown' : !below ? 'pass' : projection?.state === 'on-track' ? 'below' : 'fail'
   return (
-    <div className={`ref-gauge ${state}`} title={hint}>
+    <div className={`ref-gauge ${label.toLowerCase()} ${state}`} title={hint}>
       <div className="ref-gauge-head">
         <span className="ref-gauge-label">{label}</span>
         <span className="ref-gauge-nums mono">
-          {current != null ? <span className="ref-gauge-current">{pctText(current)}</span> : <span className="muted">not measurable</span>}
-          <span className="muted"> · needs ≥ {pctText(gauge.thresholdPerbill)}</span>
+          {current != null ? <span className="ref-gauge-current">{perbillPct(current, gauge.thresholdPerbill)}</span> : <span className="muted">not measurable</span>}
+          <span className="muted"> · needs ≥ {perbillPct(gauge.thresholdPerbill, current)}</span>
         </span>
       </div>
       <div className="ref-gauge-bar">
         {current != null && <div className="ref-gauge-fill" style={{ width: `${clampPct(current / (PERBILL / 100))}%` }} />}
         <div className="ref-gauge-tick" style={{ left: `${clampPct(gauge.thresholdPerbill / (PERBILL / 100))}%` }} />
       </div>
+      {state === 'below' && projection?.confirmableAtBlock != null && (
+        <div className="ref-gauge-note below">below today’s bar · <Countdown target={projection.confirmableAtBlock} stats={stats} now={now} prefix="falling to meet it" /></div>
+      )}
       {gauge.source === 'attributed' && (
         <div className="ref-gauge-note">from attributed votes — delegated power not included</div>
       )}
@@ -258,7 +266,11 @@ function dotClass(entry: ReferendumTimelineEntry): string {
   return 'admin'
 }
 
-export function ReferendumTimeline({ timeline, truncated, now }: { timeline: ReferendumTimelineEntry[]; truncated?: boolean; now: number }) {
+export function ReferendumTimeline({ timeline, truncated, now, upcoming = [] }: {
+  timeline: ReferendumTimelineEntry[]; truncated?: boolean; now: number
+  /** Moments still ahead (projected at the governance clock's pace), drawn in grey after the past ones. */
+  upcoming?: { label: string; block: number; ms: number }[]
+}) {
   return (
     <div className="panel ref-timeline">
       {timeline.map((entry, i) => (
@@ -278,6 +290,13 @@ export function ReferendumTimeline({ timeline, truncated, now }: { timeline: Ref
               </>
               : <Link to={paths.block(entry.blockHeight)} className="hash">#{entry.blockHeight.toLocaleString('en-US')}</Link>}
           </span>
+        </div>
+      ))}
+      {upcoming.map(m => (
+        <div className="ref-tl-row projected" key={`up-${m.label}-${m.block}`}>
+          <span className="ref-tl-dot future" />
+          <span className="ref-tl-label">{m.label}</span>
+          <span className="ref-tl-when mono" title={`Block #${m.block.toLocaleString('en-US')}, projected from the current pace`}>≈ {fmtEta(m.ms)}</span>
         </div>
       ))}
       {truncated && (

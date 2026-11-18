@@ -457,12 +457,14 @@ export interface ActivityRow {
 /* ============ search ============ */
 
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent' | 'discussion'
   /**
    * The identifier the hit resolves to — a height, a hash, an accountId, an
    * asset id, a tagId, a pool id or an xc-destination platform slug. For a
    * `referendum` hit it is the title key `"<pallet>:<index>"` and NOT a URL
-   * segment: build that route from `pallet` + `index`.
+   * segment: build that route from `pallet` + `index`. For a `discussion` hit
+   * it is the forum post id ('42' native, 's248' imported), the segment of
+   * /discussions/:id, and `label` (its title) and `desc` are USER-AUTHORED.
    */
   value: string
   label?: string
@@ -1372,7 +1374,6 @@ export interface ReferendumDetail {
   index: number
   title: string | null
   proposer: AccountRef | null
-  subsquareUrl: string
   track: number | null
   proposalHash: string | null
   proposalCall: {
@@ -1404,6 +1405,8 @@ export interface ReferendumDetail {
   liveTally: LiveReferendumTally | null
   /** Phase progress against the track's periods. Shape not mirrored field by field. */
   progress?: unknown
+  /** The forum record (description post, thread, counts); null while the forum store loads, absent on an older api. */
+  forum?: SubjectForumRef | null
 }
 
 /* ============ revenue ============ */
@@ -1521,4 +1524,119 @@ export interface PoolVolume {
   feeApr7dPct: number | null
   chart: VolumeChart
   stackAssets?: AssetRef[]
+}
+
+/* ============ forum ============ */
+
+/**
+ * The forum the explorer serves under /explorer/forum/ (forumRead.ts). Every
+ * string field below that a person wrote — titles, excerpts, bodies, labels,
+ * legacy names — is hostile input and reaches a reply only through
+ * format/untrusted.ts.
+ */
+export interface ForumAuthor { account: AccountRef | null; legacyName: string | null }
+
+export interface DiscussionRow {
+  postId: string
+  title: string
+  excerpt: string
+  labels: string[]
+  author: ForumAuthor
+  /** ISO 8601 with a zone, unlike the ClickHouse timestamps elsewhere. */
+  createdAt: string
+  lastActivityAt: string
+  editedAt: string | null
+  commentsCount: number
+  linked: string[]
+  source: { name: 'subsquare' } | null
+  hasPoll: boolean
+}
+
+export interface DiscussionsPage { generation: string; total: number; rows: DiscussionRow[]; nextCursor: string | null }
+
+/** A hidden or deleted post: no title and no body, by design. */
+export interface ForumPostStub { postId: string; kind: string; hidden: true; hiddenReason: string; deleted: boolean; createdAt: string }
+
+export interface ForumPostDetail {
+  postId: string
+  kind: string
+  title: string
+  body: string
+  /** 'markdown', or 'html' for some imported bodies. */
+  bodyFormat: string
+  tldr: string
+  labels: string[]
+  linked: string[]
+  author: ForumAuthor
+  authority: string
+  revision: number
+  createdAt: string
+  editedAt: string | null
+  lastActivityAt: string
+  commentsCount: number
+  updatesCount: number
+  /** The thread a reader of this post sees: its own, or a linked subject's merged thread. */
+  threadKey: string
+  source: { name: 'subsquare'; id: string; cid: string | null; removed: boolean } | null
+  poll: unknown
+  locked: boolean
+  /** Image URL in the body → our `/ipfs/<cid>` copy (forumRead mediaMapFor). */
+  media?: Record<string, string>
+  hidden: false
+}
+
+export interface ForumComment {
+  commentId: string
+  parentId: string | null
+  replyToId: string | null
+  /** Null on a deleted comment. */
+  author: ForumAuthor | null
+  /** Null on a hidden or deleted comment: a stub that keeps the thread's shape. */
+  body: string | null
+  bodyFormat: string
+  hidden: boolean
+  hiddenReason: string | null
+  deleted: boolean
+  createdAt: string
+  editedAt: string | null
+  /** On a referendum thread: the author's standing vote there. Raw HDX units. */
+  position: { side: string; conviction: string | null; balance: string; weighted: string } | null
+  /** Image URL in the body → our `/ipfs/<cid>` copy (forumRead mediaMapFor). */
+  media?: Record<string, string>
+  replies: ForumComment[]
+}
+
+export interface ForumThread {
+  requested: string
+  threadKey: string
+  /** Top-level comments matching the filter (replies are nested under them). */
+  total: number
+  rows: ForumComment[]
+  /** A referendum proposer's Updates, oldest first; never paged. */
+  updates: ForumComment[]
+  /** Opaque keyset cursor for the same `sort`; null on the last page. */
+  nextCursor: string | null
+  positionsComplete: boolean | null
+  locked: boolean
+}
+
+export interface AccountForumItem {
+  type: 'post' | 'comment'
+  id: string
+  threadKey: string
+  title: string | null
+  excerpt: string
+  createdAt: string
+}
+
+export interface AccountForumPage { total: number; rows: AccountForumItem[]; nextCursor: string | null }
+
+/** `forum` on a referendum detail; null while the forum store loads. */
+export interface SubjectForumRef {
+  postId: string
+  threadKey: string
+  commentsCount: number
+  hasDescription: boolean
+  authority: string | null
+  source: { name: 'subsquare' } | null
 }

@@ -23,6 +23,7 @@ function toTableRow(vote: VoteRow): VoteTableRow {
     side: vote.side,
     conviction: vote.conviction,
     weighted: vote.weighted ?? null,
+    capital: vote.amount ?? null,
     blockHeight: vote.blockHeight,
     extrinsicIndex: vote.extrinsicIndex,
     timestamp: vote.timestamp,
@@ -42,6 +43,7 @@ function groupToTableRow(group: VoteGroupRow): VoteTableRow {
     side: group.side,
     conviction: avgConvictionLabel(group.weighted, group.amount),
     weighted: group.weighted,
+    capital: group.amount,
     voters: group.voters,
     blockHeight: group.blockHeight,
     extrinsicIndex: group.extrinsicIndex,
@@ -49,7 +51,8 @@ function groupToTableRow(group: VoteGroupRow): VoteTableRow {
   }
 }
 
-export function VotesTab({ scope }: { scope: VotesScope }) {
+/** `pageSize` pages an account's votes by fewer rows (the account tab's folded history); tag scopes keep the default. */
+export function VotesTab({ scope, pageSize: accountPage }: { scope: VotesScope; pageSize?: number }) {
   const accountAddress = scope.kind === 'account' ? scope.address : null
   const listId = scope.kind === 'list-tag' ? scope.listId : null
   const listTagId = scope.kind === 'list-tag' ? scope.tagId : null
@@ -57,14 +60,15 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
   const query = useQuery()
   const requestedPage = Number.parseInt(query.get('vpage') ?? '', 10)
   const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 0
-  const offset = page * PAGE_SIZE
+  const pageSize = scope.kind === 'account' && accountPage ? accountPage : PAGE_SIZE
+  const offset = page * pageSize
   // Tag scopes group members' votes per referendum by default — the aggregate
   // is what a group page is FOR — with every individual vote one chip away.
   // An account page has exactly one voter, so there is nothing to group.
   const canGroup = scope.kind !== 'account'
   const grouped = canGroup && query.get('vmode') !== 'each'
   const systemTagId = scope.kind === 'tag' ? scope.tagId : null
-  const accountVotes = useAccountVotes(accountAddress, offset)
+  const accountVotes = useAccountVotes(accountAddress, offset, undefined, undefined, pageSize === PAGE_SIZE ? undefined : pageSize)
   const tagVotes = useTagVotes(grouped ? null : systemTagId, offset)
   const listTagVotes = useListTagVotes(grouped ? null : listId, listTagId, offset)
   const tagGrouped = useTagVotesByReferendum(systemTagId, offset, grouped)
@@ -82,7 +86,7 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
   const listTagTotal = useListTagListCount(grouped ? null : listId, listTagId, voteListCount())
   const totalPages = grouped
     ? pageCount(groupedPage.data?.total)
-    : pageCount((scope.kind === 'account' ? accountTotal : scope.kind === 'tag' ? tagTotal : listTagTotal).data?.total)
+    : pageCount((scope.kind === 'account' ? accountTotal : scope.kind === 'tag' ? tagTotal : listTagTotal).data?.total, pageSize)
   const setPage = (nextPage: number) => setQuery({ vpage: nextPage > 0 ? String(nextPage) : null })
   const active = grouped ? groupedPage : votes
 
@@ -117,12 +121,12 @@ export function VotesTab({ scope }: { scope: VotesScope }) {
         showReferendum
         loading={active.isFetching && !rows.length}
         pending={active.isPlaceholderData}
-        pageSize={PAGE_SIZE}
+        pageSize={pageSize}
         anchorRef={grouped ? undefined : votes.anchorRef}
         error={active.error}
         onRetry={() => { void active.refetch() }}
       />
-      <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, rows.length)} onPage={setPage} />
+      <Pager page={page} totalPages={totalPages} hasNext={hasNextPage(totalPages, page, rows.length, undefined, pageSize)} onPage={setPage} />
     </>
   )
 }

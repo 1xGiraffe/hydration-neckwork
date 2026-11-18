@@ -85,9 +85,9 @@ export function Notifications() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Notifications' }]} />
-        <div className="page-title">
+        <h1 className="page-title">
           Notifications <span className="sub">alerts for what you watch</span>
-        </div>
+        </h1>
       </div>
 
       {!session ? <NotificationsTeaser /> : (
@@ -176,7 +176,7 @@ function NotificationsTeaser() {
             both, and every one of them is also kept here in your inbox.
           </p>
           <div className="notif-hero-actions">
-            <button type="button" className="btn primary" onClick={requestConnect}>Log in to set up alerts</button>
+            <button type="button" className="btn primary" onClick={requestConnect}>Sign in to set up alerts</button>
             <span className="muted notif-hero-note">Your wallet is the login — no email, no password.</span>
           </div>
         </div>
@@ -520,6 +520,8 @@ export function RulesSection({ rules, channels, loading, onNew, onEdit }: {
         <NotifyButton rule={{ kind: 'referendum', params: {}, name: 'New referenda' }} label="Watch referenda" manage={false} />
         <NotifyButton rule={{ kind: 'tc-motion', params: {}, name: 'TC motions' }} label="Watch TC motions" manage={false} />
         <NotifyButton rule={{ kind: 'safety', params: {}, name: 'Security' }} label="Watch security events" manage={false} />
+        <NotifyButton rule={{ kind: 'forum-reply', params: {}, name: 'Forum replies' }} label="Watch replies to me" manage={false} />
+        <NotifyButton rule={{ kind: 'forum-mention', params: {}, name: 'Forum mentions' }} label="Watch mentions of me" manage={false} />
       </div>
       {confirmRule && (
         <ConfirmDialog

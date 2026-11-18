@@ -1,14 +1,18 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { loadShell, bundleIdFromHeader, shellMatchesBundle, ShellBundleMismatch, __testing } from '../src/routes/seo.ts'
+import { loadShell, bundleIdFromHeader, shellMatchesBundle, ShellBundleMismatch, routeChunksFor, __testing } from '../src/routes/seo.ts'
 
 // The bundle-identity handshake: a page shell is served only when it names the
 // entry chunk of the nginx that asked (X-Bundle-Id), so a UI deploy can never
 // leave the renderer handing out a shell whose chunks are gone.
 const html = (id: string) => `<html><head><script type="module" src="/assets/index-${id}.js"></script></head><body><div id="root"></div></body></html>`
 
-function mockFetch(bodies: string[]) {
+// The shell's own fetches, counted apart from the route-chunk manifest read beside
+// it (absent here: a 404, which leaves every page without module preloads).
+function mockFetch(bodies: string[], chunks: unknown = null) {
   const fn = vi.fn(async () => new Response(bodies.length > 1 ? bodies.shift()! : bodies[0], { status: 200 }))
-  vi.stubGlobal('fetch', fn)
+  vi.stubGlobal('fetch', vi.fn(async (url: unknown) => String(url).endsWith('/route-chunks.json')
+    ? new Response(chunks == null ? '' : JSON.stringify(chunks), { status: chunks == null ? 404 : 200 })
+    : fn()))
   return fn
 }
 
@@ -82,5 +86,15 @@ describe('seo shell bundle handshake', () => {
       await expect(loadShell('bbbb2222')).rejects.toBeInstanceOf(ShellBundleMismatch)
       expect(f).toHaveBeenCalledTimes(2)
     } finally { vi.useRealTimers() }
+  })
+
+  it('keeps the route-chunk manifest only for the shell whose entry it names', async () => {
+    mockFetch([html('aaaa1111')], { entry: 'assets/index-aaaa1111.js', pages: { Forum: ['assets/Forum-x.js'] } })
+    const shell = await loadShell('aaaa1111')
+    expect(routeChunksFor(shell)?.pages.Forum).toEqual(['assets/Forum-x.js'])
+    expect(routeChunksFor(html('bbbb2222'))).toBeNull()
+    __testing.loadShellReset()
+    mockFetch([html('aaaa1111')], { entry: 'assets/index-cccc3333.js', pages: {} })
+    expect(routeChunksFor(await loadShell('aaaa1111'))).toBeNull()
   })
 })

@@ -53,6 +53,14 @@ describe('/explorer/contract/:address/abi', () => {
     expect(getContractAbiPayload).toHaveBeenCalledTimes(1)
     await app.close()
   })
+
+  it('answers 200 null for an unverified contract when the lookup is optional', async () => {
+    const app = await buildApp()
+    const res = await app.inject(`/explorer/contract/${ADDRESS}/abi?optional=1`)
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toBeNull()
+    await app.close()
+  })
 })
 
 describe('/explorer/contract/:address/sources', () => {

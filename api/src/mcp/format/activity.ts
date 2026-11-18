@@ -25,6 +25,7 @@ import {
   poolUrl, referendumUrl, v3PoolUrl, explorerLink,
 } from './refs.ts'
 import { bullets, kv, note } from './md.ts'
+import { userLine } from './untrusted.ts'
 
 /* ============ the vocabulary, as data ============ */
 
@@ -358,7 +359,8 @@ const actors = (r: ActivityRow): string | null => {
     return r.xcmDir === 'in' ? `${farLabel ?? DASH} → ${local ?? DASH}` : `${who ?? DASH} → ${farLabel ?? DASH}`
   }
   if (r.type === 'xcswap' && r.xcswapRecipient) {
-    return `${who ?? DASH} → ${shortForeignAddress(r.xcswapRecipient)}`
+    // The destination account is whatever the user typed (a NEAR name, say).
+    return `${who ?? DASH} → ${userLine(shortForeignAddress(r.xcswapRecipient), 40)}`
   }
   if (r.to) return `${who ?? DASH} → ${accountLabel(r.to)}`
   return who
@@ -417,14 +419,15 @@ function qualifiers(r: ActivityRow): string[] {
       const ref = r.voteRef != null ? `${r.voteRefPallet ?? 'opengov'} #${r.voteRef}` : 'referendum'
       out.push(`${r.voteSide ?? 'vote'} on ${ref}`)
       if (r.voteConviction && r.voteConviction !== 'None') out.push(r.voteConviction)
-      if (r.voteRefTitle) out.push(`"${r.voteRefTitle}"`)
+      // An imported referendum title is verbatim user text, newlines and all.
+      if (r.voteRefTitle) out.push(`user-authored title "${userLine(r.voteRefTitle, 90)}"`)
       break
     }
     case 'mm':
       if (r.mmMarket) out.push(r.mmMarket)
       break
     case 'liquidity':
-      if (r.poolAddress) out.push(`pool ${r.poolName ?? shortHash(r.poolAddress)}`)
+      if (r.poolAddress) out.push(`pool ${userLine(r.poolName, 60) || shortHash(r.poolAddress)}`)
       else if (r.asset) out.push(`pool ${assetLabel(r.asset)}`)
       if (r.v3TokenId) out.push(`position #${r.v3TokenId}`)
       break
@@ -544,12 +547,12 @@ export function activityDetail(r: ActivityRow, base: string, opts: ActivityDetai
   const now = opts.now
   const href = activityUrlFor(r, base)
   const pool = r.poolAddress
-    ? explorerLink(r.poolName ?? shortHash(r.poolAddress), v3PoolUrl(base, r.poolAddress))
+    ? explorerLink(userLine(r.poolName, 60) || shortHash(r.poolAddress), v3PoolUrl(base, r.poolAddress))
     : r.type === 'liquidity' && r.asset && r.asset.assetId > 0
       ? explorerLink(assetLabel(r.asset), poolUrl(base, r.asset.assetId))
       : null
   const referendum = r.voteRef != null
-    ? explorerLink(r.voteRefTitle ?? `${r.voteRefPallet ?? 'opengov'} #${r.voteRef}`, referendumUrl(base, r.voteRefPallet ?? 'opengov', r.voteRef))
+    ? explorerLink(`${r.voteRefPallet ?? 'opengov'} #${r.voteRef}${r.voteRefTitle ? ` — user-authored title: ${userLine(r.voteRefTitle, 90)}` : ''}`, referendumUrl(base, r.voteRefPallet ?? 'opengov', r.voteRef))
     : null
   const head = kv([
     ['Action', [activityKind(r), ...qualifiers(r)].join(' · ')],

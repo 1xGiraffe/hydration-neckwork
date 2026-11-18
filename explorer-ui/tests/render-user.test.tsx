@@ -253,7 +253,7 @@ describe('Tags hub — smoke render (logged out)', () => {
     // dialog instead of a dead "log in first" prompt.
     expect(html).not.toContain('New list')
     expect(html).toContain('Subscribe')
-    expect(html).not.toContain('Log in to subscribe')
+    expect(html).not.toContain('Sign in to subscribe')
   })
 })
 
@@ -263,7 +263,7 @@ describe('Lists — smoke render (logged out)', () => {
     queryClient.setQueryData(['lists'], MOCK_LISTS)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Lists /></QueryClientProvider>)
     expect(html).toContain('Lists')
-    expect(html).toMatch(/log in/i)
+    expect(html).toMatch(/sign in/i)
     // Owned-list management stays gated: no reorder/new-list affordances.
     expect(html).not.toContain('New list')
     // New user request: public lists are no longer Tags-hub-only — the same
@@ -273,7 +273,7 @@ describe('Lists — smoke render (logged out)', () => {
     expect(html).toContain('Public lists')
     expect(html).toContain('DeFi desks')
     expect(html).toContain('Subscribe')
-    expect(html).not.toContain('Log in to subscribe')
+    expect(html).not.toContain('Sign in to subscribe')
   })
 })
 
@@ -325,7 +325,7 @@ describe('ListTagDetail — smoke render (logged out)', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     queryClient.setQueryData(['list-tag', 'personal', 'personal-watch'], MOCK_LIST_TAG_DETAIL)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><ListTagDetail listId="personal" tagId="personal-watch" /></QueryClientProvider>)
-    expect(html).toMatch(/log in/i)
+    expect(html).toMatch(/sign in/i)
     expect(html).not.toContain('Watching')
     expect(html).not.toContain('Tag not found')
   })
@@ -352,7 +352,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     publicProbe(queryClient, null)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
-    expect(html).toMatch(/log in/i)
+    expect(html).toMatch(/sign in/i)
     expect(html).not.toContain('Tag not found')
   })
 
@@ -363,7 +363,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
     expect(html).toContain('acct-head-skeleton')
-    expect(html).not.toMatch(/log in/i)
+    expect(html).not.toMatch(/sign in/i)
     expect(html).not.toContain('Tag not found')
   })
 
@@ -373,7 +373,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
     // ListTagDetail's own anonymous gate must NOT engage for a public tag —
     // the one case where that page has an anonymous form (see its comment).
-    expect(html).not.toMatch(/log in to view this tag/i)
+    expect(html).not.toMatch(/sign in to view this tag/i)
   })
 
   it('shows the page skeleton — not "Tag not found" — for a UUID-shaped id while the tag map is loading', () => {
@@ -382,7 +382,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
     expect(html).toContain('acct-head-skeleton')
     expect(html).not.toContain('Tag not found')
-    expect(html).not.toMatch(/log in/i)
+    expect(html).not.toMatch(/sign in/i)
   })
 
   it('routes to ListTagDetail once the map is ready and hits — not TagDetail\'s own anonymous hint', () => {
@@ -399,7 +399,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
     // instead of stalling on TagDetail's — the e2e suite covers the full,
     // logged-in "shows the real tag" path this harness cannot reach.
     expect(html).not.toContain('<button')
-    expect(html).toMatch(/log in/i)
+    expect(html).toMatch(/sign in/i)
   })
 
   it('never shows the user-tag anonymous hint for a slug-shaped id, even though tagMapStatus() is "anonymous" too', () => {
@@ -411,7 +411,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
     // didn't run before the tag-map check.
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId="kraken" /></QueryClientProvider>)
-    expect(html).not.toMatch(/log in/i)
+    expect(html).not.toMatch(/sign in/i)
   })
 
   // Regression for the "loading forever" bug: a failed tag-map fetch must
@@ -427,7 +427,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     publicProbe(queryClient, null)   // nothing public behind it either
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
-    expect(html).not.toMatch(/log in/i)
+    expect(html).not.toMatch(/sign in/i)
     expect(html).toContain(`>${USER_TAG_ID}<`)
   })
 })

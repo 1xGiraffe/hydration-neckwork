@@ -27,6 +27,9 @@ export interface Config {
   // ClickHouse connection settings
   CLICKHOUSE_URL: string
   CLICKHOUSE_DB: string
+  // 'default' everywhere but governance-content-sync, which runs as its own
+  // forum-only user (see the service in docker-compose.yml).
+  CLICKHOUSE_USER: string
   CLICKHOUSE_PASSWORD: string
 
   // Processing parameters
@@ -83,6 +86,7 @@ export const config: Config = {
   // ClickHouse connection
   CLICKHOUSE_URL: stringFromEnvironment('CLICKHOUSE_HOST', 'http://localhost:18123'),
   CLICKHOUSE_DB: 'price_data',
+  CLICKHOUSE_USER: process.env.CLICKHOUSE_USER?.trim() || 'default',
   CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD ?? '',
 
   // Processing tuning parameters

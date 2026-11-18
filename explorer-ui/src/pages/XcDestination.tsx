@@ -28,11 +28,11 @@ export function XcDestination({ slug }: { slug: string }) {
           { label: data?.destination.symbol ?? slug },
         ]} />
         <div className="detail-header">
-          <div className="page-title">
+          <h1 className="page-title">
             {data && <AssetIcon assetId={0} symbol={data.destination.symbol} size={30} origin={data.destination.origin} />}
             {' '}{data?.destination.symbol ?? slug}
             {data && <span className="xc-chain">on {data.destination.chainName}</span>}
-          </div>
+          </h1>
         </div>
       </div>
 

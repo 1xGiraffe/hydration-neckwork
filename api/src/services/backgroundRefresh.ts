@@ -12,6 +12,8 @@ import { refreshOracleState } from './oracleService.ts'
 import { refreshJuicerState } from './juicerState.ts'
 import { refreshBilState } from './bilState.ts'
 import { refreshBondState } from './bondState.ts'
+import { refreshPreimageDeposits } from './governanceDeposits.ts'
+import { refreshTreasurySpends } from './governanceTreasury.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -61,6 +63,11 @@ import { refreshBondState } from './bondState.ts'
 //                    every 5th tick) ~6 small reads (bond_activity, the bond OTC
 //                    orders and their events, the bonds' and the pot's balances)
 //                                                              → every tick (60s)
+//   preimage-deposits ~0.1s node-full (one pinned enumeration of
+//                    Preimage.RequestStatusFor and the old StatusFor, a few
+//                    hundred keys, and their batched values) → every 5th tick (300s)
+//   treasury-spends ~20ms node-full (one pinned enumeration of
+//                    Treasury.Spends, a handful of keys)     → every 5th tick (300s)
 //   oracle-state   ~0.5s node-full (one pinned block: every market's oracle
 //                    plumbing and reserve prices, then 12 probes per source —
 //                    rounds, answer, description, decimals, owner and the
@@ -188,6 +195,12 @@ const TASKS: RefreshTask[] = [
   // every source's own answer and inputs, at one pinned block. The feeds it
   // describes step on deviation or a 24H heartbeat, so 300s is enough.
   { name: 'oracle-state', everyTicks: 5, run: refreshOracleState },
+  // Preimage deposits (governanceDeposits.ts): who holds which preimage deposit, at one
+  // pinned block. Notes and unnotes are rare, and the page states the block it read.
+  { name: 'preimage-deposits', everyTicks: 5, run: refreshPreimageDeposits },
+  // The treasury's spends as storage holds them (governanceTreasury.ts): a payout
+  // re-dates a spend's expiry with no event saying so.
+  { name: 'treasury-spends', everyTicks: 5, run: refreshTreasurySpends },
 ]
 
 // Tasks due on a given 1-based tick number (exported for testing the cadence).

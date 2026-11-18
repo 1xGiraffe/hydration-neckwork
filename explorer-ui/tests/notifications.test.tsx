@@ -18,7 +18,7 @@ import {
   deleteRuleConfirmBody, findEquivalentRule,
   HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN, HEALTH_FACTOR_PRESETS, KIND_LABELS, LARGE_VALUE_MIN_USD,
   NOTIFICATION_KINDS, PRICE_STEP_PCTS, priceAtStep, priceStepLabel, readTarget, REFERENDUM_PHASES,
-  REFERENDUM_TRACKS, ruleSubject, ruleTagTarget,
+  ruleSubject, ruleTagTarget,
   TC_MOTION_PHASES, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT, SAFETY_EGRESS_DEFAULT_PCT, clearInboxConfirmBody,
   SAFETY_KINDS, sameRuleParams, suggestPriceDirection, USD_FLOOR_PRESETS, subscribedLabel } from '../src/notificationKinds'
 import {
@@ -108,7 +108,7 @@ describe('Notifications — logged-out teaser', () => {
   })
 
   it('offers exactly one call to action and no management surface', () => {
-    expect(html).toContain('Log in to set up alerts')
+    expect(html).toContain('Sign in to set up alerts')
     expect(html).not.toContain('New alert')
     expect(html).not.toContain('Inbox')
     expect(html).not.toContain('Enable push')
@@ -342,7 +342,7 @@ describe('per-surface subscribe affordances', () => {
   it('asks a logged-out visitor to log in rather than dead-ending', () => {
     const html = render(<NotifyButton rule={{ kind: 'safety', params: {} }} />)
     expect(html).toContain('Get notified')
-    expect(html).toContain('Log in to get alerts for this')
+    expect(html).toContain('Sign in to get alerts for this')
   })
 })
 
@@ -429,7 +429,7 @@ describe('the preset alert dialog', () => {
   it('parks a logged-out save instead of dead-ending', () => {
     expect(assetPage).toContain('stashPendingNotification(')
     expect(assetPage).toContain('requestConnect()')
-    expect(assetPage).toContain("submitLabel={session ? undefined : 'Log in to save this alert'}")
+    expect(assetPage).toContain("submitLabel={session ? undefined : 'Sign in to save this alert'}")
   })
 })
 
@@ -466,7 +466,7 @@ describe('rule parameter equivalence', () => {
   it('ignores key order, absent-vs-empty, and a number that travelled as a string', () => {
     expect(sameRuleParams('price', { assetId: 0, direction: 'above', price: 0.03 }, { price: 0.03, direction: 'above', assetId: 0 })).toBe(true)
     expect(sameRuleParams('referendum', {}, { phases: [] })).toBe(true)
-    expect(sameRuleParams('referendum', { track: '5' }, { track: 5 })).toBe(true)
+    expect(sameRuleParams('large-trade', { assetId: '0', minUsd: 100 }, { assetId: 0, minUsd: 100 })).toBe(true)
     expect(sameRuleParams('safety', { kinds: ['pause', 'freeze'] }, { kinds: ['freeze', 'pause'] })).toBe(true)
     expect(sameRuleParams('tc-motion', {}, { phases: [] })).toBe(true)
     expect(sameRuleParams('tc-motion', { phases: ['voted', 'approved'] }, { phases: ['approved', 'voted'] })).toBe(true)
@@ -904,7 +904,7 @@ describe('rule-kind registry mirror', () => {
     // missing a label would render a blank option in the picker. The count is
     // spelled out so adding a kind on one side alone fails here rather than
     // shipping a picker entry with no form behind it.
-    expect(NOTIFICATION_KINDS).toHaveLength(14)
+    expect(NOTIFICATION_KINDS).toHaveLength(19)
     for (const kind of NOTIFICATION_KINDS) expect(KIND_LABELS[kind]).toBeTruthy()
   })
 
@@ -934,11 +934,6 @@ describe('rule-kind registry mirror', () => {
     expect([...SAFETY_KINDS]).toEqual(literals('SAFETY_KINDS'))
     expect([...REFERENDUM_PHASES]).toEqual(literals('REFERENDUM_PHASES'))
     expect([...TC_MOTION_PHASES]).toEqual(literals('TC_MOTION_PHASES'))
-
-    // The track table is id → name pairs rather than a flat list.
-    const tracks = [...api.matchAll(/\{ id: (\d+), name: '([a-z_]+)' \}/g)].map(m => ({ id: Number(m[1]), name: m[2] }))
-    expect(tracks.length).toBeGreaterThan(0)
-    expect(REFERENDUM_TRACKS).toEqual(tracks)
   })
 })
 
@@ -984,7 +979,7 @@ describe('edit dialog round trip — seedFromRule ∘ buildRuleParams', () => {
     roundTrip(rule('health-factor', { target: { kind: 'address', address: FOX_ADDRESS }, threshold: 1.6 }))
     roundTrip(rule('health-factor', { target: { kind: 'tag', tagId: 'treasury' }, threshold: 1.1 }, { targetLabel: 'Treasury' }))
     roundTrip(rule('account-activity', { target: { kind: 'tag', tagId: 'kraken' }, type: 'trade', minUsd: 50 }, { targetLabel: 'Kraken' }))
-    roundTrip(rule('referendum', { phases: ['submitted', 'confirmed'], track: '5' }))
+    roundTrip(rule('referendum', { phases: ['submitted', 'confirmed'] }))
     roundTrip(rule('tc-motion', { phases: ['proposed'] }))
     roundTrip(rule('extrinsic', { section: 'omnipool', method: 'sell', success: false, signer: FOX_ADDRESS }))
     roundTrip(rule('event', { section: 'referenda', method: 'submitted' }))
@@ -992,5 +987,48 @@ describe('edit dialog round trip — seedFromRule ∘ buildRuleParams', () => {
     roundTrip(rule('safety', { kinds: ['pause', 'freeze'] }))
     roundTrip(rule('safety', { kinds: ['deficit', 'fuse'], deficitUsd: 2500, fusePct: 50 }))
     roundTrip(rule('safety', { kinds: ['queued', 'released'] }))
+    roundTrip(rule('gov-unvoted', { address: FOX_ADDRESS, leadHours: 48 }))
+    roundTrip(rule('gov-unlockable', { address: FOX_ADDRESS }))
+  })
+})
+
+describe('buildRuleParams — forum kinds', () => {
+  const sets = { phases: [], motionPhases: [], safetyKinds: [] }
+  it('gives replies and mentions no parameters: they are about the rule owner', () => {
+    expect(buildRuleParams('forum-reply', {}, sets)).toEqual({ ok: true, params: {} })
+    expect(buildRuleParams('forum-mention', { threadKey: 'ignored' }, sets)).toEqual({ ok: true, params: {} })
+  })
+  it('names the followed thread by a forum id, and refuses anything else', () => {
+    expect(buildRuleParams('forum-thread', { threadKey: ' opengov:450 ' }, sets)).toEqual({ ok: true, params: { threadKey: 'opengov:450' } })
+    expect(buildRuleParams('forum-thread', { threadKey: '' }, sets).ok).toBe(false)
+    expect(buildRuleParams('forum-thread', { threadKey: '<b>' }, sets).ok).toBe(false)
+  })
+  it('compares a stored follow with a fresh Follow button as the same subscription', () => {
+    const rules = [{ kind: 'forum-thread' as const, params: { threadKey: 's248' }, id: 'r1' }]
+    expect(findEquivalentRule(rules, { kind: 'forum-thread', params: { threadKey: 's248' } })?.id).toBe('r1')
+    expect(findEquivalentRule(rules, { kind: 'forum-thread', params: { threadKey: 's249' } })).toBeUndefined()
+  })
+})
+
+describe('buildRuleParams — governance kinds', () => {
+  const sets = { phases: [], motionPhases: [], safetyKinds: [] }
+  const picked = { kind: 'address' as const, address: FOX_ADDRESS }
+
+  it('watches one account, picked or pasted, with a bounded whole-hour lead', () => {
+    expect(buildRuleParams('gov-unvoted', {}, { ...sets, target: picked })).toEqual({ ok: true, params: { address: FOX_ADDRESS, leadHours: 24 } })
+    expect(buildRuleParams('gov-unvoted', { address: ` ${FOX_ADDRESS} `, leadHours: '6' }, sets)).toEqual({ ok: true, params: { address: FOX_ADDRESS, leadHours: 6 } })
+    expect(buildRuleParams('gov-unvoted', { leadHours: '0' }, { ...sets, target: picked }).ok).toBe(false)
+    expect(buildRuleParams('gov-unvoted', { leadHours: '169' }, { ...sets, target: picked }).ok).toBe(false)
+    expect(buildRuleParams('gov-unvoted', { leadHours: '1.5' }, { ...sets, target: picked }).ok).toBe(false)
+    expect(buildRuleParams('gov-unvoted', {}, sets).ok).toBe(false)
+    expect(buildRuleParams('gov-unlockable', {}, { ...sets, target: picked })).toEqual({ ok: true, params: { address: FOX_ADDRESS } })
+    // A tag is never a voter.
+    expect(buildRuleParams('gov-unlockable', {}, { ...sets, target: { kind: 'tag', tagId: 'treasury' } }).ok).toBe(false)
+  })
+
+  it('compares a stored reminder with a bell that left the lead to its default', () => {
+    const rules = [{ kind: 'gov-unvoted' as const, params: { address: FOX_ADDRESS, leadHours: 24 }, id: 'r1' }]
+    expect(findEquivalentRule(rules, { kind: 'gov-unvoted', params: { address: FOX_ADDRESS } })?.id).toBe('r1')
+    expect(findEquivalentRule(rules, { kind: 'gov-unvoted', params: { address: FOX_ADDRESS, leadHours: 48 } })).toBeUndefined()
   })
 })

@@ -595,7 +595,7 @@ export function Intents() {
     <div className="wrap ice-page">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Intents' }]} />
-        <div className="page-title">Intents <span className="sub">limit orders & DCA, settled by ICE</span></div>
+        <h1 className="page-title">Intents <span className="sub">limit orders & DCA, settled by ICE</span></h1>
       </div>
       <Intro />
       {isError

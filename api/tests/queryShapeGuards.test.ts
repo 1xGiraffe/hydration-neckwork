@@ -109,7 +109,7 @@ describe('withdrawals may land in the conclusion block itself', () => {
   })
 
   it('bounds the unconfirmed paths by POSITION rather than by block', () => {
-    const at = governanceService.indexOf('async function loadWithdrawals')
+    const at = governanceService.indexOf('async function loadRemovals')
     expect(at).toBeGreaterThan(-1)
     const body = governanceService.slice(at, governanceService.indexOf('const big =', at))
     expect(body).toContain('isAfter(concludedAt,')

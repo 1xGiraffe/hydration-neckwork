@@ -81,7 +81,7 @@ export function BlockDetail({ height }: { height: number }) {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Blocks', to: paths.blocks() }, { label: F.int(height) }]} />
         <div className="detail-header">
-          <div className="page-title">Block <span className="num">{F.int(height)}</span></div>
+          <h1 className="page-title">Block <span className="num">{F.int(height)}</span></h1>
           <div className="nav-btns">
             <button type="button" onClick={() => navigate(paths.block(height - 1))} title="Previous block" aria-label="Previous block"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg></button>
             <button type="button" onClick={() => navigate(paths.block(height + 1))} title="Next block" aria-label="Next block"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg></button>

@@ -336,24 +336,14 @@ describe('rules', () => {
     expect(bogus.statusCode).toBe(422)
   })
 
-  // A track written by name normalizes to the id the chain reports.
-  it('accepts a referendum track by name or by id and stores the id', async () => {
+  // There is no per-track subscription: a referendum rule names phases only.
+  it('refuses a referendum rule narrowed to a track', async () => {
     const f = await build()
-    const byName = await f.inject({
-      method: 'POST', url: '/user/notifications/rules', headers: auth(),
-      payload: { kind: 'referendum', params: { track: 'Whitelisted Caller' } },
-    })
-    expect(byName.json()).toMatchObject({ params: { track: '1' }, summary: 'referenda — any phase on whitelisted_caller' })
-    const byId = await f.inject({
+    const res = await f.inject({
       method: 'POST', url: '/user/notifications/rules', headers: auth(),
       payload: { kind: 'referendum', params: { track: '1' } },
     })
-    expect(byId.json()).toMatchObject({ params: { track: '1' } })
-    const bogus = await f.inject({
-      method: 'POST', url: '/user/notifications/rules', headers: auth(),
-      payload: { kind: 'referendum', params: { track: 'treasury' } },
-    })
-    expect(bogus.statusCode).toBe(422)
+    expect(res.statusCode).toBe(422)
   })
 })
 

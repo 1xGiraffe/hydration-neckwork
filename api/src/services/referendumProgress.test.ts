@@ -69,16 +69,16 @@ describe('progressFrom', () => {
 
   it('phase boundary blocks come from the track periods', () => {
     const progress = progressFrom(opengovPhase(REF_382_CONFIRMING)!, treasurer, 13680000, null, direct)
-    expect(progress.decisionEndBlock).toBe(13658523 + 100_800)
-    expect(progress.confirmEndBlock).toBe(13678964 + 7_200)
+    expect(progress.decisionEndBlock).toBe(13658523 + 302_400)
+    expect(progress.confirmEndBlock).toBe(13678964 + 21_600)
     expect(progress.earliestDecisionBlock).toBeNull()
     expect(progress.timeoutBlock).toBeNull()
   })
 
   it('preparing without a deposit carries the undeciding timeout; with one it does not', () => {
     const noDeposit = progressFrom(opengovPhase([row('Referenda.Submitted', 1000)])!, treasurer, 1500, null, direct)
-    expect(noDeposit.earliestDecisionBlock).toBe(1000 + 600)
-    expect(noDeposit.timeoutBlock).toBe(1000 + 28_800)
+    expect(noDeposit.earliestDecisionBlock).toBe(1000 + 1_800)
+    expect(noDeposit.timeoutBlock).toBe(1000 + 86_400)
     expect(noDeposit.approval).toBeNull()
     expect(noDeposit.support).toBeNull()
     const deposited = progressFrom(

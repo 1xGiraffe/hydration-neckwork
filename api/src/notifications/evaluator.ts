@@ -36,6 +36,14 @@ import {
   type RenderAccount, type RenderInput, type RenderPart, type RenderedNotification,
 } from './render.ts'
 import { bilActionSlug } from '../services/bil.ts'
+import {
+  FORUM_KINDS, forumLaneStatus, persistForumLane, renderForumMatch, resetForumLaneForTests, runForumLane,
+  type ForumLaneOutcome, type ForumMatchPayload,
+} from './forumLane.ts'
+import {
+  governanceGroupMatches, govAccountKey, govSource, renderGovMatch, resetGovernanceLaneForTests, ruleFloors,
+  type GovKind, type GovMatchPayload,
+} from './governanceLane.ts'
 
 // The trigger evaluator: one always-on loop that turns each new stretch of the
 // chain into notifications.
@@ -294,8 +302,6 @@ export interface ReferendumEventRow {
   eventIndex: number
   index: number
   phase: ReferendumPhase
-  /** Track id, when the event carries one (Submitted/DecisionStarted only). */
-  track: number | null
   /** Executed phase only: how the enactment went (see enactmentOutcomeFrom). */
   outcome?: 'ok' | 'failed' | 'unavailable' | null
 }
@@ -363,6 +369,8 @@ export type MatchPayload =
       direction?: FuseDirection; utilizationPct?: number; limit?: number; durationSec?: number
       /** Egress only: which level crossed, and the HDX the budget has charged (`limit` is its cap). */
       level?: 'warn' | 'full'; used?: number }
+  | ForumMatchPayload
+  | GovMatchPayload
 
 /** A DCA schedule as it was created: the standing order, not any one execution.
  * Since runtime 443 a DCA intent is one too: `intentId` names it (its u128 id as a
@@ -701,14 +709,7 @@ const referendumMatcher = (
   identityOf: referendumIdentity,
   accepts: p => {
     const phases = p.phases?.length ? new Set<string>(p.phases) : null
-    const track = p.track?.trim().toLowerCase()
-    return r => (!phases || phases.has(r.phase))
-      // A track filter can only reject an event whose track is KNOWN. The
-      // chain puts the track on Submitted and DecisionStarted; the loop
-      // back-fills the rest from the referendum's own Submitted row, and an
-      // index whose submission is not indexed at all keeps matching rather
-      // than silently disappearing.
-      && (!track || r.track == null || String(r.track) === track)
+    return r => !phases || phases.has(r.phase)
   },
   payloadOf: row => ({ lane: 'referendum', row, title: titleFor(row.index) }),
 })
@@ -793,6 +794,7 @@ export function evaluateExtrinsics(rows: readonly ChainExtrinsicRow[], rules: re
 export type RowLaneKind =
   | 'account-activity' | 'large-trade' | 'large-transfer' | 'protocol-revenue' | 'liquidation'
   | 'safety' | 'referendum' | 'tc-motion' | 'event' | 'extrinsic' | 'mm-cap'
+  | 'gov-unvoted' | 'gov-unlockable'
 /**
  * Block alerts: a rule fires once its height is at or below `reached` — the
  * lower of the live pipeline head (which follows the FINALIZED chain) and the
@@ -824,7 +826,7 @@ export function evaluateBlockRules(rules: readonly NotificationRule[], reached: 
   return { matches, expired }
 }
 
-export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'protocol-revenue', 'liquidation', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic', 'mm-cap']
+export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'protocol-revenue', 'liquidation', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic', 'mm-cap', 'gov-unvoted', 'gov-unlockable']
 
 /* ============ pure snapshot-lane core ============ */
 
@@ -1162,6 +1164,11 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       }
       return { title, body, path: activityPath(row) }
     }
+    case 'forum':
+      return renderForumMatch(p, ref => accountPart(renderAccount(ref, viewerTag)))
+    case 'gov-unvoted':
+    case 'gov-unlockable':
+      return renderGovMatch(p, ref => accountPart(renderAccount(ref, viewerTag)))
     case 'safety':
       return {
         title: [textPart(p.event.label)],
@@ -1781,6 +1788,8 @@ export interface EvaluatorStatus {
   counters: Readonly<typeof counters>
   lanes: EvaluatorLaneStatus[]
   laneAlarm: EvaluatorLaneAlarmStatus
+  /** The forum lane's seq cursor and floor (see forumLane.ts); not a block lane. */
+  forum: ReturnType<typeof forumLaneStatus>
 }
 /** One alarmed lane: its name, failure streak, distance and since-time — nothing else. */
 export interface EvaluatorLaneAlarm {
@@ -1833,6 +1842,7 @@ export function evaluatorStatus(): EvaluatorStatus {
       }
     }),
     laneAlarm: laneAlarmStatus(),
+    forum: forumLaneStatus(),
   }
 }
 
@@ -1855,7 +1865,7 @@ export function startNotificationEvaluator(intervalMs = evaluatorIntervalMs()): 
 export function stopNotificationEvaluator(): Promise<void> {
   if (timer) clearInterval(timer)
   timer = null
-  return flushCursors(true).catch(() => {})
+  return Promise.all([flushCursors(true), persistForumLane(true)]).then(() => {}, () => {})
 }
 
 export function resetEvaluatorForTests(): void {
@@ -1880,6 +1890,8 @@ export function resetEvaluatorForTests(): void {
   laneHealth.clear()
   failedLanesThisTick.clear()
   lastSafetyNewest = null
+  resetForumLaneForTests()
+  resetGovernanceLaneForTests()
   for (const k of Object.keys(counters) as (keyof typeof counters)[]) counters[k] = 0
 }
 
@@ -1929,7 +1941,7 @@ export async function runEvaluatorTick(): Promise<void> {
       const rules = activeRulesByKind(kind)
       if (!rules.length) continue
       await guard(kind, async () => {
-        const outcome = await runKindLane(kind, rules, head)
+        const outcome = await runKindLane(kind, rules, head, sourceHead)
         if (outcome) lanes.push(outcome)
       })
     }
@@ -1948,7 +1960,15 @@ export async function runEvaluatorTick(): Promise<void> {
     const blocks = sourceHead == null
       ? { matches: [] as RuleMatch[], expired: [] as string[] }
       : evaluateBlockRules(allRules(), Math.min(head, sourceHead))
-    const matches = [...lanes.flatMap(l => l.matches), ...snapshot.matches, ...blocks.matches]
+    // The forum lane reads the forum tables on its own seq cursor, not a block
+    // window (forumLane.ts); it commits exactly where the block lanes advance.
+    const forum: { outcome: ForumLaneOutcome | null } = { outcome: null }
+    const forumRules = FORUM_KINDS.flatMap(kind => activeRulesByKind(kind))
+    if (client) {
+      const c = client
+      await guard('forum', async () => { forum.outcome = await runForumLane(c, forumRules, head) })
+    }
+    const matches = [...lanes.flatMap(l => l.matches), ...snapshot.matches, ...blocks.matches, ...(forum.outcome?.matches ?? [])]
     // Cursors move, and edge-triggered rules disarm, only once this tick's
     // matches are durably in the inbox: a failed write that had already advanced
     // a cursor or disarmed a crossing would lose them for good.
@@ -1958,6 +1978,7 @@ export async function runEvaluatorTick(): Promise<void> {
         lane.commit?.()
       }
       await snapshot.commit()
+      forum.outcome?.commit()
       // One-shot rules leave only once their notification is durably stored.
       for (const ruleId of blocks.expired) await guard('block-expire', () => expireRule(ruleId))
     } else {
@@ -1966,6 +1987,7 @@ export async function runEvaluatorTick(): Promise<void> {
     }
     lanesSettled = true
     await flushCursors(matches.length > 0)
+    await persistForumLane(matches.length > 0)
   } catch (err) {
     counters.errors++
     console.error(`[notifications] evaluator tick failed: ${describeError(err)}`)
@@ -2042,7 +2064,7 @@ interface FetchBudget { left: number }
 
 // A kind's lane: seed if it has no cursor yet, otherwise window and match.
 // Returns null when there is nothing to advance (seeded, or an empty window).
-async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: number): Promise<LaneOutcome | null> {
+async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: number, sourceHead: number | null): Promise<LaneOutcome | null> {
   const cursor = cursorFor(kind)
   if (kind === 'safety') return safetyLane(rules, cursor, head)
   if (cursor == null) {
@@ -2099,9 +2121,37 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
       // the log tables are not ordered against the head watermark, and a row seen
       // twice is dropped by its identity.
       return { kind, matches: await mmCapChangeMatches(rules, recheckWindow(window)), window }
+    case 'gov-unvoted':
+    case 'gov-unlockable':
+      return governanceLane(kind, rules, window, sourceHead)
     default:
       return { kind, matches: evaluateExtrinsics(await queryWindowExtrinsics(rules, window), rules, window), window }
   }
+}
+
+// The governance kinds (governanceLane.ts): a reminder that a referendum the watched
+// account has not voted on is about to end, and an unlock step of its conviction lock.
+// Both run on the ordinary `(cursor, head]` window, the cursor clamped to the
+// every-block watermark by laneCursor like every row lane, and fire for nothing above
+// that watermark nor at or below each rule's own floor. An unlock step's block is
+// exact, so it fires inside the window (re-reading TRAILING_RECHECK_BLOCKS below the
+// cursor, because the governance snapshots are cached a block or so on keys without
+// the head). A reminder's onset moves with the clock's measured pace, so it fires
+// once per "ending within the lead" stretch the head is inside (see governanceLane.ts).
+//
+// Rules are grouped by watched account and visited GOV_ACCOUNTS_PER_TICK at a time on
+// the activity lanes' rotation (visitGroups), so the cursor stands where every account
+// has been read. Without the conviction snapshot the lane holds: every account would
+// read as "not voted" and "nothing locked".
+const GOV_ACCOUNTS_PER_TICK = 100
+async function governanceLane(kind: GovKind, rules: NotificationRule[], window: BlockWindow, sourceHead: number | null): Promise<LaneOutcome | null> {
+  if (!govSource().ready()) return null
+  const floorOf = await ruleFloors(rules, window.to)
+  const bounds = { from: recheckWindow(window).from, upper: windowCoveredTo(window, sourceHead ?? window.from), head: window.to }
+  const deadlines = kind === 'gov-unvoted' ? await govSource().deadlines() : null
+  const { matches, groups } = await visitGroups(kind, groupRules(rules, govAccountKey), { left: GOV_ACCOUNTS_PER_TICK },
+    group => governanceGroupMatches(kind, group, bounds, floorOf, deadlines))
+  return { kind, matches, window, groups }
 }
 
 // The safety lane's source is the shared security dashboard, cached 20s fresh /
@@ -2483,7 +2533,7 @@ export const REFERENDUM_PHASE_BY_EVENT: Record<string, ReferendumPhase> = {
 async function queryWindowReferenda(window: BlockWindow): Promise<ReferendumEventRow[]> {
   if (!client) return []
   const res = await client.query({
-    query: `SELECT ref_index, block_height, event_index, event_name, args_json
+    query: `SELECT ref_index, block_height, event_index, event_name
             FROM price_data.referendum_lifecycle_events
             WHERE pallet = 'opengov' AND block_height > {from:UInt32} AND block_height <= {to:UInt32}
             ORDER BY block_height, event_index`,
@@ -2491,12 +2541,12 @@ async function queryWindowReferenda(window: BlockWindow): Promise<ReferendumEven
     format: 'JSONEachRow',
   })
   const out: ReferendumEventRow[] = []
-  for (const r of await res.json<{ ref_index: number; block_height: number; event_index: number; event_name: string; args_json: string }>()) {
+  for (const r of await res.json<{ ref_index: number; block_height: number; event_index: number; event_name: string }>()) {
     const phase = REFERENDUM_PHASE_BY_EVENT[r.event_name]
     if (!phase) continue
     out.push({
       blockHeight: Number(r.block_height), eventIndex: Number(r.event_index),
-      index: Number(r.ref_index), phase, track: trackFromArgs(r.args_json),
+      index: Number(r.ref_index), phase,
     })
   }
   return out
@@ -2542,48 +2592,17 @@ async function queryWindowEnactments(window: BlockWindow): Promise<ReferendumEve
     if (index == null) continue
     out.push({
       blockHeight: Number(d.block_height), eventIndex: Number(d.event_index),
-      index, phase: 'executed', track: null,
+      index, phase: 'executed',
       outcome: enactmentOutcomeFrom(d.event_name, d.args_json),
     })
   }
   return out
 }
 
-function trackFromArgs(argsJson: string): number | null {
-  try {
-    const track = (JSON.parse(argsJson || '{}') as { track?: unknown }).track
-    return typeof track === 'number' ? track : null
-  } catch { return null }
-}
-
-// Only Submitted and DecisionStarted carry the track, so a rule filtering by
-// track needs the referendum's own submission for every other phase. That is a
-// primary-key lookup on (pallet, ref_index) over the same small projection,
-// bounded by the handful of referenda the window touched.
-async function fillReferendumTracks(rows: ReferendumEventRow[]): Promise<void> {
-  const unknown = [...new Set(rows.filter(r => r.track == null).map(r => r.index))]
-  if (!client || !unknown.length) return
-  const res = await client.query({
-    query: `SELECT ref_index, args_json
-            FROM price_data.referendum_lifecycle_events
-            WHERE pallet = 'opengov' AND ref_index IN {idx:Array(UInt32)}
-              AND event_name IN ('Referenda.Submitted', 'Referenda.DecisionStarted')`,
-    query_params: { idx: unknown },
-    format: 'JSONEachRow',
-  })
-  const byIndex = new Map<number, number>()
-  for (const r of await res.json<{ ref_index: number; args_json: string }>()) {
-    const track = trackFromArgs(r.args_json)
-    if (track != null) byIndex.set(Number(r.ref_index), track)
-  }
-  for (const row of rows) if (row.track == null) row.track = byIndex.get(row.index) ?? null
-}
-
 async function referendumMatches(rules: NotificationRule[], window: BlockWindow): Promise<{ matches: RuleMatch[]; commit?: () => void }> {
   // Two independent reads of the same window, so they go out together.
   const [lifecycle, enactments] = await Promise.all([queryWindowReferenda(window), queryWindowEnactments(window)])
   const rows = [...lifecycle, ...enactments]
-  if (rows.length && rules.some(r => (r.params as RuleParams['referendum']).track)) await fillReferendumTracks(rows)
   // Titles are off-chain (SubSquare) and already in memory; a referendum the
   // refresher has not seen yet simply renders without one — except at SUBMITTED,
   // where the title is the whole message (see resolveSubmittedMatches).
@@ -2607,7 +2626,6 @@ async function referendumMatches(rules: NotificationRule[], window: BlockWindow)
 export interface ParkedSubmission {
   blockHeight: number
   eventIndex: number
-  track: number | null
   /** Wall clock at parking, for the expiry below. */
   parkedAt: number
 }
@@ -2635,8 +2653,7 @@ export function parseParkedSubmissions(raw: string | null): Map<number, ParkedSu
       const eventIndex = Number(value.eventIndex)
       const parkedAt = Number(value.parkedAt)
       if (!Number.isFinite(blockHeight) || !Number.isFinite(eventIndex) || !Number.isFinite(parkedAt)) continue
-      const track = value.track == null ? null : Number(value.track)
-      out.set(index, { blockHeight, eventIndex, parkedAt, track: track != null && Number.isFinite(track) ? track : null })
+      out.set(index, { blockHeight, eventIndex, parkedAt })
     }
   } catch { /* an unreadable row parks nothing rather than throwing the lane */ }
   return out
@@ -2689,7 +2706,7 @@ export function resolveSubmittedMatches(
     const row = submittedRowOf(match)
     if (!row || !isGenericReferendumTitle(titleOf(match))) { kept.push(match); continue }
     if (next.has(row.index)) continue
-    next.set(row.index, { blockHeight: row.blockHeight, eventIndex: row.eventIndex, track: row.track, parkedAt: nowMs })
+    next.set(row.index, { blockHeight: row.blockHeight, eventIndex: row.eventIndex, parkedAt: nowMs })
     changed = true
   }
   // A referendum entering its decision period is the deadline: the submission is
@@ -2706,7 +2723,7 @@ export function resolveSubmittedMatches(
       continue
     }
     const row: ReferendumEventRow = {
-      blockHeight: entry.blockHeight, eventIndex: entry.eventIndex, index, phase: 'submitted', track: entry.track,
+      blockHeight: entry.blockHeight, eventIndex: entry.eventIndex, index, phase: 'submitted',
     }
     // Its own one-block window: the row sits below the lane's current window by
     // construction, and the matcher's job here is the rule's filters, not recency.

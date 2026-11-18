@@ -130,10 +130,10 @@ export function OracleFeed({ feed }: { feed: string }) {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Oracles', to: paths.oracles() }, { label: d?.label ?? '…' }]} />
-        <div className="page-title orc-title">
+        <h1 className="page-title orc-title">
           {d ? <>{d.label} <KindBadge kind={d.kind === 'dia' ? 'dia' : d.kind === 'push' ? (d.status === 'static' ? 'fixed' : 'push') : d.kind === 'ema' ? 'ema' : d.source?.kind ?? 'unknown'} />
             <span className="sub"><StatusDot status={d.status} /> {STATUS_LABEL[d.status]}{d.provider ? ` · ${d.provider}` : ''}</span></> : 'Oracle feed'}
-        </div>
+        </h1>
       </div>
 
       <div className="hdx-cards" style={{ marginTop: 0 }}>

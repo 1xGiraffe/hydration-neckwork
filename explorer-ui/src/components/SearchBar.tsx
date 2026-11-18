@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect, useId, useMemo } from 'react'
 import { api } from '../api/explorer'
 import { navigate, paths } from '../router'
+import { forumPostPath } from '../governanceSubjects'
 import type { SearchResult } from '../types'
 import { searchUserTags, useTagMapVersion } from '../userTags'
 import { AccountEmoji, AssetIcon, F, ShortAddr, TagIcon, noAutofill } from './ui'
@@ -36,6 +37,10 @@ export function routeFor(r: Hit): string {
     case 'xcDestination': return paths.xcDestination(r.value)
     // An ICE intent's order page; `value` is the u128 id.
     case 'intent': return paths.intent(r.value)
+    // A forum discussion; `value` is its post id ('42' native, 's248' imported).
+    case 'discussion': return paths.discussion(r.value)
+    // A treasury spend: its own page (its record and discussion); `value` is the spend index.
+    case 'spend': return forumPostPath(`spend:${r.value}`) ?? paths.dashboard()
     default: return paths.dashboard()
   }
 }
@@ -47,7 +52,7 @@ export function hitKey(r: Hit): string {
 }
 export const TYPE_LABEL: Record<Hit['type'], string> = {
   block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag', referendum: 'Referendum', pool: 'Pool',
-  xcDestination: 'Cross-chain', intent: 'Intent',
+  xcDestination: 'Cross-chain', intent: 'Intent', discussion: 'Discussion', spend: 'Treasury spend',
 }
 
 // Account results use the same avatar and shortened-address treatment as account
@@ -124,7 +129,18 @@ export function SearchResultBody({ r }: { r: Hit }) {
       </span>
     )
   }
-  if (r.type === 'intent') {
+  // A discussion's title is user-authored text: rendered as React text, never markup.
+  if (r.type === 'discussion') {
+    return (
+      <span className="sr-acct">
+        <span className="sr-acct-name">
+          <span>{r.label || `Discussion ${r.value}`}</span>
+          {r.desc && <span className="sr-desc">{r.desc}</span>}
+        </span>
+      </span>
+    )
+  }
+  if (r.type === 'intent' || r.type === 'spend') {
     return (
       <span className="sr-acct">
         <span className="sr-acct-name">

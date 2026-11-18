@@ -39,7 +39,12 @@ const IT = {
   intents: { to: paths.intents(), label: 'Intents', match: ['intents', 'intent'] } as NavItem,
   contracts: { to: paths.contracts(), label: 'Contracts', match: ['contracts'] } as NavItem,
   security: { to: paths.security(), label: 'Security', match: ['security'] } as NavItem,
-  governance: { to: paths.governance(), label: 'Governance', match: ['governance', 'referendum'] } as NavItem,
+  // The hub alone: the Governance trigger goes there and highlights for every
+  // governance page; in the drawer and the folded Chain menu it is the "Governance" row.
+  governance: { to: paths.governance(), label: 'Governance', match: ['governance'] } as NavItem,
+  referenda: { to: paths.governance('referenda'), label: 'Referenda', match: ['referendum'] } as NavItem,
+  discussions: { to: paths.discussions(), label: 'Discussions', match: ['discussions', 'discussion', 'discussionNew', 'governanceSubject', 'governanceModeration'] } as NavItem,
+  govMe: { to: paths.governanceMe(), label: 'My governance', match: ['governanceMe'] } as NavItem,
   // Getting started with the MCP server. It sits in the Chain menu because
   // that is where this app already keeps the destinations that are about the
   // explorer itself rather than about one entity.
@@ -63,10 +68,12 @@ const IT = {
 // The bond families' pages (bondFamilies.ts), directly after Brazilian Invoice Loans —
 // the other fixed-yield HOLLAR product.
 const BOND_NAV: NavItem[] = BOND_FAMILIES_UI.map(f => ({ to: paths.bonds(f.key), label: f.title, match: ['bonds'], bondFamily: f.key }) as NavItem)
-// Liquidity, Volume and Oracles live under Assets at every width; the trigger navigates
-// to Assets so the menu lists only the destinations it is not. Security leads the Chain menu (it is the
-// entry a returning operator wants first) while the trigger keeps Blocks.
-const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.juicer, IT.bil, ...BOND_NAV], menuItems: [IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer, IT.bil, ...BOND_NAV] }
+// HDX and HOLLAR head the Assets menu, then Liquidity, Volume and Oracles, at every
+// width (the top bar keeps its room for the search); the trigger navigates to Assets
+// and highlights on any of them, so the menu lists only the destinations it is not.
+// Security leads the Chain menu (it is the entry a returning operator wants first)
+// while the trigger keeps Blocks.
+const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.hdx, IT.hollar, IT.liquidity, IT.volume, IT.oracles, IT.juicer, IT.bil, ...BOND_NAV], menuItems: [IT.hdx, IT.hollar, IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer, IT.bil, ...BOND_NAV] }
 // Same shape as Assets: the trigger still goes to Accounts (items[0]), and the
 // menu lists only the destination the trigger is not. Tags used to be reachable
 // only from a link on the accounts page itself, which is a place you have to
@@ -77,32 +84,44 @@ const ACCOUNTS_GROUP: NavGroup = { label: 'Accounts', items: [IT.accounts, IT.ta
 const REVENUE_GROUP: NavGroup = { label: 'Revenue', items: [IT.revenue, IT.revenueUsers, IT.revenueProtocol], menuItems: [IT.revenueUsers, IT.revenueProtocol] }
 const CHAIN_GROUP: NavGroup = {
   label: 'Chain',
-  items: [IT.blocks, IT.extrinsics, IT.events, IT.intents, IT.contracts, IT.security, IT.governance, IT.dataApi, IT.mcp],
-  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.intents, IT.contracts, IT.dataApi, IT.mcp],
+  items: [IT.blocks, IT.extrinsics, IT.events, IT.intents, IT.contracts, IT.security, IT.dataApi, IT.mcp],
+  menuItems: [IT.security, IT.blocks, IT.extrinsics, IT.events, IT.intents, IT.contracts, IT.dataApi, IT.mcp],
 }
-// Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR and the Assets and
-// Revenue groups collapse into this single wider Assets dropdown so the topbar
-// search keeps a usable width. Direct links carry .nav-fold and hide in that
-// window; the permanent Assets and Revenue groups carry .nav-unfold-group and
-// hide there too; this group is hidden everywhere else.
-export const FOLDABLE = new Set(['HDX', 'HOLLAR'])
+// Governance is its own group (taken out of Chain), the same shape as Assets: the
+// trigger IS the hub, so the menu lists only the destinations it is not.
+const GOVERNANCE_GROUP: NavGroup = {
+  label: 'Governance',
+  items: [IT.governance, IT.referenda, IT.discussions, IT.govMe],
+  menuItems: [IT.referenda, IT.discussions, IT.govMe],
+}
+// Mid-width fold (861–1119px, CSS-gated): the Assets and Revenue groups collapse
+// into this single wider Assets dropdown so the topbar search keeps a usable width.
+// The permanent Assets and Revenue groups carry .nav-unfold-group and hide in that
+// window; this group is hidden everywhere else.
 const ASSETS_FOLD_GROUP: NavGroup = {
   label: 'Assets',
-  items: [IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.juicer, IT.bil, ...BOND_NAV, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol],
-  menuItems: [IT.liquidity, IT.volume, IT.oracles, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol, IT.preis, IT.juicer, IT.bil, ...BOND_NAV],
+  items: [IT.assets, IT.hdx, IT.hollar, IT.liquidity, IT.volume, IT.oracles, IT.juicer, IT.bil, ...BOND_NAV, IT.revenue, IT.revenueUsers, IT.revenueProtocol],
+  menuItems: [IT.hdx, IT.hollar, IT.liquidity, IT.volume, IT.oracles, IT.revenue, IT.revenueUsers, IT.revenueProtocol, IT.preis, IT.juicer, IT.bil, ...BOND_NAV],
 }
 // The desktop nav in visual order; the drawer keeps every destination flat.
-export const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; group: NavGroup; fold?: 'only' | 'hidden' }> = [
+// Below 1280px the separate Governance trigger would pinch the search: its
+// destinations fold back into the Chain menu ('wide-only' / 'wide-hidden').
+const CHAIN_WITH_GOVERNANCE: NavGroup = {
+  label: 'Chain',
+  items: [...CHAIN_GROUP.items, ...GOVERNANCE_GROUP.items],
+  menuItems: [IT.governance, IT.discussions, IT.security, IT.blocks, IT.extrinsics, IT.events, IT.intents, IT.contracts, IT.dataApi, IT.mcp],
+}
+export const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; group: NavGroup; fold?: 'only' | 'hidden' | 'wide-only' | 'wide-hidden' }> = [
   { kind: 'link', item: IT.activity },
   { kind: 'group', group: ACCOUNTS_GROUP },
   { kind: 'group', group: ASSETS_GROUP, fold: 'hidden' },
-  { kind: 'link', item: IT.hdx },
-  { kind: 'link', item: IT.hollar },
   { kind: 'group', group: REVENUE_GROUP, fold: 'hidden' },
   { kind: 'group', group: ASSETS_FOLD_GROUP, fold: 'only' },
-  { kind: 'group', group: CHAIN_GROUP },
+  { kind: 'group', group: GOVERNANCE_GROUP, fold: 'wide-hidden' },
+  { kind: 'group', group: CHAIN_GROUP, fold: 'wide-hidden' },
+  { kind: 'group', group: CHAIN_WITH_GOVERNANCE, fold: 'wide-only' },
 ]
-export const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.tags, IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer, IT.bil, ...BOND_NAV, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol]
-export const DRAWER_GROUPS: NavGroup[] = [CHAIN_GROUP]
+export const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.tags, IT.assets, IT.hdx, IT.hollar, IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer, IT.bil, ...BOND_NAV, IT.revenue, IT.revenueUsers, IT.revenueProtocol]
+export const DRAWER_GROUPS: NavGroup[] = [{ ...GOVERNANCE_GROUP, menuItems: GOVERNANCE_GROUP.items }, CHAIN_GROUP]
 /** The nav's destination lists, for tests (rendering the bar needs a document). */
-export const NAV_CONFIG = { ASSETS_GROUP, ASSETS_FOLD_GROUP, REVENUE_GROUP, DRAWER_LINKS, NAV_ENTRIES }
+export const NAV_CONFIG = { ASSETS_GROUP, ASSETS_FOLD_GROUP, REVENUE_GROUP, GOVERNANCE_GROUP, DRAWER_LINKS, NAV_ENTRIES }

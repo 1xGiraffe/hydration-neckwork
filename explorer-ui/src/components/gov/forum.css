@@ -1,0 +1,104 @@
+/* The forum's writing surfaces: the composer states (sign in, gate, writing), the
+   per-item actions under posts and comments, the post editor and the moderation
+   queue. Built on the explorer's tokens; the editor's own look is markdown/editor.css. */
+
+.fc-box { margin-bottom: 14px; }
+.fc-box-quiet { padding: 12px 14px; border: 1px dashed var(--border); border-radius: 12px; font-size: 13px; color: var(--text-medium); }
+.fc-signin-lead { margin: 0 0 10px; line-height: 1.5; }
+.fc-signin-lead strong { color: var(--text-high); }
+.fc-signin-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.fc-signin-actions .gov-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.fc-gate p { margin: 0 0 6px; line-height: 1.5; }
+.fc-gate p:last-child { margin-bottom: 0; }
+.fc-gate strong { color: var(--text-high); }
+.fc-error { margin: 8px 0 0; font-size: 13px; color: var(--red-text); line-height: 1.45; }
+.fc-foot { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; width: 100%; }
+.fc-as { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-low); min-width: 0; }
+.fc-foot-actions { display: inline-flex; gap: 8px; margin-left: auto; }
+
+.cmt-compose { margin-bottom: 14px; }
+.cmt-reply-box { margin-top: 10px; }
+.cmt-edited.fa-link, span.cmt-edited { font-style: italic; font-size: 11px; }
+
+.fa-link { background: none; border: 0; padding: 0; font: inherit; font-size: 12.5px; color: var(--text-medium); cursor: pointer; }
+.fa-link:hover:not(:disabled) { color: var(--text-high); text-decoration: underline; }
+.fa-link:disabled { cursor: default; opacity: 0.6; }
+.fa-link:focus-visible { outline: 2px solid var(--lavender); outline-offset: 2px; border-radius: 4px; }
+.fa-danger { color: var(--red-text); }
+.fa-error { font-size: 12px; color: var(--red-text); }
+.fa-done { font-size: 12.5px; color: var(--green-text); }
+.fa-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12.5px; color: var(--text-high); }
+.fa-mod { display: inline-flex; align-items: center; gap: 8px; padding-left: 10px; border-left: 1px solid var(--separator); }
+.fa-mod select, .fa-report select { appearance: none; height: 26px; padding: 0 26px 0 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888a94' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 9px center; color: var(--text-high); font-size: 12px; cursor: pointer; }
+.fa-mod select:focus-visible, .fa-report select:focus-visible { outline: 2px solid var(--sky); outline-offset: 1px; }
+.fa-report { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; margin-top: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.fa-report-title { width: 100%; font-size: 12.5px; color: var(--text-high); }
+.fa-report-note { flex: 1 1 220px; }
+.fa-report-note input { width: 100%; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text-high); font-size: 13px; }
+.fa-report-actions { display: inline-flex; gap: 8px; }
+.cmt-actions { flex-wrap: wrap; align-items: center; }
+.gov-post-foot { flex-wrap: wrap; }
+
+.gov-updates { margin-top: 18px; display: grid; gap: 10px; }
+.gov-update { padding: 10px 14px; border-left: 3px solid var(--lavender); background: var(--panel); border-radius: 0 10px 10px 0; }
+.gov-h3 { font-size: 13px; font-weight: 600; color: var(--text-medium); margin: 0; }
+
+.pe { display: grid; gap: 14px; min-width: 0; }
+.pe > * { min-width: 0; }
+.pe-field { display: grid; gap: 6px; border: 0; padding: 0; margin: 0; position: relative; }
+.pe-label { font-size: 12.5px; font-weight: 600; color: var(--text-high); }
+.pe-label .muted { font-weight: 400; }
+.pe-input { height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text-high); font-size: 15px; width: 100%; }
+.pe-input:focus { outline: none; border-color: var(--lavender); box-shadow: 0 0 0 3px var(--lavender-soft); }
+/* A choice in the same box as the text fields, with the form selects' chevron. */
+.pe-field select { appearance: none; height: 40px; width: 100%; padding: 0 34px 0 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-elev) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888a94' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 12px center; color: var(--text-high); font-size: 14px; cursor: pointer; }
+.pe-field select:focus { outline: none; border-color: var(--lavender); box-shadow: 0 0 0 3px var(--lavender-soft); }
+.pe-count { justify-self: end; font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-low); }
+.pe-count.over { color: var(--red-text); }
+.pe-hint { margin: -6px 0 0; font-size: 12.5px; color: var(--text-low); }
+
+.gov-new-disc { max-width: 900px; }
+.gov-new-disc .gov-fineprint { margin-top: 14px; }
+
+.mod-queue { display: grid; gap: 12px; max-width: 980px; }
+.mod-item { padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); display: grid; gap: 8px; }
+.mod-item.is-hidden { border-style: dashed; }
+.mod-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12.5px; }
+.mod-item-body { max-height: 240px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: var(--bg-elev); font-size: 13.5px; }
+.mod-reports { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--text-medium); display: grid; gap: 4px; }
+.mod-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.mod-mute { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12.5px; }
+.mod-mute input { height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text-high); }
+
+@media (max-width: 720px) {
+  .fc-foot-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
+  .fa-mod { border-left: 0; padding-left: 0; }
+}
+.mod-log { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; max-width: 980px; }
+.mod-log-row { padding: 6px 0; border-bottom: 1px solid var(--separator); line-height: 1.6; }
+.mod-log-imported details > summary { cursor: pointer; list-style-position: inside; }
+.mod-log-imported details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.mod-log-imported details[open] > summary { margin-bottom: 6px; }
+.mod-log-imported .mod-log { padding-left: 18px; }
+
+/* A long post's contents list: beside the post on wide screens, absent on narrow ones. */
+.gov-post-aside { display: none; }
+/* A post without contents is as wide as its discussion below it, not the whole page:
+   its text keeps a reading measure, so a full-width card only adds an empty right half. */
+.gov-post-layout:not(:has(.gov-post-toc)) .gov-post-section { max-width: 900px; }
+@media (min-width: 1100px) {
+  .gov-post-layout:has(.gov-post-toc) { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 28px; align-items: start; }
+  .gov-post-layout:has(.gov-post-toc) .gov-post-aside { display: block; position: sticky; top: calc(var(--safe-top) + 80px); max-height: calc(100vh - 110px); overflow-y: auto; }
+}
+.gov-post-toc { font-size: 13px; padding: 4px 0 12px; }
+.gov-post-toc-title { font-weight: 600; color: var(--text-high); margin-bottom: 8px; }
+.gov-post-toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; border-left: 1px solid var(--separator); }
+.gov-post-toc button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 4px 10px; color: var(--text-medium); font: inherit; line-height: 1.4; cursor: pointer; border-radius: 0 6px 6px 0; }
+.gov-post-toc button:hover { color: var(--text-high); background: var(--panel-hover); }
+.gov-post-toc button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.gov-post-toc .toc-l1 button { padding-left: 22px; }
+.gov-post-toc .toc-l2 button { padding-left: 34px; font-size: 12.5px; }
+.gov-post-toc .toc-l0 button { color: var(--text-high); }
+.gov-post-md :is(h2, h3, h4) { scroll-margin-top: calc(var(--safe-top) + 80px); }
+/* The post's meta line (author, copy link) ends where the post and its discussion end. */
+.gov-post-page:has(.gov-post-layout:not(:has(.gov-post-toc))) .gov-ref-meta { max-width: 900px; }

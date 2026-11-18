@@ -224,19 +224,19 @@ export function Lists() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Lists' }]} />
-        <div className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          Lists
-          {me.data && <button type="button" className="btn primary" style={{ marginLeft: 'auto' }} onClick={openNewLib}>+ New list</button>}
+        <div className="sec-page-title-row" style={{ alignItems: 'center' }}>
+          <h1 className="page-title">Lists</h1>
+          {me.data && <button type="button" className="btn primary" onClick={openNewLib}>+ New list</button>}
         </div>
       </div>
 
-      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>
+      <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, marginBottom: 16 }}>
         Manage the tag lists you own or follow — reorder them, control who can see them, and create new ones. Browse and
         subscribe to public lists below, or answer invites from the <Link to={paths.tags()}>Tags</Link> hub.
       </div>
 
       {me.data ? <YourLists me={me.data} /> : !me.isLoading && (
-        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)', marginBottom: 16 }}>Log in to manage your lists.</div>
+        <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)', marginBottom: 16 }}>Sign in to manage your lists.</div>
       )}
 
       {/* Public data behind no session gate — /explorer/lists needs none —

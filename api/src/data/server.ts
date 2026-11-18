@@ -1,6 +1,7 @@
 import { parsePort } from '../config.ts'
 import { createClickHouseClient } from '../db/client.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from '../services/explorerAssets.ts'
+import { initForumStore, refreshForumStore, startForumStoreRefresh, stopForumStoreRefresh } from '../services/forumStore.ts'
 import { buildDataApp } from './app.ts'
 import { flushUsage, startUsageFlush, stopUsageFlush } from './services/auth.ts'
 
@@ -20,6 +21,7 @@ app.addHook('onClose', async () => {
   // one interval.
   await flushUsage().catch(() => {})
   stopExplorerAssetsRefresh()
+  stopForumStoreRefresh()
   await client.close()
 })
 
@@ -40,6 +42,13 @@ async function start(): Promise<void> {
     // /v1/assets serves the shared registry snapshot from memory; load it
     // before accepting traffic (it refreshes itself every 5 minutes).
     await loadExplorerAssets(client)
+    // The governance forum routes answer from this process's own forum snapshot
+    // (the explorer api holds another): loaded before listen, then reloaded
+    // whenever the forum tables' watermark moves (checked every 10 s). A failed
+    // boot load leaves the forum routes answering 503 until a refresh succeeds.
+    initForumStore(client)
+    await refreshForumStore().catch(err => console.warn('[data-api] forum snapshot boot load failed; forum routes answer 503 until the refresh succeeds', err))
+    startForumStoreRefresh()
     startUsageFlush()
     await app.listen({ port, host })
     console.log(`[data-api] Server listening on ${host}:${port}`)

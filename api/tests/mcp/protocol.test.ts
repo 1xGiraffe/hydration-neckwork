@@ -362,9 +362,9 @@ describe('JSON-RPC envelope conformance', () => {
 /*
  * The cost of the tool table itself.
  *
- * Measured on this registry: tools/list answers 64 KB — roughly 16k tokens
+ * Measured on this registry: tools/list answers 60 KB — roughly 15k tokens
  * that every client spends before it can call anything. Of that, ~40 KB is the
- * fourteen descriptions and ~23 KB the generated input schemas.
+ * fifteen descriptions and ~18 KB the generated input schemas.
  *
  * That size is a deliberate trade, not an oversight. A description here is the
  * tool's interface (AGENTS.md § MCP server): it carries the traps an agent
@@ -377,7 +377,10 @@ describe('JSON-RPC envelope conformance', () => {
  * which is the part that is free to take.
  *
  * The ceiling below is what makes it a decision rather than a drift: a registry
- * that grows past it has to re-make the trade in the open.
+ * that grows past it has to re-make the trade in the open. The governance
+ * forum (`get_forum`, the `get_governance` tracks/calendar/account kinds) was
+ * paid for by cutting every description and parameter text to its traps rather
+ * than by raising it.
  */
 describe('tools/list budget', () => {
   it('stays inside the token budget the tool descriptions are worth', async () => {

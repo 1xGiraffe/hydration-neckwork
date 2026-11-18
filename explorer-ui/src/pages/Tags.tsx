@@ -89,9 +89,9 @@ export function Tags() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tags' }]} />
-        <div className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          Tags
-          <Link to={paths.lists()} className="btn" style={{ marginLeft: 'auto' }}>Manage lists</Link>
+        <div className="sec-page-title-row" style={{ alignItems: 'center' }}>
+          <h1 className="page-title">Tags</h1>
+          <Link to={paths.lists()} className="btn">Manage lists</Link>
         </div>
       </div>
 
@@ -117,10 +117,10 @@ export function TagsHydration() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tags', to: paths.tags() }, { label: 'Hydration' }]} />
-        <div className="page-title">Hydration tags <span className="sub">{tags.length} tags</span></div>
+        <h1 className="page-title">Hydration tags <span className="sub">{tags.length} tags</span></h1>
       </div>
 
-      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>
+      <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, marginBottom: 16 }}>
         Tags pool several addresses under one identity (e.g. an exchange's wallets). They are combined into a single row across
         Accounts and Holders, while each member keeps its own account page.
       </div>

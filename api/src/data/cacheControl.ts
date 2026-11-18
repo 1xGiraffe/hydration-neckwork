@@ -73,9 +73,14 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/v1\/otc\/orders(\/[^/]+(\/events)?)?$/, 5, 'private'],
 
   // Governance, staking, XCM, EVM.
-  [/^\/v1\/governance\/referenda$/, 30, 'private'],
+  [/^\/v1\/governance\/referenda$/, 10, 'private'],
   [/^\/v1\/governance\/referenda\/[^/]+\/[^/]+(\/votes)?$/, 10, 'private'],
   [/^\/v1\/governance\/votes$/, 10, 'private'],
+  [/^\/v1\/governance\/treasury\/spends$/, 10, 'private'],
+  // The forum: native writes reach this process's snapshot within its 10 s
+  // watermark check, so a longer TTL would only stack on that.
+  [/^\/v1\/governance\/referenda\/[^/]+\/[^/]+\/comments$/, 10, 'private'],
+  [/^\/v1\/governance\/discussions(\/[^/]+(\/comments)?)?$/, 10, 'private'],
   [/^\/v1\/staking\/events$/, 60, 'private'],
   [/^\/v1\/xcm\/transfers$/, 5, 'private'],
   [/^\/v1\/evm\/transactions\/[^/]+$/, 10, 'private'],

@@ -1,0 +1,265 @@
+/* The voting sheets. Loaded with the voting chunk only. Colors are the app's tokens:
+   lavender is voting, green/red/sky are aye/nay/abstain, amber is a caution. */
+
+.vote-overlay { position: fixed; inset: 0; background: rgba(3, 8, 22, 0.5); z-index: 100; animation: vote-fade 0.18s ease; }
+.vote-sheet {
+  position: fixed; z-index: 101; top: 0; right: 0; bottom: 0; width: min(468px, 100vw);
+  display: flex; flex-direction: column; background: var(--bg-elev); border-left: 1px solid var(--border);
+  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.35); animation: vote-in-side 0.24s var(--ease-out-soft);
+  padding-top: var(--safe-top);
+}
+.vote-sheet-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px 14px; border-bottom: 1px solid var(--separator); }
+.vote-sheet-title:focus { outline: none; }
+.vote-sheet-title { flex: 1 1 auto; min-width: 0; margin: 0; font-family: 'Gazpacho', serif; font-weight: 500; font-size: 21px; line-height: 1.2; }
+.vote-sheet-sub { display: block; margin-top: 3px; font-family: 'Geist', system-ui, sans-serif; font-size: 12.5px; font-weight: 400; color: var(--text-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vote-back { height: 30px; padding: 0 10px; white-space: nowrap; flex: 0 0 auto; border-radius: 9999px; border: 1px solid var(--border); background: transparent; color: var(--text-medium); font-size: 15px; font-weight: 600; cursor: pointer; }
+.vote-back:hover { color: var(--text-high); background: var(--panel-hover); }
+.vote-sheet-body { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 4px 18px calc(24px + env(safe-area-inset-bottom, 0px)); }
+
+@media (max-width: 720px) {
+  .vote-sheet {
+    top: auto; left: 0; width: 100vw; max-height: 92dvh; border-left: 0; border-top: 1px solid var(--border);
+    border-radius: 20px 20px 0 0; box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.4); animation-name: vote-in-up; padding-top: 0;
+  }
+  .vote-sheet-head::before { content: ''; position: absolute; top: 7px; left: 50%; width: 38px; height: 4px; margin-left: -19px; border-radius: 9999px; background: var(--border); }
+  .vote-sheet-head { position: relative; padding-top: 20px; }
+}
+@keyframes vote-fade { from { opacity: 0 } }
+@keyframes vote-in-side { from { transform: translateX(32px); opacity: 0 } }
+@keyframes vote-in-up { from { transform: translateY(40px); opacity: 0 } }
+@media (prefers-reduced-motion: reduce) { .vote-sheet, .vote-overlay { animation: none; } }
+
+.vote-composer { display: flex; flex-direction: column; }
+.vote-block { padding: 14px 0; border-bottom: 1px solid var(--separator); display: flex; flex-direction: column; gap: 10px; }
+.vote-block.vote-as { gap: 6px; }
+.vote-label { font-size: 12.5px; font-weight: 600; color: var(--text-medium); }
+.vote-note, .vote-help p, .vote-say { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-medium); }
+.vote-help { display: flex; flex-direction: column; gap: 6px; }
+.vote-fine { margin: 14px 0 0; font-size: 11.5px; color: var(--text-low); line-height: 1.5; }
+.vote-standing { margin: 0; font-size: 13px; color: var(--text-medium); }
+.vote-standing strong { color: var(--text-high); }
+.vote-warn { margin: 0; padding: 9px 11px; border-radius: 10px; background: var(--amber-soft); color: var(--text-high); font-size: 12.5px; line-height: 1.5; }
+.vote-tag { margin-left: 6px; padding: 1px 7px; border-radius: 9999px; font-size: 11px; font-weight: 500; background: var(--panel); border: 1px solid var(--separator); color: var(--text-medium); white-space: nowrap; }
+/* One quiet line under a control: who else voted, the proxied account in full. */
+.vote-sub { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-medium); }
+.vote-proxy-note .mono { color: var(--text-high); overflow-wrap: anywhere; }
+/* Where a pre-filled amount or conviction came from: a fact to check, so it stays on screen. */
+.vote-help p.vote-warn { color: var(--text-high); }
+.vote-help p.vote-prefill { padding-left: 9px; border-left: 2px solid var(--amber); color: var(--text-high); }
+/* A one-line caution with its reason behind an ⓘ. */
+.vote-caution { margin: 0; display: flex; align-items: center; gap: 2px; font-size: 12.5px; line-height: 1.45; color: var(--amber-text); }
+
+/* Vote as */
+.voter-picker { position: relative; }
+.voter-current { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; border: 1px solid var(--border); background: var(--panel); color: inherit; text-align: left; cursor: pointer; }
+.voter-current:disabled { cursor: default; }
+.voter-current:hover:not(:disabled) { background: var(--panel-hover); }
+.voter-current:focus-visible, .voter-option:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.voter-caret { color: var(--text-low); font-size: 12px; }
+.voter-line { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; }
+/* An account's emoji or profile picture, the same 30px circle in every wallet and picker row
+   (AccountEmoji; a profile image fills it, cropped, never at its own size). */
+.voter-emoji { flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; line-height: 1; background: var(--panel); border: 1px solid var(--border); }
+.voter-emoji .emoji-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.voter-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.voter-name { font-size: 13.5px; font-weight: 600; color: var(--text-high); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voter-addr { font-weight: 400; color: var(--text-low); font-size: 11.5px; }
+.voter-sub { font-size: 11.5px; color: var(--text-low); line-height: 1.4; }
+.voter-voted { color: var(--text-high); }
+.voter-why { font-size: 11.5px; color: var(--text-medium); white-space: normal; line-height: 1.4; }
+.voter-bal { flex: 0 0 auto; font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
+.voter-bal-sk { display: inline-block; width: 64px; height: 12px; border-radius: 6px; }
+.voter-menu { margin-top: 6px; padding: 6px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg-elev); display: flex; flex-direction: column; }
+.voter-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+.voter-manage { align-self: flex-start; min-height: 32px; margin: 4px 8px 0; font-size: 12.5px; }
+.voter-group { padding: 8px 8px 4px; font-size: 11.5px; font-weight: 600; color: var(--text-low); }
+.voter-option { display: flex; flex-direction: column; align-items: stretch; gap: 4px; width: 100%; padding: 8px; border-radius: 10px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.voter-option:hover { background: var(--panel-hover); }
+.voter-option.on { background: var(--lavender-soft); }
+.voter-option.off { opacity: 0.6; cursor: not-allowed; }
+
+/* Direction */
+.vote-dirs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.vote-dirs.four { grid-template-columns: repeat(2, 1fr); }
+.vote-dir.split { --c: var(--lavender); --soft: var(--lavender-soft); }
+.vote-dir { --c: var(--text-medium); --soft: var(--panel); display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 11px 6px; border-radius: 14px; border: 1px solid var(--border); background: var(--panel); color: var(--text-high); cursor: pointer; }
+.vote-dir.aye { --c: var(--green); --soft: var(--green-soft); }
+.vote-dir.nay { --c: var(--red); --soft: var(--red-soft); }
+.vote-dir.abstain { --c: var(--sky); --soft: var(--sky-soft); }
+.vote-dir:hover { border-color: color-mix(in srgb, var(--c) 45%, transparent); }
+.vote-dir.on { background: var(--soft); border-color: var(--c); box-shadow: inset 0 0 0 1px var(--c); }
+.vote-dir:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.vote-dir-word { font-family: 'Gazpacho', serif; font-size: 20px; line-height: 1.1; }
+.vote-dir.on .vote-dir-word { color: var(--c); }
+.vote-dir.sm { flex-direction: row; padding: 0 10px; height: 28px; border-radius: 9999px; font-size: 12px; font-weight: 600; }
+
+/* Amount */
+.vote-amount { display: flex; align-items: center; gap: 8px; padding: 0 14px; height: 52px; border-radius: 14px; border: 1px solid var(--border); background: var(--panel); }
+.vote-amount:focus-within { border-color: var(--lavender); box-shadow: 0 0 0 2px color-mix(in srgb, var(--lavender) 35%, transparent); }
+.vote-amount:has(input[aria-invalid="true"]) { border-color: var(--red); }
+.vote-field-error { margin: -2px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--red-text); }
+.vote-amount input { flex: 1 1 auto; min-width: 0; border: 0; background: transparent; color: var(--text-high); font-size: 22px; font-variant-numeric: tabular-nums; outline: none; }
+.vote-unit { color: var(--text-low); font-weight: 600; }
+.vote-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.vote-chips button { height: 30px; padding: 0 12px; border-radius: 9999px; border: 1px solid var(--border); background: transparent; color: var(--text-medium); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.vote-chips button:hover { color: var(--text-high); background: var(--panel-hover); }
+.vote-chips button.on { color: var(--text-high); background: var(--lavender-soft); border-color: color-mix(in srgb, var(--lavender) 55%, transparent); }
+.vote-chips button:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.vote-reserve { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-medium); }
+.vote-reserve input { width: 90px; height: 32px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); color: var(--text-high); font-size: 16px; font-variant-numeric: tabular-nums; }
+/* The rarer amount choices, one step away. */
+.vote-more { margin-top: 0; font-size: 12.5px; }
+.vote-more > .gov-details-body { display: flex; flex-direction: column; gap: 10px; }
+
+/* Conviction: the lock ruler. Stops sit on a track whose filled part grows with the
+   lock, so the cost of more weight is visible as length. */
+.conv { display: flex; flex-direction: column; gap: 8px; }
+.conv.off { opacity: 0.55; }
+.conv-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.conv-label { display: inline-flex; align-items: center; flex-wrap: wrap; row-gap: 4px; }
+.conv-figure { font-size: 12.5px; color: var(--text-medium); }
+.conv-weight { font-family: 'Gazpacho', serif; font-size: 26px; color: var(--lavender); margin-right: 4px; font-variant-numeric: tabular-nums; }
+.conv-range { width: 100%; margin: 4px 0 0; accent-color: var(--lavender); }
+.conv-stops { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.conv-stops li button { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 6px 0 5px; border: 0; border-top: 3px solid var(--border); background: transparent; color: var(--text-low); cursor: pointer; font-variant-numeric: tabular-nums; }
+.conv-stops li.past button { border-top-color: color-mix(in srgb, var(--lavender) 45%, transparent); }
+.conv-stops li.on button { border-top-color: var(--lavender); color: var(--text-high); }
+.conv-x { font-size: 12.5px; font-weight: 600; }
+.conv-d { font-size: 10.5px; }
+.conv-say { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-medium); }
+.conv-say strong { color: var(--text-high); }
+
+/* A vote that changes whether the referendum passes: said above Sign. */
+.effect-flip { margin: 0; font-size: 12.5px; font-weight: 600; }
+.effect-flip.good { color: var(--green-text); }
+.effect-flip.bad { color: var(--red-text); }
+
+/* Review and sign */
+.vote-review { display: flex; flex-direction: column; gap: 10px; padding: 16px 0 6px; }
+.vote-review-wait, .vote-review-bad, .vote-review-ok { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--text-medium); }
+.vote-review-wait { display: flex; align-items: center; gap: 8px; }
+.vote-review-bad > span[aria-hidden], .vote-review-ok > span[aria-hidden] { margin-right: 5px; }
+.vote-review-bad { color: var(--red-text); }
+.vote-review-ok { color: var(--green-text); }
+/* The sheet's one Details: explanations, the fee in full, the exact call. */
+.vote-details { margin-top: 4px; font-size: 12.5px; }
+.vote-facts { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.vote-facts > div { display: grid; grid-template-columns: 78px 1fr; gap: 8px; line-height: 1.5; }
+.vote-facts dt { color: var(--text-low); }
+.vote-facts dd { margin: 0; color: var(--text-medium); overflow-wrap: anywhere; }
+.vote-facts .unlock-list { margin-bottom: 6px; }
+@media (max-width: 420px) { .vote-facts > div { grid-template-columns: 1fr; gap: 2px; } }
+/* Secondary actions under Sign, as text links. */
+.vote-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 12.5px; color: var(--text-medium); }
+.vote-links:empty { display: none; }
+.vote-links .link-btn { min-height: 28px; }
+.vote-links-end { margin-left: auto; }
+.vote-code { color: var(--text-low); font-size: 11px; }
+.vote-blockers { margin: 0; padding: 10px 12px 10px 28px; border-radius: 12px; background: var(--red-soft); color: var(--text-high); font-size: 12.5px; line-height: 1.5; }
+.vote-sign { height: 48px; border-radius: 14px; border: 0; background: var(--action-fill); color: var(--action-on); font-size: 14.5px; font-weight: 700; cursor: pointer; padding: 0 16px; }
+.vote-sign:hover:not(:disabled) { filter: brightness(1.08); }
+.vote-sign:disabled { background: var(--panel); color: var(--text-low); cursor: not-allowed; border: 1px solid var(--border); }
+/* An action that frees nothing visible (a clean-up): not the page's primary. */
+.vote-sign.neutral:not(:disabled) { background: transparent; color: var(--text-high); border: 1px solid var(--border); }
+.vote-sign.neutral:not(:disabled):hover { background: var(--panel-hover); filter: none; }
+.vote-sign:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.vote-stage { display: flex; flex-direction: column; gap: 3px; padding: 11px 12px; border-radius: 12px; font-size: 12.5px; line-height: 1.5; background: var(--panel); }
+.vote-stage.pending { flex-direction: row; align-items: center; gap: 8px; }
+.vote-stage.done { background: var(--green-soft); }
+.vote-stage.done strong { color: var(--green-text); }
+.vote-stage.failed { background: var(--red-soft); }
+.vote-spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--lavender); animation: vote-spin 0.8s linear infinite; flex: 0 0 auto; }
+@keyframes vote-spin { to { transform: rotate(360deg) } }
+@media (prefers-reduced-motion: reduce) { .vote-spinner { animation: none; border-top-color: var(--border); } }
+.vote-nowallet, .vote-empty { padding: 22px 0; display: flex; flex-direction: column; gap: 14px; font-size: 13.5px; color: var(--text-medium); line-height: 1.5; }
+.vote-nowallet p, .vote-empty p { margin: 0; }
+
+/* Cart */
+.cart-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.cart-list li { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; border-bottom: 1px dashed var(--separator); }
+.cart-list li:last-child { border-bottom: 0; }
+.cart-list li.off { opacity: 0.6; }
+.cart-title { font-size: 13px; color: var(--text-high); line-height: 1.35; }
+.cart-dirs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.vote-cart-fab {
+  position: fixed; z-index: 45; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px 0 8px; border-radius: 9999px;
+  border: 1px solid color-mix(in srgb, var(--lavender) 55%, transparent); background: var(--bg-elev); color: var(--text-high);
+  font-size: 13.5px; font-weight: 600; cursor: pointer; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+.vote-cart-fab[hidden] { display: none; }
+.vote-cart-count { display: inline-grid; place-items: center; min-width: 28px; height: 28px; border-radius: 9999px; background: var(--action-fill); color: var(--action-on); font-size: 13px; }
+@media (max-width: 720px) { .vote-cart-fab { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); right: 12px; } }
+/* Above a referendum's phone bar, never over it. */
+@media (max-width: 900px) { body:has(.gov-mobile-bar) .vote-cart-fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); right: 12px; } }
+
+/* Unlock */
+.unlock-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.unlock-list label { display: flex; align-items: flex-start; gap: 8px; line-height: 1.45; cursor: pointer; }
+.unlock-list input, .unlock-claim input { margin-top: 2px; accent-color: var(--lavender); }
+.unlock-list.plain li { color: var(--text-medium); }
+.unlock-claim { display: flex; gap: 8px; font-size: 12.5px; line-height: 1.5; color: var(--text-high); cursor: pointer; }
+
+/* Wallets */
+.wallet-panel { display: flex; flex-direction: column; }
+.wallet-card { border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.wallet-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.wallet-card-head .wallet-tile-icon { width: 22px; height: 22px; }
+.wallet-state { font-size: 11.5px; color: var(--text-low); }
+.wallet-state.live { color: var(--green-text); }
+.wallet-card-head .link-btn:first-of-type { margin-left: auto; }
+.wallet-accts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.wallet-acct { display: flex; align-items: center; gap: 10px; }
+.wallet-acct.off { opacity: 0.75; }
+
+.cart-remove { height: 28px; padding: 0 10px; border-radius: 9999px; border: 1px solid transparent; background: transparent; color: var(--text-low); font-size: 12px; font-weight: 600; cursor: pointer; margin-left: auto; }
+.cart-remove:hover { color: var(--red-text); border-color: color-mix(in srgb, var(--red) 40%, transparent); background: var(--red-soft); }
+.cart-remove:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+/* The unlock's answer, first: k over v, the house ribbon's shape without its box. */
+.unlock-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px 16px; }
+.unlock-summary > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.unlock-summary .k { font-size: 12px; color: var(--text-low); display: inline-flex; align-items: center; }
+.unlock-summary .v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-high); }
+.unlock-summary .v.good { color: var(--green-text); }
+.unlock-summary .v.small { font-size: 13px; font-weight: 500; line-height: 1.35; }
+.unlock-sk { display: inline-block; width: 72px; height: 16px; border-radius: 6px; vertical-align: middle; }
+.unlock-more { margin-top: 0; padding: 14px 0; border-bottom: 1px solid var(--separator); font-size: 12.5px; }
+.unlock-more > .gov-details-body { display: flex; flex-direction: column; gap: 10px; }
+
+/* Sign: in flow on wide screens, pinned to the sheet's foot on phones. Only the button
+   is pinned (the check line above it scrolls with the form), the body keeps a field it scrolls
+   to clear of it, and while a text field has focus (the keyboard is up) the bar goes
+   back into the flow so nothing covers what is being typed. */
+.vote-sign-bar { display: flex; flex-direction: column; gap: 10px; }
+@media (max-width: 720px) {
+  /* The review's box steps aside so the bar's sticky range is the whole form, not the review alone. */
+  .vote-review { display: contents; }
+  .vote-review > * { margin-top: 10px; }
+  .vote-review > .sr-only { margin: -1px; }
+  .vote-sheet-body { scroll-padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
+  .vote-sign-bar { position: sticky; bottom: calc(-24px - env(safe-area-inset-bottom, 0px)); z-index: 2; margin: 0 -18px; padding: 10px 18px calc(12px + env(safe-area-inset-bottom, 0px)); background: var(--bg-elev); border-top: 1px solid var(--separator); }
+  .vote-sheet-body:has(input:is([inputmode], [type="text"], [type="number"], :not([type])):focus) .vote-sign-bar { position: static; }
+}
+
+/* A fee the signer cannot pay: the reason, right above Sign, and the HDX way out. */
+.vote-fee-short { padding: 11px 12px; border-radius: 12px; background: var(--red-soft); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); font-size: 12.5px; line-height: 1.5; color: var(--text-high); }
+.vote-fee-short strong { color: var(--red-text); }
+.vote-fee-short p { margin: 4px 0 0; }
+.vote-fee-switch { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; font-size: 12.5px; line-height: 1.45; color: var(--text-high); cursor: pointer; }
+.vote-fee-switch.on { margin: 0; padding: 8px 12px; border-radius: 12px; background: var(--panel); }
+.vote-fee-switch input { margin-top: 2px; accent-color: var(--action-fill); }
+
+/* What a quick cart button just did. */
+.vote-toast {
+  position: fixed; z-index: 46; left: 50%; transform: translateX(-50%); bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  display: flex; align-items: center; gap: 12px; width: max-content; max-width: min(560px, calc(100vw - 32px)); padding: 10px 10px 10px 16px;
+  border-radius: 14px; background: var(--bg-elev2); border: 1px solid var(--border); box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3);
+  font-size: 13px; line-height: 1.4; color: var(--text-high); animation: vote-fade 0.18s ease;
+}
+.vote-toast-x { border: 0; background: none; color: var(--text-low); font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 6px; }
+.vote-toast-x:hover { color: var(--text-high); }
+@media (max-width: 720px) { .vote-toast { bottom: calc(128px + env(safe-area-inset-bottom, 0px)); } }
+@media (prefers-reduced-motion: reduce) { .vote-toast { animation: none; } }
+.vote-preview { opacity: 0.55; pointer-events: none; user-select: none; }
+
+.vote-callhex { font-size: 11px; overflow-wrap: anywhere; }

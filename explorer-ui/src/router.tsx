@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- router module exports hooks/helpers alongside <Link> */
 import { useSyncExternalStore, useCallback } from 'react'
 import { bondFamilyUi } from './bondFamilies'
+import { subjectFromParts, type SubjectRoute } from './governanceSubjects'
 import { flushSync } from 'react-dom'
 import type { MouseEvent, ReactNode, CSSProperties } from 'react'
 
@@ -52,6 +53,15 @@ export type Route =
   | { name: 'intent'; intentId: string }
   | { name: 'referendum'; pallet: 'opengov' | 'democracy'; index: number }
   | { name: 'governance' }
+  // The forum: the discussions list and one discussion (`s<uid>` for an imported one).
+  | { name: 'discussions' }
+  | { name: 'discussion'; id: string }
+  | { name: 'discussionNew' }
+  | { name: 'governanceModeration' }
+  | { name: 'governanceMe' }
+  | { name: 'governancePropose' }
+  // An archive body's imported record: /governance/<route>/<id> (governanceSubjects.ts).
+  | { name: 'governanceSubject'; subject: SubjectRoute; id: string }
   | { name: 'dca-execution'; height: number; eventIndex: number }
   | { name: 'dca-resolve'; height: number; index: number; kind: 'event' | 'extrinsic' }
   | { name: 'events' }
@@ -172,7 +182,54 @@ export function parseRoute(loc: string): Route {
     case 'assets': return { name: 'assets' }
     // /referendum/<pallet>/<index>. The pallet is part of the identity: Hydration
     // voted through Democracy (0-206) and OpenGov (0-369) and both index from 0.
-    case 'governance': return { name: 'governance' }
+    case 'governance': {
+      if (parts.length === 1) return { name: 'governance' }
+      if (parts[1] === 'me' && parts.length === 2) return { name: 'governanceMe' }
+      if (parts[1] === 'propose' && parts.length === 2) return { name: 'governancePropose' }
+      if (parts[1] === 'moderation' && parts.length === 2) return { name: 'governanceModeration' }
+      const subject = subjectFromParts(parts)
+      return subject ? { name: 'governanceSubject', subject: subject.subject, id: subject.id } : { name: 'notfound', path: pathOnly }
+    }
+    case 'discussions':
+      if (parts.length === 1) return { name: 'discussions' }
+      if (parts.length === 2 && parts[1] === 'new') return { name: 'discussionNew' }
+      return parts.length === 2 && /^[A-Za-z0-9]{1,40}$/.test(parts[1]) ? { name: 'discussion', id: parts[1] } : { name: 'notfound', path: pathOnly }
+    // Subsquare's paths (hydration.subsquare.io), so a link written for it works with
+    // the host swapped. nginx answers the same ones with a 301.
+    case 'referenda':
+      if (parts[1] && isSafeId(parts[1])) return { name: 'legacy', to: `/referendum/opengov/${parts[1]}` }
+      return { name: 'legacy', to: '/governance?tab=referenda' }
+    case 'posts':
+      return parts[1] && isSafeId(parts[1]) ? { name: 'legacy', to: `/discussions/s${parts[1]}` } : { name: 'legacy', to: '/discussions' }
+    case 'council':
+      return parts[1] === 'motions' && parts[2] && isSafeId(parts[2]) ? { name: 'legacy', to: `/governance/motion/council/${parts[2]}` } : { name: 'legacy', to: '/governance?tab=archive' }
+    case 'democracy': {
+      if (parts[1] === 'referenda' && parts[2] && isSafeId(parts[2])) return { name: 'legacy', to: `/referendum/democracy/${parts[2]}` }
+      if (parts[1] === 'proposals' && parts[2] && isSafeId(parts[2])) return { name: 'legacy', to: `/governance/democracy/proposal/${parts[2]}` }
+      // An external is addressed by `<block>_<hash>` there and `<hash>@<block>` here.
+      const external = parts[1] === 'externals' ? legacyHashAt(parts[2]) : null
+      if (external) return { name: 'legacy', to: `/governance/democracy/external/${external}` }
+      return { name: 'legacy', to: '/governance?tab=archive' }
+    }
+    case 'treasury': {
+      if (parts[1] === 'proposals' && parts[2] && isSafeId(parts[2])) return { name: 'legacy', to: `/governance/treasury/proposal/${parts[2]}` }
+      if (parts[1] === 'spends' && parts[2] && isSafeId(parts[2])) return { name: 'legacy', to: `/governance/treasury/spend/${parts[2]}` }
+      if (parts[1] === 'tips') {
+        const tip = legacyHashAt(parts[2])
+        return { name: 'legacy', to: tip ? `/governance/tip/${tip}` : '/governance?tab=archive' }
+      }
+      return { name: 'notfound', path: pathOnly }
+    }
+    // A TC motion by its index; one spelled `<block>_<hash>` names no index, so it
+    // lands on the committee's motion list.
+    case 'techcomm':
+    case 'tech-comm':
+      return (parts[1] === 'proposals' || parts[1] === 'motions') && parts[2] && isSafeId(parts[2])
+        ? { name: 'legacy', to: `/governance/motion/tc/${parts[2]}` }
+        : { name: 'legacy', to: '/governance?tab=committee' }
+    // An account page by address (a tab after it is dropped); a username has no page here.
+    case 'user':
+      return parts[1] && LEGACY_ADDRESS_RE.test(parts[1]) ? { name: 'legacy', to: `/account/${parts[1]}` } : { name: 'notfound', path: pathOnly }
     case 'referendum': {
       const pallet = parts[1] === 'democracy' ? 'democracy' : parts[1] === 'opengov' ? 'opengov' : null
       if (pallet && parts[2] && isSafeId(parts[2])) return { name: 'referendum', pallet, index: Number(parts[2]) }
@@ -243,6 +300,15 @@ export function parseRoute(loc: string): Route {
       }
       return { name: 'notfound', path: pathOnly }
   }
+}
+
+/** SS58 of any prefix, or a 0x H160 / AccountId32 — what a Subsquare /user/ path carries. */
+const LEGACY_ADDRESS_RE = /^(?:[1-9A-HJ-NP-Za-km-z]{40,50}|0x[0-9a-fA-F]{40}|0x[0-9a-fA-F]{64})$/
+
+/** Subsquare's `<block>_<hash>` → this explorer's `<hash>@<block>` (null when malformed). */
+function legacyHashAt(segment: string | undefined): string | null {
+  const m = segment ? /^(\d{1,10})_(0x[0-9a-fA-F]{64})$/.exec(segment) : null
+  return m ? `${m[2].toLowerCase()}@${Number(m[1])}` : null
 }
 
 function isSafeId(value: string): boolean {
@@ -360,7 +426,13 @@ export const paths = {
   // a decimal string, never a number.
   intent: (intentId: string) => `/intent/${intentId}`,
   referendum: (pallet: 'opengov' | 'democracy', index: number | string) => `/referendum/${pallet}/${index}`,
-  governance: () => '/governance',
+  governance: (tab?: string | null) => (tab ? `/governance?tab=${tab}` : '/governance'),
+  discussions: () => '/discussions',
+  discussion: (id: string) => `/discussions/${encodeURIComponent(id)}`,
+  discussionNew: () => '/discussions/new',
+  governanceModeration: () => '/governance/moderation',
+  governanceMe: () => '/governance/me',
+  governancePropose: () => '/governance/propose',
   events: () => '/events',
   event: (id: string) => `/event/${id}`,
   eventAt: (h: number, i: number) => `/event/${h}-${i}`,

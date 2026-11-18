@@ -66,6 +66,8 @@ export async function withUserErrors<T>(reply: FastifyReply, fn: () => Promise<T
   }
 }
 
+const LOGIN_DOMAIN = new URL(process.env.EXPLORER_PUBLIC_URL ?? 'https://hydration-explorer.neckwork.net').host
+
 const addressBody = z.object({ address: z.string().min(3).max(128) })
 const verifyBody = z.object({ address: z.string().min(3).max(128), nonce: z.string().min(16).max(64), signature: z.string().min(64).max(600) })
 
@@ -161,7 +163,10 @@ export async function userRoutes(fastify: FastifyInstance) {
   fastify.post('/user/auth/challenge', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const body = addressBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid address' })
-    const challenge = createChallenge(req.headers.host ?? 'Hydration Explorer', body.data.address)
+    // The domain the statement names is the explorer's public one, never the request's
+    // Host header (which whoever calls the api chooses): the person compares it with
+    // their address bar.
+    const challenge = createChallenge(LOGIN_DOMAIN, body.data.address)
     if (!challenge) return reply.status(400).send({ error: 'Invalid address' })
     return challenge
   })

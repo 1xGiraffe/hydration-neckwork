@@ -103,8 +103,8 @@ function CreateTokenDialog({ open, onOpenChange, onCreated }: {
 function ApiTokensTeaser() {
   return (
     <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)', marginBottom: 16 }}>
-      <p style={{ marginTop: 0 }}>Log in to create and manage your API tokens.</p>
-      <button type="button" className="btn primary" onClick={requestConnect}>Log in</button>
+      <p style={{ marginTop: 0 }}>Sign in to create and manage your API tokens.</p>
+      <button type="button" className="btn primary" onClick={requestConnect}>Sign in</button>
     </div>
   )
 }
@@ -143,17 +143,17 @@ export function ApiTokens() {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'API tokens' }]} />
         {/* The Lists page's head: title, and the one create action on the right. */}
-        <div className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          API tokens
+        <div className="sec-page-title-row" style={{ alignItems: 'center' }}>
+          <h1 className="page-title">API tokens</h1>
           {session && (
-            <button type="button" className="btn primary" style={{ marginLeft: 'auto' }} onClick={() => setCreateOpen(true)} disabled={rows.length >= maxTokens}>
+            <button type="button" className="btn primary" onClick={() => setCreateOpen(true)} disabled={rows.length >= maxTokens}>
               + Create token
             </button>
           )}
         </div>
       </div>
 
-      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>
+      <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, marginBottom: 16 }}>
         Tokens authenticate against the Hydration Data API at <span className="mono">{DATA_API_URL}</span> — REST access to the
         full explorer dataset (balances, trades, pools, governance, …). Send one as <code className="mono">Authorization: Bearer hdd_…</code> on
         every request. All your tokens share one rate-limit budget, up to {maxTokens} active tokens.{' '}

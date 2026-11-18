@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { curveThresholdPerbill, perbillOfRational, PERBILL, referendaTracks, trackById, undecidingTimeoutBlocks } from './referendaTracks.ts'
+import { convictionLockBlocks, curveThresholdPerbill, perbillOfRational, PERBILL, referendaTracks, sampleTrackCurves, trackById, undecidingTimeoutBlocks, voteLockingPeriodBlocks } from './referendaTracks.ts'
 
 // The pinned tracks (no RPC in unit tests, so referendaTracks() serves the
 // fallback copy) must reproduce hydration-node's tracks.rs. The curve shape
@@ -13,17 +13,34 @@ describe('referendaTracks (pinned fallback)', () => {
   it('carries the tracks.rs periods', () => {
     const treasurer = trackById(5)!
     expect(treasurer.name).toBe('treasurer')
-    expect(treasurer.preparePeriod).toBe(600)       // 60 minutes of 6s blocks
-    expect(treasurer.decisionPeriod).toBe(100_800)  // 7 days
-    expect(treasurer.confirmPeriod).toBe(7_200)     // 12 hours
+    expect(treasurer.preparePeriod).toBe(1_800)     // 60 minutes of 2s blocks (spec 458)
+    expect(treasurer.decisionPeriod).toBe(302_400)  // 7 days
+    expect(treasurer.confirmPeriod).toBe(21_600)    // 12 hours
+    expect(treasurer.minEnactmentPeriod).toBe(300)  // 10 minutes
     expect(treasurer.decisionDeposit).toBe('750000000000000000') // 750k HDX
-    expect(trackById(1)!.decisionPeriod).toBe(43_200) // whitelisted_caller: 3 days
+    expect(trackById(1)!.decisionPeriod).toBe(129_600) // whitelisted_caller: 3 days
+    expect(trackById(1)!.preparePeriod).toBe(300)
     expect(referendaTracks()).toHaveLength(10)
     expect(trackById(99)).toBeNull()
   })
 
-  it('undeciding timeout pins to 2 days of 6s blocks without a node', () => {
-    expect(undecidingTimeoutBlocks()).toBe(28_800)
+  it('undeciding timeout pins to 2 days of 2s blocks without a node', () => {
+    expect(undecidingTimeoutBlocks()).toBe(86_400)
+  })
+
+  it('vote locking period pins to 7 days of 2s blocks, doubling per conviction', () => {
+    expect(voteLockingPeriodBlocks()).toBe(302_400)
+    expect([0, 1, 2, 3, 4, 5, 6].map(c => convictionLockBlocks(c))).toEqual([0, 1, 2, 4, 8, 16, 32].map(n => n * 302_400))
+  })
+
+  it('samples a track\'s curves over the decision period with the pallet\'s own thresholds', () => {
+    const t = trackById(5)!
+    const s = sampleTrackCurves(t)
+    expect(s).toHaveLength(101)
+    expect(s[0]).toMatchObject({ x: 0, block: 0, approval: curveThresholdPerbill(t.minApproval, 0), support: 180_000_000 })
+    expect(s[100]).toMatchObject({ x: PERBILL, block: t.decisionPeriod, support: 0 })
+    expect(s[50].support).toBe(90_000_000)
+    for (let i = 1; i < s.length; i++) expect(s[i].approval).toBeLessThanOrEqual(s[i - 1].approval)
   })
 })
 

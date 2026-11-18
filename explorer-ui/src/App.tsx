@@ -5,6 +5,7 @@ import { useRoute, Link, paths, redirect } from './router'
 import { Topbar } from './components/Topbar'
 import { HoverCards } from './components/HoverCard'
 import { SectionBoundary } from './components/SectionBoundary'
+import { useVoteHostWanted } from './vote/voteBus'
 
 // Route-level chunks keep account analytics, HDX charts, and detail views out of
 // the landing-page bundle. Each page still exposes a named export for tests.
@@ -19,6 +20,13 @@ const DcaSchedule = lazyWithReload(() => import('./pages/DcaSchedule').then(m =>
 const Intent = lazyWithReload(() => import('./pages/Intent').then(m => ({ default: m.Intent })))
 const Referendum = lazyWithReload(() => import('./pages/Referendum').then(m => ({ default: m.Referendum })))
 const Governance = lazyWithReload(() => import('./pages/Governance').then(m => ({ default: m.Governance })))
+const Discussions = lazyWithReload(() => import('./pages/Discussions').then(m => ({ default: m.Discussions })))
+const Discussion = lazyWithReload(() => import('./pages/Forum').then(m => ({ default: m.Discussion })))
+const NewDiscussion = lazyWithReload(() => import('./pages/Forum').then(m => ({ default: m.NewDiscussion })))
+const ForumModeration = lazyWithReload(() => import('./pages/ForumModeration').then(m => ({ default: m.ForumModeration })))
+const GovernanceSubject = lazyWithReload(() => import('./pages/Forum').then(m => ({ default: m.GovernanceSubject })))
+const GovernanceMe = lazyWithReload(() => import('./pages/GovernanceMe').then(m => ({ default: m.GovernanceMe })))
+const GovernancePropose = lazyWithReload(() => import('./pages/GovernancePropose').then(m => ({ default: m.GovernancePropose })))
 const DcaResolve = lazyWithReload(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaResolve })))
 const DcaExecution = lazyWithReload(() => import('./pages/DcaExecution').then(m => ({ default: m.DcaExecution })))
 const ActivityDetailPage = lazyWithReload(() => import('./pages/ActivityDetail').then(m => ({ default: m.ActivityDetailPage })))
@@ -57,6 +65,15 @@ const Notifications = lazyWithReload(() => import('./pages/Notifications').then(
 const ApiTokens = lazyWithReload(() => import('./pages/ApiTokens').then(m => ({ default: m.ApiTokens })))
 const ApiAdmin = lazyWithReload(() => import('./pages/ApiAdmin').then(m => ({ default: m.ApiAdmin })))
 const Mcp = lazyWithReload(() => import('./pages/Mcp').then(m => ({ default: m.Mcp })))
+// The voting sheets (wallets, composer, cart, unlock) and the chain client behind
+// them load only once someone opens one, or returns with votes in the cart.
+const VoteHost = lazyWithReload(() => import('./vote/VoteHost'))
+
+function VoteHostGate() {
+  const wanted = useVoteHostWanted()
+  if (!wanted) return null
+  return <Suspense fallback={null}><VoteHost /></Suspense>
+}
 
 // Consolidated top-level URLs are replaced with the matching Activity tab.
 function LegacyRedirect({ to }: { to: string }) {
@@ -70,7 +87,7 @@ function LegacyRedirect({ to }: { to: string }) {
 function NotFound({ path }: { path: string }) {
   useNoindex(true)
   return (
-    <div className="wrap"><div className="page-head"><div className="page-title">Page not found</div></div>
+    <div className="wrap"><div className="page-head"><h1 className="page-title">Page not found</h1></div>
       <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
         There is no page at <span className="mono" style={{ color: 'var(--text-high)' }}>{path}</span>.
         <div style={{ marginTop: 16 }}><Link className="hash" to={paths.dashboard()}>← Back to search</Link></div>
@@ -111,6 +128,13 @@ export default function App() {
       case 'intent': return <Intent intentId={route.intentId} />
       case 'referendum': return <Referendum pallet={route.pallet} index={route.index} />
       case 'governance': return <Governance />
+      case 'discussions': return <Discussions />
+      case 'discussion': return <Discussion id={route.id} />
+      case 'discussionNew': return <NewDiscussion />
+      case 'governanceModeration': return <ForumModeration />
+      case 'governanceSubject': return <GovernanceSubject subject={route.subject} id={route.id} />
+      case 'governanceMe': return <GovernanceMe />
+      case 'governancePropose': return <GovernancePropose />
       case 'dca-execution': return <DcaExecution height={route.height} eventIndex={route.eventIndex} />
       case 'dca-resolve': return <DcaResolve height={route.height} index={route.index} kind={route.kind} />
       case 'events': return <Events />
@@ -155,8 +179,9 @@ export default function App() {
 
   return (
     <>
+      <a className="skip-link" href="#view">Skip to content</a>
       <Topbar route={route} />
-      <main id="view">
+      <main id="view" tabIndex={-1}>
         {/* A page that throws replaces only itself (the nav stays usable), and leaving it clears
             the error; a chunk-load failure still reaches the root's "new version" card. */}
         <SectionBoundary label="This page" resetKey={window.location.pathname} passThrough={isChunkLoadError}>
@@ -166,6 +191,7 @@ export default function App() {
         </SectionBoundary>
       </main>
       <HoverCards />
+      <VoteHostGate />
     </>
   )
 }

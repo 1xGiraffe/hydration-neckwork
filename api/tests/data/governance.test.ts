@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { encodeAddress } from '@polkadot/util-crypto'
+import { setForumSnapshotForTest, type ForumPostMeta } from '../../src/services/forumStore.ts'
 import { AUTH, fakeDataClient, freshDataApp } from './helpers.ts'
 
 // Contract tests for /v1/governance/*: the referendum lifecycle fold (statuses,
@@ -26,9 +27,22 @@ const LIFECYCLE_ROWS: Row[] = [
   { pallet: 'democracy', ref_index: 200, event_name: 'Democracy.Passed', block_height: 600, event_index: 1, ts: '2026-01-02 00:00:00', args_json: JSON.stringify({ refIndex: 200 }), ingested_at: '2026-01-02 00:00:05' },
 ]
 
-const TITLE_ROWS: Row[] = [
-  { pallet: 'opengov', ref_index: 381, title: 'GIGAHDX voting rewards' },
-]
+// Referendum titles are the forum descriptions' (the process's forum snapshot).
+const forumPost = (postId: string, kind: string, title: string, extra: Partial<ForumPostMeta> = {}): ForumPostMeta => ({
+  postId, kind, title, excerpt: '', bodyFormat: 'markdown', bodyLength: 0, tldr: '', labels: [], linked: [], authorAccountId: '', authorLegacyName: '',
+  authority: 'subsquare', source: 'subsquare', sourceId: 'x', sourceCid: '', sourceRemoved: false, bannerCid: '', pollJson: '', revision: 0,
+  hidden: false, hiddenReason: '', deleted: false, locked: false, moderated: false, createdAt: 1, editedAt: null, lastActivityAt: 1, updatedAt: 0, ...extra,
+})
+
+function installForum(extra: Partial<ForumPostMeta> = {}): void {
+  setForumSnapshotForTest({
+    posts: new Map([
+      ['opengov:381', forumPost('opengov:381', 'opengov', 'GIGAHDX voting rewards', extra)],
+      // A description with an empty title (a placeholder): no title on the wire.
+      ['democracy:200', forumPost('democracy:200', 'democracy', '')],
+    ]),
+  })
+}
 
 const VOTE_ROWS: Row[] = [
   // A Standard aye at 6x: byte 134 = 128 | 6.
@@ -48,11 +62,9 @@ function govClient(overrides: { lifecycle?: Row[]; votes?: Row[]; voterVotes?: R
       return undefined
     },
     query => (query.includes('-- data:governance:referenda') ? (overrides.lifecycle ?? LIFECYCLE_ROWS) : undefined),
-    (query, params) => (query.includes('-- data:governance:titles')
-      ? TITLE_ROWS
-      : query.includes('-- data:governance:title')
-        ? TITLE_ROWS.filter(row => row.pallet === params.pallet && Number(row.ref_index) === Number(params.refIndex))
-        : undefined),
+    (query, params) => (query.includes('-- data:forum:post-body')
+      ? (params.id === 'opengov:381' ? [{ shown_body: 'Pay voters', hidden: 0, deleted: 0 }] : [{ shown_body: '', hidden: 0, deleted: 0 }])
+      : undefined),
     (query, params) => (query.includes('-- data:governance:proposal')
       ? (overrides.proposal ?? [{ pallet: 'Utility', call_name: 'force_batch', args_json: '{"calls":[]}', byte_length: 115, decode_error: '' }]).filter(() => params.hash === PROPOSAL_HASH)
       : undefined),
@@ -67,9 +79,14 @@ function govClient(overrides: { lifecycle?: Row[]; votes?: Row[]; voterVotes?: R
 
 let app: FastifyInstance | undefined
 
+// Titles and the detail's description answer from the forum snapshot (the forum
+// routes have their own tests, forum.test.ts).
+beforeEach(() => installForum())
+
 afterEach(async () => {
   await app?.close()
   app = undefined
+  setForumSnapshotForTest(null)
 })
 
 describe('GET /v1/governance/referenda', () => {
@@ -124,6 +141,38 @@ describe('GET /v1/governance/referenda/:pallet/:index', () => {
     expect(body.events).toHaveLength(6)
     expect(body.events[0]).toMatchObject({ eventName: 'Referenda.Submitted', blockHeight: 1000, args: { index: 381, track: 5 } })
     expect(body.proposal).toEqual({ pallet: 'Utility', callName: 'force_batch', args: { calls: [] }, byteLength: 115, decodeError: null })
+    expect(body.title).toBe('GIGAHDX voting rewards')
+    expect(body.descriptionStatus).toBe('ok')
+    expect(body.description).toMatchObject({ postId: 'opengov:381', title: 'GIGAHDX voting rewards', body: 'Pay voters' })
+  })
+
+  it('drops a hidden description\'s title from the list and the detail as soon as the snapshot holds the hide', async () => {
+    app = await freshDataApp(govClient())
+    expect((await app.inject({ url: '/v1/governance/referenda', headers: AUTH })).json().items[0].title).toBe('GIGAHDX voting rewards')
+    // The moderator's hide lands in the snapshot; the cached fold is not rebuilt.
+    installForum({ hidden: true, hiddenReason: 'spam' })
+    const list = await app.inject({ url: '/v1/governance/referenda', headers: AUTH })
+    expect(list.json().items[0].title).toBeNull()
+    const detail = (await app.inject({ url: '/v1/governance/referenda/opengov/381', headers: AUTH })).json()
+    expect(detail.title).toBeNull()
+    expect(detail.descriptionStatus).toBe('hidden')
+    expect(detail.description).toMatchObject({ hidden: true, hiddenReason: 'spam', title: null, body: null })
+  })
+
+  it('serves the referendum whole when the forum snapshot is not loaded, saying so', async () => {
+    setForumSnapshotForTest(null)
+    app = await freshDataApp(govClient())
+    const res = await app.inject({ url: '/v1/governance/referenda/opengov/381', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ status: 'confirmed', title: null, description: null, descriptionStatus: 'unavailable' })
+    expect(res.json().events).toHaveLength(6)
+  })
+
+  it('reports none for a referendum the forum holds no record of', async () => {
+    setForumSnapshotForTest({})
+    app = await freshDataApp(govClient())
+    const body = (await app.inject({ url: '/v1/governance/referenda/opengov/381', headers: AUTH })).json()
+    expect(body).toMatchObject({ description: null, descriptionStatus: 'none' })
   })
 
   it('404s an unknown referendum with the enumeration hint', async () => {
@@ -215,5 +264,30 @@ describe('GET /v1/governance/votes', () => {
     const res = await app.inject({ url: `/v1/governance/votes?voter=${quietVoter}&limit=99`, headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ items: [], hasMore: false })
+  })
+})
+
+describe('GET /v1/governance/treasury/spends', () => {
+  const BEN = `0x${'ab'.repeat(32)}`
+  const ev = (event_name: string, block_height: number, args: Row): Row => ({ event_name, block_height, event_index: 1, extrinsic_index: null, ts: '2026-08-01 00:00:00', args_json: JSON.stringify(args) })
+  const spendsClient = () => fakeDataClient(query => (query.includes('-- data:governance:treasury-spends') ? [
+    ev('Treasury.AssetSpendApproved', 100, { index: 0, amount: '763636000000000000', beneficiary: BEN, validFrom: 100, expireAt: 1000 }),
+    ev('Treasury.Paid', 200, { index: 0 }),
+    ev('Treasury.AssetSpendApproved', 300, { index: 1, amount: '5', beneficiary: BEN, validFrom: 300, expireAt: 400 }),
+    ev('Treasury.AssetSpendApproved', 500, { index: 2, amount: '7', beneficiary: BEN, validFrom: 500, expireAt: 999_999_999 }),
+  ] : undefined))
+
+  it('folds each spend to its state and what anyone may sign next, newest first, paged by index', async () => {
+    app = await freshDataApp(spendsClient())
+    const res = await app.inject({ url: '/v1/governance/treasury/spends?limit=2', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.items.map((s: { index: number; state: string; canPayout: boolean; canCheckStatus: boolean }) => [s.index, s.state, s.canPayout, s.canCheckStatus]))
+      .toEqual([[2, 'claimable', true, false], [1, 'expired', false, true]])
+    expect(body.items[0].beneficiary.accountIdHex).toBe(BEN)
+    const next = await app.inject({ url: `/v1/governance/treasury/spends?limit=2&cursor=${body.nextCursor}`, headers: AUTH })
+    expect(next.json().items.map((s: { index: number; state: string; paidAtBlock: number }) => [s.index, s.state, s.paidAtBlock])).toEqual([[0, 'paid', 200]])
+    const paid = await app.inject({ url: '/v1/governance/treasury/spends?state=paid', headers: AUTH })
+    expect(paid.json().items).toHaveLength(1)
   })
 })
