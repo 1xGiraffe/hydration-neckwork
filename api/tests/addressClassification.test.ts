@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { resetCacheForTests } from '../src/services/cache.ts'
 import { boundSubstrateAccount, initExplorerService, resolveRelatedAccounts } from '../src/services/explorerService.ts'
 
 // A bare EVM H160 is ambiguous: it is either a genuine ("pure") EVM account, or
@@ -60,6 +61,7 @@ describe('boundSubstrateAccount', () => {
           },
         ]),
     }))
+    resetCacheForTests()
     initExplorerService({ query } as never)
 
     const resolved = await resolveRelatedAccounts(SUBSTRATE)
@@ -67,5 +69,25 @@ describe('boundSubstrateAccount', () => {
     expect(query).toHaveBeenCalledTimes(2)
     expect(query.mock.calls[1][0].query_params).toEqual({ evms: [H160] })
     expect(resolved?.related).toEqual(expect.arrayContaining([SUBSTRATE, MARKER]))
+  })
+
+  // One account page resolves its related set from many places at once: the alias
+  // rows are read once per account inside the TTL, and each resolve gets its own copy.
+  it('reads an account\'s alias rows once for every resolve inside the ttl', async () => {
+    const query = vi.fn(({ query_params }: { query_params: Record<string, unknown> }) => ({
+      json: vi.fn(async () => 'evms' in query_params
+        ? [{ account_id: MARKER, evm_address: H160, primary_profile: `evm:${H160}`, relationship: 'runtime_truncated', confidence: 90 }]
+        : [{ account_id: SUBSTRATE, evm_address: H160, primary_profile: `evm:${H160}`, relationship: 'explicit_binding', confidence: 100 }]),
+    }))
+    resetCacheForTests()
+    initExplorerService({ query } as never)
+
+    const first = await resolveRelatedAccounts(SUBSTRATE)
+    first!.aliasRows.length = 0
+    const second = await resolveRelatedAccounts(SUBSTRATE)
+
+    expect(query).toHaveBeenCalledTimes(2)
+    expect(second!.aliasRows).toHaveLength(2)
+    expect(second!.related).toEqual(first!.related)
   })
 })

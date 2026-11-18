@@ -5040,42 +5040,58 @@ async function canonicalizeAddress(input: string): Promise<NormalizedAddress | n
   return norm
 }
 
+// An account page resolves its related set from a dozen places at once (the header,
+// each tab's reads, the positions and governance panels), and each resolve read the
+// alias directory twice: ~210k reads a day for a handful of accounts at a time. The
+// rows are held briefly per (account, H160) so one page load reads them once; a
+// binding indexed meanwhile shows within ALIAS_ROWS_TTL_MS.
+const ALIAS_ROWS_TTL_MS = 10_000
+
+async function aliasRowsOf(accountId: string, evmAddress: string | null | undefined): Promise<readonly AccountAliasRow[]> {
+  return cached(`explorer:alias-rows:${accountId}|${evmAddress ?? ''}`, ALIAS_ROWS_TTL_MS, async () => {
+    const aliasRes = await client.query({
+      query: `SELECT DISTINCT account_id, evm_address, primary_profile, relationship, confidence
+              FROM price_data.account_alias_directory
+              WHERE account_id = {acc:String} OR evm_address = {evm:String}
+              ORDER BY account_id, evm_address, primary_profile, relationship, confidence`,
+      query_params: { acc: accountId, evm: evmAddress ?? '' }, format: 'JSONEachRow',
+    })
+    const aliasRows = await aliasRes.json<AccountAliasRow>()
+    const queriedEvms = new Set<string>()
+    if (evmAddress && EVM_RE.test(evmAddress)) queriedEvms.add(evmAddress)
+    const evmsToLoad = [...new Set(aliasRows.map(a => a.evm_address?.toLowerCase()).filter((e): e is string => !!e && EVM_RE.test(e)))]
+      .filter(evm => !queriedEvms.has(evm))
+    if (evmsToLoad.length) {
+      const evmAliasRes = await client.query({
+        query: `SELECT DISTINCT account_id, evm_address, primary_profile, relationship, confidence
+                FROM price_data.account_alias_directory
+                WHERE evm_address IN ({evms:Array(String)})
+                ORDER BY account_id, evm_address, primary_profile, relationship, confidence`,
+        query_params: { evms: evmsToLoad }, format: 'JSONEachRow',
+      })
+      const seen = new Set(aliasRows.map(a => JSON.stringify(a)))
+      for (const row of await evmAliasRes.json<AccountAliasRow>()) {
+        const key = JSON.stringify(row)
+        if (!seen.has(key)) {
+          seen.add(key)
+          aliasRows.push(row)
+        }
+      }
+    }
+    return aliasRows
+  })
+}
+
 export async function resolveRelatedAccounts(addressInput: string): Promise<RelatedAccounts | null> {
   const norm0 = normalizeAddress(addressInput)
   if (!norm0 || !norm0.accountId) return null
-  const aliasRes = await client.query({
-    query: `SELECT DISTINCT account_id, evm_address, primary_profile, relationship, confidence
-            FROM price_data.account_alias_directory
-            WHERE account_id = {acc:String} OR evm_address = {evm:String}
-            ORDER BY account_id, evm_address, primary_profile, relationship, confidence`,
-    query_params: { acc: norm0.accountId, evm: norm0.evmAddress ?? '' }, format: 'JSONEachRow',
-  })
-  let aliasRows = await aliasRes.json<AccountAliasRow>()
-  const queriedEvms = new Set<string>()
-  if (norm0.evmAddress && EVM_RE.test(norm0.evmAddress)) queriedEvms.add(norm0.evmAddress)
+  // A copy: the cached rows are shared by every resolve inside the TTL.
+  const aliasRows = [...await aliasRowsOf(norm0.accountId, norm0.evmAddress)]
   const evmAliases = new Set<string>()
   if (norm0.evmAddress && EVM_RE.test(norm0.evmAddress)) evmAliases.add(norm0.evmAddress)
   for (const a of aliasRows) {
     const evm = a.evm_address?.toLowerCase()
     if (evm && EVM_RE.test(evm)) evmAliases.add(evm)
-  }
-  const evmsToLoad = [...evmAliases].filter(evm => !queriedEvms.has(evm))
-  if (evmsToLoad.length) {
-    const evmAliasRes = await client.query({
-      query: `SELECT DISTINCT account_id, evm_address, primary_profile, relationship, confidence
-              FROM price_data.account_alias_directory
-              WHERE evm_address IN ({evms:Array(String)})
-              ORDER BY account_id, evm_address, primary_profile, relationship, confidence`,
-      query_params: { evms: evmsToLoad }, format: 'JSONEachRow',
-    })
-    const seen = new Set(aliasRows.map(a => JSON.stringify(a)))
-    for (const row of await evmAliasRes.json<AccountAliasRow>()) {
-      const key = JSON.stringify(row)
-      if (!seen.has(key)) {
-        seen.add(key)
-        aliasRows.push(row)
-      }
-    }
   }
   // Re-anchor H160 inputs to the substrate side when EVMAccounts.Bound proves a
   // real account owns the H160, or when the H160 is the runtime truncation of a
