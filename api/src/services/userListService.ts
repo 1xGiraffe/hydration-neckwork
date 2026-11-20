@@ -288,17 +288,12 @@ export async function updateList(owner: string, listId: string, patch: { name?: 
   const list = requireOwned(owner, listId)
   if (patch.name !== undefined) list.name = checkText(patch.name, LIMITS.nameLen, 'list name')
   if (patch.note !== undefined) list.note = checkText(patch.note, LIMITS.noteLen, 'list note')
-  if (patch.visibility !== undefined && patch.visibility !== list.visibility) {
-    list.visibility = patch.visibility
-    if (patch.visibility === 'private') await revokePublicSubscriptions(list.listId)
-  }
+  // Visibility only governs who can find and newly subscribe to the list:
+  // going private keeps every existing subscriber, whether they arrived by
+  // invite or through Discover. The owner removes one explicitly (revokeShare).
+  if (patch.visibility !== undefined) list.visibility = patch.visibility
   await persistList(list)
   return list
-}
-async function revokePublicSubscriptions(listId: string): Promise<void> {
-  for (const [account, sub] of subsByList.get(listId) ?? []) {
-    if (sub.origin === 'public') await setSub(listId, account, null)
-  }
 }
 
 export async function deleteList(owner: string, listId: string): Promise<void> {

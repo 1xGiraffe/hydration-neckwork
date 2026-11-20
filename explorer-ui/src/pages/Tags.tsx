@@ -27,12 +27,11 @@ function HydrationTagsHero({ tagCount }: { tagCount: number }) {
 }
 
 // Two groups sharing one table: a pending invite the viewer hasn't answered
-// (Accept/Decline) and a private list they already accepted into (only
-// reachable through an invite — a public list's `visibility` would read
-// 'public' here regardless of whether this particular subscription started as
-// an invite or a direct Subscribe, so that case can't be distinguished from
-// the data /user/me ships and stays out of this list; it appears as an
-// ordinary Subscribed row in Public lists above instead).
+// (Accept/Decline) and a private list they subscribe to — by an accepted
+// invite, or by a Discover subscription kept when its owner made the list
+// private. A public list they subscribe to is not here, whichever way the
+// subscription started; it appears as an ordinary Subscribed row in Public
+// lists above instead.
 function Invites({ invites, invitedSubscriptions }: { invites: ListSummaryRef[]; invitedSubscriptions: ListSummaryRef[] }) {
   const respondMutation = useUserMutation(userApi.respondInvite)
   const unsubscribeMutation = useUserMutation(userApi.unsubscribe)
@@ -54,7 +53,7 @@ function Invites({ invites, invitedSubscriptions }: { invites: ListSummaryRef[];
           ))}
           {invitedSubscriptions.map(lib => (
             <tr key={lib.listId}>
-              <td data-label="List"><span className="tag">{lib.name}</span> <span className="muted" style={{ fontSize: 11 }}>· Invited · subscribed</span></td>
+              <td data-label="List"><span className="tag">{lib.name}</span> <span className="muted" style={{ fontSize: 11 }}>· Private · subscribed</span></td>
               <td data-label="Owner"><AddrPill account={lib.owner} noCopy /></td>
               <td data-label="Action" className="r">
                 <button type="button" className="btn sm" disabled={unsubscribeMutation.isPending} onClick={() => unsubscribeMutation.mutate([lib.listId])}>Unsubscribe</button>
@@ -80,9 +79,7 @@ export function Tags() {
   const { data: systemTags } = useTags()
 
   const invites = me.data?.invites ?? []
-  // See the Invites comment above: a private subscription can only exist
-  // because an invite was accepted, so this is exact, not a heuristic — it
-  // just doesn't catch the (rarer) invite-to-a-public-list case.
+  // See the Invites comment above: every subscription to a private list.
   const invitedSubscriptions = (me.data?.subscriptions ?? []).filter(l => l.visibility === 'private')
 
   return (
