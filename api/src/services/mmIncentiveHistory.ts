@@ -440,7 +440,7 @@ export async function loadMmIncentiveHistory(
     else if (r.asset === '') anchorAccrued.set(`${r.u}|${r.reward}`, big(r.value))
     else anchorUserIndex.set(`${r.u}|${r.asset}|${r.reward}`, big(r.value))
   }
-  const unreconciled = new Set(reconciliation.rewards.filter(r => !r.reconciled).map(r => `${r.holder}|${r.rewardAddress}`))
+  const unreconciled = new Set(reconciliation.rewards.filter(r => r.source === 'controller' && !r.reconciled).map(r => `${r.holder}|${r.rewardAddress}`))
   return mmIncentiveSeries({ anchorBlock, programmes, scaled, accruals, claims, anchorAccrued, anchorUserIndex, anchorProgrammeIndex, programmeIndex: progIndex, unreconciled }, bk)
 }
 

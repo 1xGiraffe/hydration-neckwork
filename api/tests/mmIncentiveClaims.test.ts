@@ -15,12 +15,21 @@ const H = `0x${'4a'.repeat(20)}`
 beforeEach(() => resetCacheForTests())
 
 describe('aggregateMmIncentiveClaims', () => {
+  it('files a distributor claim under the market its caller names for that payer', () => {
+    const rows = [
+      { source: 'controller' as const, reward: DOT, ts: 1, amount: E12 },
+      { source: 'distributor' as const, reward: DOT, ts: 2, amount: 2n * E12 },
+    ]
+    const out = aggregateMmIncentiveClaims(rows, (_r, source) => (source === 'distributor' ? 'core' : 'gigahdx'), () => null)
+    expect(out.map(o => [o.marketKey, o.amount, o.claims])).toEqual([['core', 2n * E12, 1], ['gigahdx', E12, 1]])
+  })
+
   it('totals per market and reward, sums priced claims only and counts the rest', () => {
     const rows = [
-      { reward: DOT, ts: 1, amount: 2n * E12 },
-      { reward: DOT, ts: 2, amount: 3n * E12 },
-      { reward: USDT, ts: 3, amount: E12 },
-      { reward: '0xnot-an-asset', ts: 4, amount: E12 },
+      { source: 'controller' as const, reward: DOT, ts: 1, amount: 2n * E12 },
+      { source: 'controller' as const, reward: DOT, ts: 2, amount: 3n * E12 },
+      { source: 'controller' as const, reward: USDT, ts: 3, amount: E12 },
+      { source: 'controller' as const, reward: '0xnot-an-asset', ts: 4, amount: E12 },
     ]
     const out = aggregateMmIncentiveClaims(rows, r => (r === USDT ? 'gigahdx' : 'core'), (id, amount, i) => (id === 5 && i === 0 ? amount * 2n : null))
     expect(out).toEqual([
@@ -55,6 +64,7 @@ describe('loadMmIncentiveClaims', () => {
     const claims = seen.find(s => s.query.includes('-- mm:incentive-claims-total'))!
     expect(claims.params.hs).toEqual([H])
     expect(claims.query).toContain('FROM price_data.mm_incentive_claims FINAL')
+    expect(claims.query).toContain('FROM price_data.mm_distributor_claims FINAL')
     expect(claims.query).toContain('WHERE user_address IN {hs:Array(String)}')
     const closes = seen.find(s => s.query.includes('-- mm:incentive-claim-closes'))!
     expect(closes.query).toContain('price_data.ohlc_1h')

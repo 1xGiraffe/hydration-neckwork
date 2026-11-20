@@ -575,12 +575,14 @@ export interface MoneyMarketPosition {
   unclaimedRewards?: MoneyMarketRewardItem[]
 }
 
-/** One (holder, reward asset) claimable money-market incentive: the chain's own getAllUserRewards. */
+/** One (holder, reward asset, payer) claimable money-market incentive: the chain's own getAllUserRewards, or the rewards distributor's owed amount. */
 export interface MoneyMarketRewardItem {
+  /** Who pays it: the RewardsController (claimAllRewards), or the main market's rewards distributor (the off-chain PRIME programme, a merkle claim). */
+  source?: 'controller' | 'distributor'
   marketKey: string
   holder: string
   asset: AssetRef
-  /** Raw integer in the reward asset's decimals: what one claimAllRewards would pay now. */
+  /** Raw integer in the reward asset's decimals: what one claim would pay now. */
   claimable: string
   claimableUsd: number | null
   /** Whether the indexed log arithmetic reproduces the chain's amount (false: a gap; the history cannot state it). */
@@ -595,6 +597,24 @@ export interface MoneyMarketRewardItem {
  * IS inside `portfolioUsd`; absent when nothing is claimable or no fresh snapshot.
  */
 export interface MoneyMarketRewards { asOfBlock: number; items: MoneyMarketRewardItem[]; totalUsd: number }
+
+/** The main market's off-chain PRIME programme as the account's EVM holders meet it: eligibility and the not-yet-claimable stages (in no value). */
+export interface AccountRewardsProgram {
+  name: string
+  marketKey: string
+  distributor: string
+  rewardAsset: AssetRef
+  maxHollarDebtUsd: string
+  endsAt: string | null
+  asOf: string
+  accounts: Array<{
+    holder: string
+    status: 'earning' | 'not-earning' | 'not-listed'
+    reason: string | null
+    hollarDebtUsd: string | null
+    stages: Array<{ stage: 'pending' | 'closed' | 'accruing'; amount: string; amountUsd: number | null; claimableAt: string | null }>
+  }>
+}
 
 /** A concentrated-liquidity position holds two tokens: `asset`/`amount` is token0. */
 export interface LpPosition {
@@ -779,6 +799,7 @@ export interface AddressDetail {
   liquidityPositions?: LpPosition[]
   farmRewards?: FarmRewards
   moneyMarketRewards?: MoneyMarketRewards
+  rewardsProgram?: AccountRewardsProgram
   activeDcas?: ActiveDca[]
   openLimitOrders?: OpenLimitOrder[]
   /** null under `summary=1` — these are live node reads. */

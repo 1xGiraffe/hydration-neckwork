@@ -80,7 +80,8 @@ import { loadMmIncentiveProgrammeRows, scaledSeriesFromBuckets } from './mmIncen
 import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmHistoryInterest, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
 import { loadMmIncentiveClaims } from './mmIncentiveClaims.ts'
 import { loadMmLiquidations } from './mmLiquidations.ts'
-import { currentMmIncentiveGenerationSql, loadMmIncentives, mmCountedIncentiveRowsSql, type MmIncentiveSnapshotView } from './mmIncentiveSnapshot.ts'
+import { currentMmIncentiveGenerationSql, loadMmIncentives, mmCountedIncentiveRowsSql, type MmIncentiveSnapshotView, type MmIncentiveSource } from './mmIncentiveSnapshot.ts'
+import { programAccounts, programMetaFields, type ProgramStage } from './mmRewardsProgram.ts'
 import { isTerminalXcswapStatus, xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 import { loadForeignCandles } from './foreignCandles.ts'
 import { intentLimitPrice } from './intentLimitPrice.ts'
@@ -4966,11 +4967,17 @@ export interface AddressDetail {
   farmRewards?: FarmRewards
   // Claimable money-market (lending) incentives of the account's EVM holder, from
   // the mm-incentives snapshot (see MoneyMarketRewards) — the chain's own
-  // getAllUserRewards. `totalUsd` IS in portfolioUsd (HDX-denominated part out of
+  // getAllUserRewards, and the rewards distributor's owed amount for the
+  // off-chain PRIME programme (source 'distributor'). `totalUsd` IS in portfolioUsd (HDX-denominated part out of
   // portfolioExHdxUsd), like farmRewards; absent when nothing is claimable or no
   // fresh snapshot is published, and then in no value either. Each market's share
   // also rides on its MoneyMarketPosition as `unclaimedRewards`.
   moneyMarketRewards?: MoneyMarketRewards
+  // The main market's off-chain PRIME programme as the account's EVM holders meet
+  // it (see AccountRewardsProgram): eligibility and what is earned but not yet
+  // claimable — never in any value. Absent when no holder is listed or owed
+  // anything, or without a fresh programme snapshot.
+  rewardsProgram?: AccountRewardsProgram
   activeDcas?: ActiveDca[]
   openLimitOrders?: OpenLimitOrder[]
   proxy: AccountProxyDisplay | null
@@ -5302,7 +5309,14 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // Claimable lending incentives count the same way, for every EVM identity of
     // the related set (moneyMarketIdentities — the holders the value chart's
     // incentive series sums, so its pinned last point and its interior agree).
-    const { farmRewards, moneyMarketRewards, lpPositions: lpShown } = await getUnclaimedRewards([...related], moneyMarketIdentities([...related], norm).h160s, lpPositions)
+    const mmH160s = moneyMarketIdentities([...related], norm).h160s
+    const [{ farmRewards, moneyMarketRewards, lpPositions: lpShown }, rewardsProgram] = await Promise.all([
+      getUnclaimedRewards([...related], mmH160s, lpPositions),
+      getAccountRewardsProgram(mmH160s).catch(err => {
+        console.error('[rewards-program] account state failed', err)
+        return undefined
+      }),
+    ])
     const rewardValue = unclaimedRewardValue({ farmRewards, moneyMarketRewards })
     moneyMarket = withMarketRewards(moneyMarket, moneyMarketRewards)
     return {
@@ -5332,6 +5346,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       liquidityPositions: [...lpShown, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)),
       ...(farmRewards ? { farmRewards } : {}),
       ...(moneyMarketRewards ? { moneyMarketRewards } : {}),
+      ...(rewardsProgram ? { rewardsProgram } : {}),
       activeDcas,
       openLimitOrders,
       proxy,
@@ -8524,12 +8539,16 @@ export function assembleFarmRewards(
 }
 
 // ── claimable money-market incentives (mm-incentives snapshot) ──
-// One (holder, reward asset): the chain's own getAllUserRewards at the snapshot
+// One (holder, reward asset, payer): the chain's own getAllUserRewards at the snapshot
 // block — what one claimAllRewards would pay then. `reconciled` says the indexed
 // log arithmetic reproduces it (a false one is still the chain's figure, but its
 // history is not stated); `legs` carries that arithmetic's pending part per
 // incentivized aToken. Valued at current prices, like any current holding.
 export interface MoneyMarketRewardItem {
+  // Who pays it: the RewardsController (claimAllRewards), or the main market's
+  // rewards distributor — the off-chain PRIME programme (mmRewardsProgram.ts),
+  // owed = its live root's cumulative claimable less claimed().
+  source: MmIncentiveSource
   marketKey: string
   holder: string
   asset: AssetRef
@@ -8544,6 +8563,58 @@ export interface MoneyMarketRewardItem {
 }
 export interface MoneyMarketRewards { asOfBlock: number; items: MoneyMarketRewardItem[]; totalUsd: number }
 
+/**
+ * The off-chain PRIME programme for one account set (mmRewardsProgram.ts): per
+ * EVM holder its eligibility in the programme's newest hourly snapshot (an
+ * account with HOLLAR debt above `maxHollarDebtUsd` earns nothing) and what it has
+ * earned that is NOT claimable yet — under a root waiting out the distributor's
+ * timelock, under the newest closed epoch's root, and the open epoch's estimate.
+ * What is claimable now is a MoneyMarketRewardItem with source 'distributor' (and
+ * in the value); these stages are in no value: a stage becomes claimable only once
+ * its root is accepted.
+ */
+export interface AccountRewardsProgram {
+  name: string
+  marketKey: string
+  distributor: string
+  rewardAsset: AssetRef
+  /** An account whose HOLLAR debt is above this (USD, decimal string) earns nothing. */
+  maxHollarDebtUsd: string
+  /** ISO time the programme ends; null when it has none. */
+  endsAt: string | null
+  /** ISO start of the hour the snapshot describes. */
+  asOf: string
+  accounts: Array<{
+    holder: string
+    status: 'earning' | 'not-earning' | 'not-listed'
+    reason: string | null
+    hollarDebtUsd: string | null
+    stages: Array<{ stage: ProgramStage; amount: string; amountUsd: number | null; claimableAt: string | null }>
+  }>
+}
+
+/** The programme for `h160s` as the account page states it; undefined when there is nothing to state. */
+async function getAccountRewardsProgram(h160s: string[]): Promise<AccountRewardsProgram | undefined> {
+  const fields = programMetaFields()
+  const rewardId = fields ? assetIdFromMmAddress(fields.rewardAddress) : null
+  const state = fields && rewardId != null ? programAccounts(h160s) : null
+  if (!fields || rewardId == null || !state || !state.accounts.length) return undefined
+  const prices = await ensureAccountValuePrices()
+  const { rewardAddress: _reward, ...meta } = fields
+  return {
+    ...meta,
+    rewardAsset: asset(rewardId),
+    accounts: state.accounts.map(a => ({
+      holder: a.holder, status: a.status, reason: a.reason, hollarDebtUsd: a.hollarDebtUsd,
+      stages: a.stages.map(st => ({
+        stage: st.stage, amount: st.amount.toString(),
+        amountUsd: usdValue(prices, rewardId, st.amount.toString(), asset(rewardId).decimals),
+        claimableAt: st.claimableAtMs == null ? null : new Date(st.claimableAtMs).toISOString(),
+      })),
+    })),
+  }
+}
+
 /** The snapshot's rewards as the account page states them (claimable > 0 only). Pure, for the tests. */
 export function assembleMoneyMarketRewards(
   snapshot: MmIncentiveSnapshotView,
@@ -8552,6 +8623,7 @@ export function assembleMoneyMarketRewards(
 ): MoneyMarketRewards | undefined {
   if (snapshot.asOfBlock == null) return undefined
   const items: MoneyMarketRewardItem[] = snapshot.rewards.filter(r => r.claimable > 0n).map(r => ({
+    source: r.source,
     marketKey: r.marketKey,
     holder: r.holder,
     asset: asset(r.rewardAssetId),

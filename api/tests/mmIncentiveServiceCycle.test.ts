@@ -75,6 +75,10 @@ function fakeEthCall(chainDecimals = 18) {
   const call = vi.fn(async (calls: EthCallRequest[], at: EthBlockRef) => {
     blocks.push(at)
     return calls.map(c => {
+      // The rewards distributor before its first root: no root, nothing pending.
+      if (c.data === '0xebf0c717') return '0x' + W(0)
+      if (c.data === '0x750588cf') return '0x' + W(0) + W(0) + W(0)
+      if (c.data === '0xd33219b4') return '0x' + W(43_200)
       if (c.data.startsWith('0x9efd6f72')) return '0x' + W(chainDecimals)
       if (c.data.startsWith('0x886fe70b')) return '0x' + W(OLD_INDEX) + W(NEW_INDEX)
       if (c.data.startsWith('0x4c0369c3')) {
@@ -114,6 +118,21 @@ describe('computeMmIncentives', () => {
     expect(leg.pendingRaw).toBe(NEW_INDEX)
     expect(cycle.rows.find(r => r.holder === HOLDER && r.assetAddress === '')!.reconciled).toBe(true)
     expect(cycle.decimalsMismatches).toEqual([])
+  })
+
+  it('appends the distributor\'s owed amounts as their own rows, after the controller\'s', async () => {
+    const eth = fakeEthCall()
+    const other = `0x${'cd'.repeat(20)}`
+    const rowsTree = { reward: '0x000000000000000000000000000000010000002b', root: `0x${'11'.repeat(32)}`, claims: new Map([[other, 500n]]), total: 500n }
+    const cycle = await computeMmIncentives(fakeClient() as never, {
+      ethCall: eth.call, eds: async () => new Map([[43, 1_000n]]), rpc: fakeRpc(), registryDecimals: () => 18,
+      readDistributor: async () => ({ rowsTree, claimed: new Map([[other, 100n]]), liveRoot: rowsTree.root }),
+    })
+    const dist = cycle.rows.filter(r => r.assetAddress.startsWith('distributor:'))
+    expect(dist.map(r => [r.holder, r.claimableRaw, r.marketKey, r.belowEd, r.reconciled])).toEqual([[other, 400n, 'core', true, true]])
+    expect(cycle.distributorRows).toBe(1)
+    expect(cycle.distributorRoot).toBe(rowsTree.root)
+    expect(cycle.rows[cycle.rows.length - 1]).toBe(dist[0])
   })
 
   it('pins the indexed head when it trails finality', async () => {

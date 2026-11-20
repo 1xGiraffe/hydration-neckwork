@@ -306,11 +306,13 @@ function portfolioBlock(d: AddressDetail, value: ReturnType<typeof portfolioValu
   const hasDebt = value.moneyMarketDebtUsd > 0
   const rewards = farmRewardsLine(d)
   const incentives = moneyMarketRewardsLine(d)
+  const programme = rewardsProgramLine(d)
   return kv([
     ['Value', `${formatUsd(value.valueUsd)}${hasDebt ? ' — holdings minus money-market debt, the figure the Explorer account page shows' : ''}`],
     ['Holdings (gross: balances + LP positions + claimable farm rewards and lending incentives)', formatUsd(value.holdingsUsd)],
     ['Unclaimed farm rewards (inside holdings)', rewards],
     ['Unclaimed lending incentives (inside holdings)', incentives],
+    ['PRIME rewards programme (earned, not claimable yet — in no total)', programme],
     ['Money-market debt (netted out above)', hasDebt ? formatUsd(value.moneyMarketDebtUsd) : null],
     ['Holdings excluding HDX', d.portfolioExHdxUsd != null ? formatUsd(d.portfolioExHdxUsd) : null],
     ['Value excluding HDX', d.portfolioExHdxUsd != null && hasDebt ? formatUsd(d.portfolioExHdxUsd - value.moneyMarketDebtUsd) : null],
@@ -346,8 +348,10 @@ const moneyMarketRewardsUnpriced = (d: AddressDetail): number =>
 
 /**
  * The account's claimable money-market incentives, as the upstream counts them
- * inside `portfolioUsd`: the chain's own getAllUserRewards, priced items only,
- * unpriced ones named. Null when there is none (or no fresh snapshot).
+ * inside `portfolioUsd`: the chain's own getAllUserRewards, and for the main
+ * market's off-chain PRIME programme the rewards distributor's live-root amount
+ * less what it has paid; priced items only, unpriced ones named. Null when there
+ * is none (or no fresh snapshot).
  */
 function moneyMarketRewardsLine(d: AddressDetail): string | null {
   const mr = d.moneyMarketRewards
@@ -355,14 +359,41 @@ function moneyMarketRewardsLine(d: AddressDetail): string | null {
   const unpriced = moneyMarketRewardsUnpriced(d)
   const dust = mr.items.filter(i => i.belowExistentialDeposit).length
   if (mr.totalUsd <= 0 && unpriced === 0) return null
-  return `${formatUsd(mr.totalUsd)}${unpriced ? ` plus ${unpriced} reward${unpriced === 1 ? '' : 's'} the index cannot price (not counted)` : ''} — what claimAllRewards would pay now (the chain's own RewardsController.getAllUserRewards), as of block ${formatCount(mr.asOfBlock)}${dust ? `; ${dust} amount${dust === 1 ? ' is' : 's are'} below the reward asset's existential deposit, so a claim including ${dust === 1 ? 'it' : 'them'} reverts until the account holds that deposit — owed, not forfeited, and counted` : ''}`
+  return `${formatUsd(mr.totalUsd)}${unpriced ? ` plus ${unpriced} reward${unpriced === 1 ? '' : 's'} the index cannot price (not counted)` : ''} — what claiming would pay now (the chain's own RewardsController.getAllUserRewards${mr.items.some(i => i.source === 'distributor') ? ', and the PRIME programme\'s rewards distributor: its live root\'s cumulative amount less what it has paid' : ''}), as of block ${formatCount(mr.asOfBlock)}${dust ? `; ${dust} amount${dust === 1 ? ' is' : 's are'} below the reward asset's existential deposit, so a claim including ${dust === 1 ? 'it' : 'them'} reverts until the account holds that deposit — owed, not forfeited, and counted` : ''}`
 }
 
 /** One market's claimable incentives as a short line; null when it has none. */
 function marketRewardsLine(p: MoneyMarketPosition): string | null {
   const items = (p.unclaimedRewards ?? []).filter(i => i.claimable !== '0')
   if (!items.length) return null
-  return items.map(i => `${formatAmount(i.claimable, i.asset.decimals, i.asset.symbol)}${i.claimableUsd != null ? ` (${formatUsd(i.claimableUsd)})` : ' (unpriced)'}${i.belowExistentialDeposit ? ' — below the existential deposit' : ''}`).join(' · ')
+  return items.map(i => `${formatAmount(i.claimable, i.asset.decimals, i.asset.symbol)}${i.claimableUsd != null ? ` (${formatUsd(i.claimableUsd)})` : ' (unpriced)'}${i.source === 'distributor' ? ' from the PRIME programme\'s rewards distributor' : ''}${i.belowExistentialDeposit ? ' — below the existential deposit' : ''}`).join(' · ')
+}
+
+const PROGRAMME_STAGE: Record<'pending' | 'closed' | 'accruing', string> = {
+  pending: 'under a root in its timelock',
+  closed: 'under the closed epoch\'s root, not yet submitted',
+  accruing: 'estimated for the open epoch',
+}
+
+/**
+ * The off-chain PRIME programme (main market, HUSDC/HUSDT suppliers): each EVM
+ * holder's eligibility and what it has earned that is NOT claimable yet. Never in
+ * a total — a stage becomes claimable (and part of the value) once its root is
+ * accepted on the distributor. Null when the upstream states nothing.
+ */
+function rewardsProgramLine(d: AddressDetail): string | null {
+  const rp = d.rewardsProgram
+  if (!rp?.accounts.length) return null
+  const sym = rp.rewardAsset.symbol
+  const parts = rp.accounts.map(a => {
+    const why = a.reason === 'hollar_debt'
+      ? ` (HOLLAR debt ${a.hollarDebtUsd != null ? `$${a.hollarDebtUsd}` : DASH} above the $${rp.maxHollarDebtUsd} limit)`
+      : a.reason ? ` (${a.reason})` : ''
+    const status = a.status === 'earning' ? 'earning' : a.status === 'not-earning' ? `NOT earning${why}` : 'not in the programme\'s snapshot'
+    const stages = a.stages.map(st => `${formatAmount(st.amount, rp.rewardAsset.decimals, sym)}${st.amountUsd != null ? ` (${formatUsd(st.amountUsd)})` : ''} ${PROGRAMME_STAGE[st.stage]}${st.claimableAt ? `, claimable from ${st.claimableAt}` : ''}`)
+    return `${a.holder}: ${status}${stages.length ? ` — ${stages.join('; ')}` : ''}`
+  })
+  return `${parts.join(' · ')} — "${rp.name}", paid by the rewards distributor ${rp.distributor} in daily epochs${rp.endsAt ? `, ends ${rp.endsAt}` : ''}; snapshot of ${rp.asOf}`
 }
 
 const balanceValue = (b: AddressBalance): number => b.valueUsd ?? -1
@@ -847,7 +878,7 @@ Answers "what does this address hold and owe?", "wallet, pallet pot, contract or
 
 \`include\` selects sections (default balances, positions, moneymarket, dca, orders, related); narrow it for a big account. 'counts' (lifetime extrinsic/event/vote counts) and 'revenue' (Protocol Revenue from it, by stream) each cost one more read and are off by default.
 
-Two figures; quoting the wrong one contradicts the linked page. **Value** = holdings minus money-market debt: the account page's figure, \`get_account_history\`'s last point, the directory's ranking — quote it for "what is it worth". **Holdings** is gross: every balance, LP position, claimable farm reward (what claiming now pays, stated on its own line, never inside a position's USD) and claimable lending incentive (getAllUserRewards now — counted even below the reward asset's existential deposit, though such a claim reverts until the account holds it; per market, never inside collateral). Money-market collateral is inside Holdings (an aToken is a balance) — never subtract it again. For a leveraged account the two differ by more than half.
+Two figures; quoting the wrong one contradicts the linked page. **Value** = holdings minus money-market debt: the account page's figure, \`get_account_history\`'s last point, the directory's ranking — quote it for "what is it worth". **Holdings** is gross: every balance, LP position, claimable farm reward (what claiming now pays, stated on its own line, never inside a position's USD) and claimable lending incentive (getAllUserRewards now, plus what the main market's off-chain PRIME programme's rewards distributor owes under its accepted root — counted even below the reward asset's existential deposit, though such a claim reverts until the account holds it; per market, never inside collateral). Money-market collateral is inside Holdings (an aToken is a balance) — never subtract it again. For a leveraged account the two differ by more than half.
 
 Traps handled here; do not undo them when quoting:
 - EVERY FIGURE COVERS THE RELATED SET (substrate account plus its bound EVM address — one wallet), not the address asked about. Attribute numbers to the set.
@@ -1665,7 +1696,7 @@ async function moneyMarketHistoryAnswer(
     note('A health factor here is the chain\'s own getUserAccountData AS OBSERVED at the block it names (after each of the account\'s money-market events, and periodically for borrowers) — carried between reads, never recomputed or interpolated for a point. It uses the Aave oracle, not the candles the amounts are valued at. First/last/lowest range over the observations the reading\'s points carry (the newest one at each point), not over every read between them.'),
     note(`Reserve amounts are what balanceOf returned at each point's block (interest accrued to it), valued at the ${grain} candle fully CLOSED by the bucket end and never back-filled; an unpriced leg is counted and left out, never valued at zero. So the last point is NOT \`get_account\`'s current money-market figures${windowed ? ' — and this reading is WINDOWED, so it ends at the window, not now' : ''}.`),
     rewardsUsd.some(v => v != null && v > 0) || rewardsIncomplete.some(n => n > 0)
-      ? note('Unclaimed lending incentives are SETTLED at each point: the RewardsController\'s stored accrual plus each aToken\'s pending accrual up to the programme\'s last on-chain index update at or before the point — an active programme\'s emission since then is not in it, so the last point can sit below `get_account`\'s claimable (the chain\'s own getAllUserRewards now). They are never inside supplied USD. A reward the index cannot state (or that does not reconcile with the chain now) is counted, never valued.')
+      ? note('Unclaimed lending incentives are SETTLED at each point: the RewardsController\'s stored accrual plus each aToken\'s pending accrual up to the programme\'s last on-chain index update at or before the point — an active programme\'s emission since then is not in it, so the last point can sit below `get_account`\'s claimable (the chain\'s own getAllUserRewards now). They are never inside supplied USD. A reward the index cannot state (or that does not reconcile with the chain now) is counted, never valued. The off-chain PRIME programme (paid by the rewards distributor since 2026-11-20) is not in these settled points: its amounts exist only per accepted root, and `get_account` states what it owes now.')
       : '',
     markets.some(m => m.stakingBacked) ? note('A staking-backed market (GIGAHDX) supplies stHDX backed by HDX that stays locked in the wallet: its supplied side restates that HDX, which is why the account\'s Value leaves it out.') : '',
     note('Every figure is scoped to the account\'s related set (its substrate account plus any EVM address bound to it), not to one address.'),

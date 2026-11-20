@@ -271,6 +271,12 @@ CREATE TABLE IF NOT EXISTS price_data.mm_incentive_anchor (`user_address` String
 -- RewardsClaimed(user, reward, to, claimer, amount), user-first: what reduced the user's
 -- accrual. Fed by mm_incentive_claims_mv.
 CREATE TABLE IF NOT EXISTS price_data.mm_incentive_claims (`user_address` String, `reward_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `to_address` String, `claimer` String, `amount` UInt256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (user_address, reward_address, block_height, event_index) SETTINGS index_granularity = 1024;
+-- Claimed(account, reward, amount) of the main money market's rewards distributor (Morpho's
+-- Universal Rewards Distributor 0x5ca1…87f0, the off-chain PRIME programme's payer since
+-- referendum 462), user-first like mm_incentive_claims, with which it shares no amounts: a
+-- distributor claim pays a merkle root's cumulative amount and never touches a controller
+-- accrual. Fed by mm_distributor_claims_mv.
+CREATE TABLE IF NOT EXISTS price_data.mm_distributor_claims (`distributor_address` String, `user_address` String, `reward_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `amount` UInt256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (user_address, reward_address, block_height, event_index) SETTINGS index_granularity = 1024;
 -- Every value a programme's (asset, reward) index was stored at, programme-first — the "last
 -- index at or before block h" source: each Accrued (source 'accrued') and each AssetConfigUpdated
 -- (source 'config'), the only two places the index is written. Fed by two MVs.

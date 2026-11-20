@@ -184,6 +184,7 @@ const TASKS: RefreshTask[] = [
   // its block.
   { name: 'lm-rewards', everyTicks: 2, run: refreshLmRewards },
   // Claimable money-market incentives: the RewardsController's getAllUserRewards
+  // and the rewards distributor's owed amounts (mmRewardsProgram.ts)
   // per candidate holder at the indexed head, with the log arithmetic reconciled
   // beside it. The heaviest node-full lane here (~12–24s), so it runs every fifth
   // tick: 300s keeps the published figure three cycles inside the 15-minute

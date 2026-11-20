@@ -100,7 +100,7 @@ describe('GET /v1/accounts/:address/money-market/positions', () => {
     // beside the reserves and never in them.
     expect(body.rewardsAsOfBlock).toBe(8_999_500)
     expect(core.unclaimedRewards).toEqual([{
-      assetId: '5', amount: '1000000000000', valueUsd: '2.00', reconciled: true, belowExistentialDeposit: true,
+      source: 'controller', assetId: '5', amount: '1000000000000', valueUsd: '2.00', reconciled: true, belowExistentialDeposit: true,
       legs: [{ aTokenAddress: A5, aTokenAssetId: '1001', pending: '5' }],
     }])
     expect(giga.unclaimedRewards).toEqual([])

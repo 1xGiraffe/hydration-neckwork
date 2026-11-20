@@ -400,6 +400,15 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     select: ATOKEN_PARTY_TRANSFERS_SELECT,
   },
   {
+    // The rewards distributor's Claimed (mm_distributor_claims, 001_tables.sql); the
+    // distributor was created at block 17,176,135, so every claim is at or after it.
+    table: 'price_data.mm_distributor_claims',
+    source: 'raw_evm_logs',
+    where: "raw_evm_logs.contract_address = '0x5ca17568846ed083fd0eb307382c69232bd787f0' AND raw_evm_logs.topic0 = '0xf7a40077ff7a04c7e61f6f26fb13774259ddf1b6bce9ecf26a8276cdd3992683' AND length(raw_evm_logs.topics) = 3 AND length(raw_evm_logs.data) = 66",
+    fromBlock: 17_170_000,
+    select: "lower(raw_evm_logs.contract_address) AS distributor_address, lower(concat('0x', substring(topics[2], 27, 40))) AS user_address, lower(concat('0x', substring(topics[3], 27, 40))) AS reward_address, block_height, event_index, block_timestamp, reinterpretAsUInt256(reverse(unhex(substring(data, 3, 64)))) AS amount, ingested_at",
+  },
+  {
     // The Juicer strategy's logs (018_juicer.sql); its contracts were created at block
     // 16,630,305, so the search for raw's first record starts just below.
     table: 'price_data.juicer_logs',

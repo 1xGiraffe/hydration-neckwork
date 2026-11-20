@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  MM_INCENTIVE_MAX_AGE_SECONDS, MM_MARKET_ROW_PREFIX, currentMmIncentiveGenerationSql, loadMmIncentives, mmIncentiveAccountForm, mmIncentiveRewardsFromStored,
-  withPostSnapshotClaims,
+  MM_INCENTIVE_MAX_AGE_SECONDS, MM_MARKET_ROW_PREFIX, currentMmIncentiveGenerationSql, loadMmIncentives, mmCountedIncentiveRowsSql, mmIncentiveAccountForm, mmIncentiveRewardsFromStored,
+  postSnapshotClaimKey, withPostSnapshotClaims,
 } from '../src/services/mmIncentiveSnapshot.ts'
+import { DISTRIBUTOR_ROW_ASSET } from '../src/services/mmRewardsProgram.ts'
 
 // The one read of the claimable-incentive snapshot every current surface shares: the
 // staleness gate, the self-pinned generation and the stored-row shape.
@@ -37,7 +38,7 @@ describe('loadMmIncentives', () => {
     const snap = await loadMmIncentives(c as never, [H160.toUpperCase().replace('0X', '0x'), H160])
     expect(snap.asOfBlock).toBe(15_000_000)
     expect(snap.rewards).toEqual([{
-      accountId: FORM, holder: H160, marketKey: 'core', rewardAssetId: 69, rewardAddress: GDOT,
+      source: 'controller', accountId: FORM, holder: H160, marketKey: 'core', rewardAssetId: 69, rewardAddress: GDOT,
       claimable: 100n, model: 100n, accrued: 60n, reconciled: true, belowExistentialDeposit: false,
       legs: [{ assetAddress: A690, scaledBalance: 5n, userIndex: 1n, assetIndex: 9n, pending: 40n }],
     }])
@@ -83,17 +84,35 @@ describe('claims after the snapshot', () => {
     const c = client([{ snapshot_id: 's1', block_height: 15_000_001, age_seconds: 30 }], [
       stored({}),
       stored({ reward_asset_id: 43, reward_address: PRIME, claimable_s: '50' }),
-    ], [{ u: H160, reward: GDOT, amount_s: '30' }, { u: H160, reward: PRIME, amount_s: '80' }])
+    ], [{ src: 'controller', u: H160, reward: GDOT, amount_s: '30' }, { src: 'controller', u: H160, reward: PRIME, amount_s: '80' }])
     const snap = await loadMmIncentives(c as never, [H160])
     expect(snap.rewards.map(r => [r.rewardAssetId, r.claimable])).toEqual([[69, 70n], [43, 0n]])
     const read = c.seen.find(s => s.query.includes('-- mm:incentive-post-snapshot-claims'))!
     expect(read.params).toEqual({ holders: [H160], block: 15_000_000 })
     expect(read.query).toContain('GROUP BY u, reward, block_height, event_index')
+    expect(read.query).toContain('FROM price_data.mm_distributor_claims')
+  })
+
+  it('reads a distributor row as a reward of its own, reduced only by the distributor\'s claims', async () => {
+    const PRIME = '0x000000000000000000000000000000010000002b'
+    const c = client([{ snapshot_id: 's1', block_height: 15_000_001, age_seconds: 30 }], [
+      stored({ reward_asset_id: 43, reward_address: PRIME, claimable_s: '50', model_s: '50', accrued_s: '50', pending_s: '0' }),
+      stored({ reward_asset_id: 43, reward_address: PRIME, asset_address: DISTRIBUTOR_ROW_ASSET, claimable_s: '200', model_s: '200', accrued_s: '0', pending_s: '0', below_ed: 0 }),
+    ], [{ src: 'controller', u: H160, reward: PRIME, amount_s: '20' }, { src: 'distributor', u: H160, reward: PRIME, amount_s: '150' }])
+    const snap = await loadMmIncentives(c as never, [H160])
+    expect(snap.rewards.map(r => [r.source, r.rewardAssetId, r.claimable, r.legs.length])).toEqual([['controller', 43, 30n, 0], ['distributor', 43, 50n, 0]])
+  })
+
+  it('counts the distributor rows in the directory\'s SQL against the distributor\'s own claims', () => {
+    const sql = mmCountedIncentiveRowsSql("'s1'")
+    expect(sql).toContain("startsWith(asset_address, 'distributor:')")
+    expect(sql).toContain('c.src = i.src')
+    expect(sql).toContain('FROM price_data.mm_distributor_claims')
   })
 
   it('takes a split pair\'s claim across its markets in order and clears the sub-ED flag at zero', () => {
-    const base = { accountId: FORM, holder: H160, rewardAssetId: 69, rewardAddress: GDOT, model: 0n, accrued: 0n, reconciled: true, belowExistentialDeposit: true, legs: [] }
-    const out = withPostSnapshotClaims([{ ...base, marketKey: 'core', claimable: 10n }, { ...base, marketKey: 'bil', claimable: 10n }], new Map([[`${H160}|${GDOT}`, 15n]]))
+    const base = { source: 'controller' as const, accountId: FORM, holder: H160, rewardAssetId: 69, rewardAddress: GDOT, model: 0n, accrued: 0n, reconciled: true, belowExistentialDeposit: true, legs: [] }
+    const out = withPostSnapshotClaims([{ ...base, marketKey: 'core', claimable: 10n }, { ...base, marketKey: 'bil', claimable: 10n }], new Map([[postSnapshotClaimKey('controller', H160, GDOT), 15n]]))
     expect(out.map(r => [r.marketKey, r.claimable, r.belowExistentialDeposit])).toEqual([['core', 0n, false], ['bil', 5n, true]])
   })
 })

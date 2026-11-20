@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { DISTRIBUTOR_ROW_PREFIX } from './mmRewardsProgram.ts'
 
 // Read side of the claimable money-market incentive snapshot
 // (`mm_incentive_snapshots`, published by the `mm-incentives` refresher in
@@ -17,8 +18,16 @@ import type { ClickHouseClient } from '../db/client.ts'
 // always the chain's, less what the indexed RewardsClaimed say was claimed after
 // the snapshot block (so a claimed reward is never counted twice).
 //
-// A LEAF over the one table (plus its state pointer and the RewardsClaimed after
-// its block), so the Data API and the public API can import it.
+// Beside the controller's, the generation carries the main market's rewards
+// distributor (mmRewardsProgram.ts, the off-chain PRIME programme): one row per
+// account it owes, asset_address DISTRIBUTOR_ROW_PREFIX + the distributor, read as
+// a reward of its own with source 'distributor' — the tree's cumulative claimable
+// less the distributor's claimed() at the snapshot block, brought forward over the
+// distributor's Claimed events indexed after it. It has no log model, so it never
+// enters the controller's reconciliation.
+//
+// A LEAF over the one table (plus its state pointer and the claims after its
+// block), so the Data API and the public API can import it.
 
 export interface MmIncentiveLeg {
   /** The incentivized asset (an aToken contract). */
@@ -31,14 +40,18 @@ export interface MmIncentiveLeg {
   pending: bigint
 }
 
+/** Who pays a reward: the Aave RewardsController (claimAllRewards) or the main market's rewards distributor (a merkle claim). */
+export type MmIncentiveSource = 'controller' | 'distributor'
+
 export interface MmIncentiveReward {
+  source: MmIncentiveSource
   /** The holder's ETH-form AccountId32 — the form every money-market table keys on. */
   accountId: string
   holder: string
   marketKey: string
   rewardAssetId: number
   rewardAddress: string
-  /** The chain's getAllUserRewards for this reward at the snapshot block. */
+  /** What one claim would pay at the snapshot block: the controller's getAllUserRewards, or the distributor's owed amount. */
   claimable: bigint
   /** The log model's claimable (accrued + Σ pending). */
   model: bigint
@@ -112,12 +125,20 @@ export function mmIncentiveRewardsFromStored(rows: StoredRow[]): MmIncentiveRewa
   const byKey = new Map<string, MmIncentiveReward>()
   const markets = new Map<string, StoredRow[]>()
   const legs: StoredRow[] = []
+  const distributor: MmIncentiveReward[] = []
   for (const r of rows) {
     const pair = `${r.account_id}|${r.reward_asset_id}`
+    if (r.asset_address.startsWith(DISTRIBUTOR_ROW_PREFIX)) {
+      distributor.push({
+        source: 'distributor', accountId: r.account_id, holder: r.holder, marketKey: r.market_key, rewardAssetId: Number(r.reward_asset_id), rewardAddress: r.reward_address,
+        claimable: big(r.claimable_s), model: big(r.model_s), accrued: 0n, reconciled: true, belowExistentialDeposit: Number(r.below_ed) === 1, legs: [],
+      })
+      continue
+    }
     if (r.asset_address.startsWith(MM_MARKET_ROW_PREFIX)) { (markets.get(pair) ?? markets.set(pair, []).get(pair)!).push(r); continue }
     if (r.asset_address !== '') { legs.push(r); continue }
     byKey.set(pair, {
-      accountId: r.account_id, holder: r.holder, marketKey: r.market_key, rewardAssetId: Number(r.reward_asset_id), rewardAddress: r.reward_address,
+      source: 'controller', accountId: r.account_id, holder: r.holder, marketKey: r.market_key, rewardAssetId: Number(r.reward_asset_id), rewardAddress: r.reward_address,
       claimable: big(r.claimable_s), model: big(r.model_s), accrued: big(r.accrued_s),
       reconciled: Number(r.reconciled) === 1, belowExistentialDeposit: Number(r.below_ed) === 1, legs: [],
     })
@@ -137,23 +158,27 @@ export function mmIncentiveRewardsFromStored(rows: StoredRow[]): MmIncentiveRewa
       })
     }
   }
-  return out
+  return [...out, ...distributor]
 }
 
+/** The key withPostSnapshotClaims matches a reward's claims by: its payer, holder and reward address, lowercase. */
+export const postSnapshotClaimKey = (source: MmIncentiveSource, holder: string, reward: string): string => `${source}|${holder.toLowerCase()}|${reward.toLowerCase()}`
+
 /**
- * The rewards brought forward over the RewardsClaimed indexed after the snapshot
- * block: per (holder, reward) the claimed amount is subtracted, floored at zero —
- * across a split pair's markets in order — so a reward claimed since the snapshot
- * is not counted again beside the wallet balance it became (a claim pays at least
- * what the snapshot showed, so a claimed pair reads 0). Keyed
- * `${holder}|${rewardAddress}`, both lowercase. Nothing is added: accrual since the
- * snapshot waits for the next generation. Pure.
+ * The rewards brought forward over the claims indexed after the snapshot block
+ * (the controller's RewardsClaimed, the distributor's Claimed — each against its
+ * own payer's rewards): per (payer, holder, reward) the claimed amount is
+ * subtracted, floored at zero — across a split pair's markets in order — so a
+ * reward claimed since the snapshot is not counted again beside the wallet
+ * balance it became (a claim pays at least what the snapshot showed, so a claimed
+ * pair reads 0). Keyed by postSnapshotClaimKey. Nothing is added: accrual since
+ * the snapshot waits for the next generation. Pure.
  */
 export function withPostSnapshotClaims(rewards: MmIncentiveReward[], claimed: ReadonlyMap<string, bigint>): MmIncentiveReward[] {
   if (!claimed.size) return rewards
   const left = new Map(claimed)
   return rewards.map(r => {
-    const key = `${r.holder.toLowerCase()}|${r.rewardAddress.toLowerCase()}`
+    const key = postSnapshotClaimKey(r.source, r.holder, r.rewardAddress)
     const paid = left.get(key) ?? 0n
     if (paid <= 0n) return r
     const take = paid < r.claimable ? paid : r.claimable
@@ -163,50 +188,62 @@ export function withPostSnapshotClaims(rewards: MmIncentiveReward[], claimed: Re
   })
 }
 
-/** The RewardsClaimed after `block` per `${holder}|${reward}` (replay-deduplicated by event identity). */
+/**
+ * Both payers' claims as one relation (src, u, reward, claimed_raw), each replay-
+ * deduplicated by its event identity, over `where` — a predicate on user_address
+ * and block_height that both tables share.
+ */
+function claimsAfterSql(where: string): string {
+  return `SELECT src, u, reward, sum(amt) AS claimed_raw FROM (
+        SELECT 'controller' AS src, user_address AS u, reward_address AS reward, any(amount) AS amt
+        FROM price_data.mm_incentive_claims WHERE ${where}
+        GROUP BY u, reward, block_height, event_index
+        UNION ALL
+        SELECT 'distributor' AS src, user_address AS u, reward_address AS reward, any(amount) AS amt
+        FROM price_data.mm_distributor_claims WHERE ${where}
+        GROUP BY u, reward, block_height, event_index
+      ) GROUP BY src, u, reward`
+}
+
+/** Both payers' claims after `block` per postSnapshotClaimKey. */
 async function loadPostSnapshotClaims(client: ClickHouseClient, holders: string[], block: number): Promise<Map<string, bigint>> {
   const out = new Map<string, bigint>()
   if (!holders.length) return out
   const res = await client.query({
     query: `-- mm:incentive-post-snapshot-claims
-      SELECT u, reward, toString(sum(amount)) AS amount_s FROM (
-        SELECT user_address AS u, reward_address AS reward, any(amount) AS amount
-        FROM price_data.mm_incentive_claims
-        WHERE user_address IN {holders:Array(String)} AND block_height > {block:UInt32}
-        GROUP BY u, reward, block_height, event_index
-      ) GROUP BY u, reward`,
+      SELECT src, u, reward, toString(claimed_raw) AS amount_s FROM (
+        ${claimsAfterSql('user_address IN {holders:Array(String)} AND block_height > {block:UInt32}')}
+      )`,
     query_params: { holders, block },
     format: 'JSONEachRow',
     clickhouse_settings: { log_comment: 'mm:incentive-post-snapshot-claims' },
   })
-  for (const r of await res.json<{ u?: string; reward?: string; amount_s?: string }>()) {
-    if (typeof r.u !== 'string' || typeof r.reward !== 'string') continue
-    out.set(`${r.u.toLowerCase()}|${r.reward.toLowerCase()}`, big(r.amount_s))
+  for (const r of await res.json<{ src?: string; u?: string; reward?: string; amount_s?: string }>()) {
+    if (typeof r.u !== 'string' || typeof r.reward !== 'string' || (r.src !== 'controller' && r.src !== 'distributor')) continue
+    out.set(postSnapshotClaimKey(r.src, r.u, r.reward), big(r.amount_s))
   }
   return out
 }
 
 /**
  * SQL for readers that aggregate the snapshot in ClickHouse (the accounts
- * directory): one row per (holder, reward) pair total of `generationSql`'s
- * generation — `account_id` (the holder's ETH-form id), `reward_asset_id` and
- * `counted_raw`, the chain's claimable less the RewardsClaimed indexed after the
- * snapshot block, floored at zero: withPostSnapshotClaims restated once for SQL.
+ * directory): one row per payer and (holder, reward) total of `generationSql`'s
+ * generation — the controller's pair total and the distributor's row, so a holder
+ * owed one reward by both has two rows — with `account_id` (the holder's ETH-form
+ * id), `reward_asset_id` and `counted_raw`, the claimable less its payer's claims
+ * indexed after the snapshot block, floored at zero: withPostSnapshotClaims
+ * restated once for SQL.
  */
 export function mmCountedIncentiveRowsSql(generationSql: string): string {
-  const rows = `SELECT * FROM price_data.mm_incentive_snapshots WHERE snapshot_id = ${generationSql} AND asset_address = ''`
+  const rows = `SELECT *, if(asset_address = '', 'controller', 'distributor') AS src FROM price_data.mm_incentive_snapshots
+    WHERE snapshot_id = ${generationSql} AND (asset_address = '' OR startsWith(asset_address, '${DISTRIBUTOR_ROW_PREFIX}'))`
   return `SELECT i.account_id AS account_id, i.reward_asset_id AS reward_asset_id,
-      toUInt256(greatest(toInt256(i.claimable_raw) - toInt256(ifNull(c.claimed, 0)), toInt256(0))) AS counted_raw
+      toUInt256(greatest(toInt256(i.claimable_raw) - toInt256(ifNull(c.claimed_raw, 0)), toInt256(0))) AS counted_raw
     FROM (${rows}) i
     LEFT JOIN (
-      SELECT u, reward, sum(amount) AS claimed FROM (
-        SELECT user_address AS u, reward_address AS reward, any(amount) AS amount
-        FROM price_data.mm_incentive_claims
-        WHERE user_address IN (SELECT holder FROM (${rows}))
-          AND block_height > (SELECT max(snapshot_block) FROM (${rows}))
-        GROUP BY u, reward, block_height, event_index
-      ) GROUP BY u, reward
-    ) c ON c.u = i.holder AND c.reward = i.reward_address`
+      ${claimsAfterSql(`user_address IN (SELECT holder FROM (${rows}))
+          AND block_height > (SELECT max(snapshot_block) FROM (${rows}))`)}
+    ) c ON c.src = i.src AND c.u = i.holder AND c.reward = i.reward_address`
 }
 
 /**
