@@ -296,7 +296,7 @@ export function Account({ address }: { address: string }) {
                 )}
 
                 {activeView === 'borrow' && (
-                  <BorrowTab areas={[{ address: canonicalAddress ?? address, markets: mmList, defisimAddress: data.evmAddress ?? explicitEvmBinding ?? data.accountId }]} />
+                  <BorrowTab areas={[{ address: canonicalAddress ?? address, markets: mmList, defisimAddress: data.evmAddress ?? explicitEvmBinding ?? data.accountId, rewardsProgram: data.rewardsProgram }]} />
                 )}
 
                 {activeView === 'strategies' && (
