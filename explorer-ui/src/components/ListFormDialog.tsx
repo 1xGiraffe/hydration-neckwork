@@ -91,7 +91,7 @@ export function ListFormDialog({ open, onOpenChange, title, hint, initial, submi
               <label id="list-visibility-label">Visibility</label>
               <VisibilitySwitch value={visibility} onChange={setVisibility} disabled={pending} />
               <div className="muted" style={{ fontSize: 11 }}>
-                {visibility === 'public' ? 'Listed in Discover — anyone can subscribe.' : 'Only you (and anyone you invite) can see this list.'}
+                {visibility === 'public' ? 'Listed in Discover — anyone can subscribe.' : 'Only you, its subscribers and anyone you invite can see this list.'}
               </div>
             </div>
           </div>

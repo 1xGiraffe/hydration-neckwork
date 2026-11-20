@@ -35,7 +35,7 @@ import { resolveActivityTarget } from '../src/notifications/ruleTargets.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
 import {
   createList, createTag, ensurePersonalList, initUserListService, loadUserLists,
-  setTagMembers, subscribePublic, updateList,
+  revokeShare, setTagMembers, subscribePublic, updateList,
 } from '../src/services/userListService.ts'
 import { initTagService, loadTags } from '../src/services/tagService.ts'
 import type { ActivityRow } from '../src/services/explorerService.ts'
@@ -188,8 +188,10 @@ describe('tag target evaluation', () => {
     await runEvaluatorTick()
     expect(inbox()).toHaveLength(1)
 
-    // Turning the list private revokes the public subscription with it.
+    // Going private keeps the subscription; the curator then removing the
+    // subscriber takes the list out of the owner's sight.
     await updateList(CURATOR, shared.listId, { visibility: 'private' })
+    await revokeShare(CURATOR, shared.listId, OWNER)
     setHead(1_020)
     activityCalls.length = 0
     activityRows = [trade(1_015, 1)]

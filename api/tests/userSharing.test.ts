@@ -44,16 +44,21 @@ describe('sharing', () => {
     expect(subscriptionsFor(GUEST)).toHaveLength(0)
   })
 
-  it('going private revokes public-origin subscriptions but keeps invited ones', async () => {
+  it('going private keeps every subscriber, public-origin and invited alike', async () => {
     const lib = await createList(OWNER, 'Flip', '', 'public')
     await subscribePublic(GUEST, lib.listId)
     await inviteToList(OWNER, lib.listId, OTHER)
     await respondToInvite(OTHER, lib.listId, true)
+    const before = insertedRows(client, 'user_list_subscriptions').length
     await updateList(OWNER, lib.listId, { visibility: 'private' })
-    expect(canView(GUEST, lib.listId)).toBe(false)   // public-origin revoked
-    expect(canView(OTHER, lib.listId)).toBe(true)    // invite-origin survives
-    const rows = insertedRows(client, 'user_list_subscriptions')
-    expect(rows.some(r => r.account_id === GUEST && r.deleted === 1)).toBe(true)
+    expect(canView(GUEST, lib.listId)).toBe(true)
+    expect(canView(OTHER, lib.listId)).toBe(true)
+    expect(listSummary(getList(lib.listId)!).subscriberCount).toBe(2)
+    expect(subscriptionsFor(GUEST).map(s => s.listId)).toEqual([lib.listId])
+    expect(insertedRows(client, 'user_list_subscriptions')).toHaveLength(before)   // nothing revoked
+    // A private list still takes no new self-subscriptions.
+    await unsubscribe(GUEST, lib.listId)
+    await expect(subscribePublic(GUEST, lib.listId)).rejects.toMatchObject({ status: 403 })
   })
 
   it('reloads subscription state from persisted rows', async () => {
