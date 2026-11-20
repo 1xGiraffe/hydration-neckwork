@@ -146,6 +146,8 @@ export interface RewardsProgramMeta {
   marketKey: string
   distributor: string
   rewardAsset: ExplorerAsset
+  /** The programme's assets by its own names (HUSDC, HUSDT), in its file's order. */
+  assets: string[]
   /** An account whose HOLLAR debt is above this (USD, decimal string) earns nothing. */
   maxHollarDebtUsd: string
   /** ISO time the programme ends; null when it has none. */

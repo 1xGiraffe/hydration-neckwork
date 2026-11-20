@@ -604,6 +604,8 @@ export interface AccountRewardsProgram {
   marketKey: string
   distributor: string
   rewardAsset: AssetRef
+  /** The programme's assets by its own names (HUSDC, HUSDT); absent from older upstreams. */
+  assets?: string[]
   maxHollarDebtUsd: string
   endsAt: string | null
   asOf: string

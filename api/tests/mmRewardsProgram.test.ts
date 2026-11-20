@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   DISTRIBUTOR_ROW_ASSET, REWARDS_DISTRIBUTOR, accountStages, distributorOwed, hasProgramEnded, isProgramLatestStale, parseClaimsTree,
-  parseProgramLatest, programAccounts, programAprPctScaled, programReserveRates, readDistributorAt, setProgramLatestForTest, usdScaled,
+  parseProgramLatest, programAccounts, programAprPctScaled, programMetaFields, programReserveRates, readDistributorAt, setProgramLatestForTest, usdScaled,
   type ClaimsTree, type ProgramLatest,
 } from '../src/services/mmRewardsProgram.ts'
 import { buildDistributorRows } from '../src/services/mmIncentiveService.ts'
@@ -192,6 +192,11 @@ describe('accounts', () => {
       [B, 'not-earning', 'hollar_debt', '12.50'],
     ])
     expect(programAccounts([A], (HOUR + 7 * 3_600) * 1000)).toBeNull()
+  })
+
+  it('names the programme\'s assets for the not-earning notice', () => {
+    setProgramLatestForTest(parseProgramLatest(latestJson()))
+    expect(programMetaFields((HOUR + 3_600) * 1000)).toMatchObject({ assets: ['HUSDC', 'HUSDT'], maxHollarDebtUsd: '5.00', marketKey: 'core' })
   })
 })
 

@@ -22,6 +22,44 @@ export function reserveSupplyPct(y: ReserveYield | undefined): number | null {
   return sumPct([y.supplyApyPct, ...y.supplyIncentives.map(i => i.aprPct)])
 }
 
+/**
+ * The market's yields as an account the off-chain rewards programme does not pay
+ * meets them: every reserve without the programme's incentive (its supply
+ * composition's total less that part) — the Hydration app gives such an account
+ * no programme rate anywhere. A reserve whose programme part is unknown keeps an
+ * unknown total.
+ */
+export function yieldsWithoutProgramme(yields: Record<string, ReserveYield> | undefined): Record<string, ReserveYield> | undefined {
+  if (!yields) return yields
+  const out: Record<string, ReserveYield> = {}
+  for (const [id, y] of Object.entries(yields)) {
+    const programme = programmeSupplyPct(y)
+    const has = y.supplyIncentives.some(i => i.source === 'distributor') || !!y.supply?.components.some(c => c.incentiveSource === 'distributor')
+    if (!has) { out[id] = y; continue }
+    out[id] = {
+      ...y,
+      supplyIncentives: y.supplyIncentives.filter(i => i.source !== 'distributor'),
+      ...(y.supply ? { supply: {
+        ...y.supply,
+        components: y.supply.components.filter(c => c.incentiveSource !== 'distributor'),
+        totalAprPct: y.supply.totalAprPct == null || programme == null ? null : y.supply.totalAprPct - programme,
+      } } : {}),
+    }
+  }
+  return out
+}
+
+/** The text the Hydration app shows an account the programme does not pay (its RewardsProgramNotice); null for any other. */
+export function programmeNotice(rp: { rewardAsset: { symbol: string }; assets?: string[]; maxHollarDebtUsd: string; accounts: Array<{ status: string; reason: string | null }> } | undefined): string | null {
+  const out = rp?.accounts.find(a => a.status === 'not-earning')
+  if (!rp || !out) return null
+  const assets = rp.assets?.length ? rp.assets.join(', ') : 'HUSDC, HUSDT'
+  const limit = `$${Number(rp.maxHollarDebtUsd).toFixed(2)}`
+  return out.reason === 'hollar_debt'
+    ? `This account is not earning ${rp.rewardAsset.symbol} rewards on ${assets}. An account with more than ${limit} of HOLLAR debt earns nothing while it has that debt.`
+    : `This account is excluded from ${rp.rewardAsset.symbol} rewards on ${assets}.`
+}
+
 /** The off-chain rewards programme's part of a reserve's supply side (0 when it pays none there); null when unknown. */
 export function programmeSupplyPct(y: ReserveYield | undefined): number | null {
   if (!y) return 0

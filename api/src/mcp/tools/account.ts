@@ -385,10 +385,12 @@ function rewardsProgramLine(d: AddressDetail): string | null {
   const rp = d.rewardsProgram
   if (!rp?.accounts.length) return null
   const sym = rp.rewardAsset.symbol
+  const assets = rp.assets?.length ? rp.assets.join(', ') : 'the programme\'s assets'
   const parts = rp.accounts.map(a => {
+    // The Hydration app's own notice for an account the programme does not pay.
     const why = a.reason === 'hollar_debt'
-      ? ` (HOLLAR debt ${a.hollarDebtUsd != null ? `$${a.hollarDebtUsd}` : DASH} above the $${rp.maxHollarDebtUsd} limit)`
-      : a.reason ? ` (${a.reason})` : ''
+      ? ` — not earning ${sym} rewards on ${assets}: an account with more than $${rp.maxHollarDebtUsd} of HOLLAR debt earns nothing while it has that debt (its HOLLAR debt: ${a.hollarDebtUsd != null ? `$${a.hollarDebtUsd}` : DASH})`
+      : ` — excluded from ${sym} rewards on ${assets}${a.reason ? ` (${a.reason})` : ''}`
     const status = a.status === 'earning' ? 'earning' : a.status === 'not-earning' ? `NOT earning${why}` : 'not in the programme\'s snapshot'
     const stages = a.stages.map(st => `${formatAmount(st.amount, rp.rewardAsset.decimals, sym)}${st.amountUsd != null ? ` (${formatUsd(st.amountUsd)})` : ''} ${PROGRAMME_STAGE[st.stage]}${st.claimableAt ? `, claimable from ${st.claimableAt}` : ''}`)
     return `${a.holder}: ${status}${stages.length ? ` — ${stages.join('; ')}` : ''}`

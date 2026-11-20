@@ -334,7 +334,7 @@ export function programReserveRates(rewardPrice: (rewardAddress: string) => bigi
 
 /** The programme's own facts as of its fresh snapshot, for a wire to attach its reward asset to; null without one. */
 export function programMetaFields(nowMs = Date.now()): {
-  name: string; marketKey: string; distributor: string; rewardAddress: string; maxHollarDebtUsd: string; endsAt: string | null; asOf: string
+  name: string; marketKey: string; distributor: string; rewardAddress: string; assets: string[]; maxHollarDebtUsd: string; endsAt: string | null; asOf: string
 } | null {
   const f = currentProgramLatest(nowMs)
   if (!f) return null
@@ -343,6 +343,7 @@ export function programMetaFields(nowMs = Date.now()): {
     marketKey: REWARDS_PROGRAM_MARKET,
     distributor: REWARDS_DISTRIBUTOR,
     rewardAddress: f.reward.address,
+    assets: [...f.assets.keys()],
     maxHollarDebtUsd: f.program.maxHollarDebtUsd,
     endsAt: f.program.endsAt == null ? null : new Date(f.program.endsAt * 1000).toISOString(),
     asOf: new Date(f.asOfHour * 1000).toISOString(),
