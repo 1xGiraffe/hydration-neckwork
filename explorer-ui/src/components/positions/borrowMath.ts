@@ -22,15 +22,29 @@ export function reserveSupplyPct(y: ReserveYield | undefined): number | null {
   return sumPct([y.supplyApyPct, ...y.supplyIncentives.map(i => i.aprPct)])
 }
 
-/** The supply side split: the reserve's own rate, the underlying's accrual, the incentives. */
-export function supplyParts(y: ReserveYield | undefined): { base: number; accrual: number; incentives: number } | null {
+/** The off-chain rewards programme's part of a reserve's supply side (0 when it pays none there); null when unknown. */
+export function programmeSupplyPct(y: ReserveYield | undefined): number | null {
+  if (!y) return 0
+  return y.supply
+    ? sumPct(y.supply.components.filter(c => c.kind === 'mm-incentive' && c.incentiveSource === 'distributor').map(c => c.aprPct))
+    : sumPct(y.supplyIncentives.filter(i => i.source === 'distributor').map(i => i.aprPct))
+}
+
+/**
+ * The supply side split: the reserve's own rate, the underlying's accrual, the
+ * incentives. `withoutProgramme` leaves the off-chain programme's rate out — for an
+ * account the programme does not pay (HOLLAR debt above its limit).
+ */
+export function supplyParts(y: ReserveYield | undefined, opts: { withoutProgramme?: boolean } = {}): { base: number; accrual: number; incentives: number } | null {
   const total = reserveSupplyPct(y)
   if (!y || total == null || y.supplyApyPct == null) return null
   const incentives = y.supply
     ? sumPct(y.supply.components.filter(c => c.kind === 'mm-incentive').map(c => c.aprPct))
     : sumPct(y.supplyIncentives.map(i => i.aprPct))
   if (incentives == null) return null
-  return { base: y.supplyApyPct, accrual: total - y.supplyApyPct - incentives, incentives }
+  const programme = opts.withoutProgramme ? programmeSupplyPct(y) : 0
+  if (programme == null) return null
+  return { base: y.supplyApyPct, accrual: total - y.supplyApyPct - incentives, incentives: incentives - programme }
 }
 
 /** A reserve's borrow cost: variable APY less the incentives paid on its debt token; null when any term is unknown. */
@@ -59,7 +73,7 @@ export interface NetApyParts {
  * adds up to the headline. A held side with no rate or no USD makes the whole
  * figure unknown — a sum missing a term is not a smaller sum.
  */
-export function netApy(reserves: MmReserve[], yields: Record<string, ReserveYield> | undefined): NetApyParts {
+export function netApy(reserves: MmReserve[], yields: Record<string, ReserveYield> | undefined, opts: { withoutProgramme?: boolean } = {}): NetApyParts {
   const out: NetApyParts = { netPct: null, supplyBasePct: 0, supplyAccrualPct: 0, supplyIncentivePct: 0, borrowBasePct: 0, borrowIncentivePct: 0 }
   let supplied = 0, debt = 0, sBase = 0, sAcc = 0, sInc = 0, dBase = 0, dInc = 0
   let known = true
@@ -68,7 +82,7 @@ export function netApy(reserves: MmReserve[], yields: Record<string, ReserveYiel
     const y = yields?.[String(r.assetId)]
     if (rawHeld(r.supplied)) {
       held++
-      const parts = supplyParts(y)
+      const parts = supplyParts(y, opts)
       if (r.suppliedUsd == null || parts == null) { known = false; continue }
       supplied += r.suppliedUsd; sBase += r.suppliedUsd * parts.base; sAcc += r.suppliedUsd * parts.accrual; sInc += r.suppliedUsd * parts.incentives
     }

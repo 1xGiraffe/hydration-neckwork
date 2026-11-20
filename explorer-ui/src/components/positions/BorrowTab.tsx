@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { F, Amt, Usd, AssetIcon, AddrPill, healthFactorDisplay } from '../ui'
 import { Link, paths } from '../../router'
 import { useMoneyMarketEarned, useMoneyMarketHistories, useMoneyMarketHistory, useYields } from '../../hooks/usePositions'
-import type { AccountRef, MoneyMarketEarned, MoneyMarketEarnedMarket, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketPosition, ReserveYield } from '../../types'
+import type { AccountRef, AccountRewardsProgram, MoneyMarketEarned, MoneyMarketEarnedMarket, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketPosition, ReserveYield, RewardsProgramStage } from '../../types'
 import { YieldHover } from './YieldHover'
 import { useRevenueHollarColor } from '../../hooks/useRevenueHollarColor'
 import { yieldComponentRow, type YieldRow } from './yieldFormat'
@@ -21,6 +21,8 @@ export interface BorrowArea {
   markets: MoneyMarketPosition[]
   /** The address DefiSim opens this holder's markets for. */
   defisimAddress?: string
+  /** The off-chain PRIME programme as this holder meets it (the account detail's `rewardsProgram`). */
+  rewardsProgram?: AccountRewardsProgram
 }
 
 // Borrow tab: one card per (account × isolated market) — never blended across
@@ -134,8 +136,35 @@ function earnedBasis(e: MoneyMarketEarned | undefined, h: MoneyMarketHistory | u
   return ` All time since the money market's coverage start, block ${F.int(e.fromBlock)}${from},${asOf}; each hour at its own closing price.${cls}${partial}`
 }
 
-const UNCLAIMED_TITLE = 'Unclaimed: what claiming this market\'s lending incentives now would pay (the money market\'s own getAllUserRewards), at current prices. Already counted in the account value, never in Supplied.'
-const CLAIMED_TITLE = 'Claimed: every RewardsClaimed of this market\'s incentive programmes, each valued at its own event-time price.'
+const UNCLAIMED_TITLE = 'Unclaimed: what claiming this market\'s lending incentives now would pay (the money market\'s own getAllUserRewards, and for the PRIME rewards programme what its distributor owes under its accepted root), at current prices. Already counted in the account value, never in Supplied.'
+const CLAIMED_TITLE = 'Claimed: every RewardsClaimed of this market\'s incentive programmes and every claim from the PRIME programme\'s rewards distributor, each valued at its own event-time price.'
+
+const PROGRAMME_STAGE_LABEL: Record<RewardsProgramStage, string> = { pending: 'in timelock', closed: 'epoch closed', accruing: 'accruing (est.)' }
+
+/**
+ * The off-chain PRIME programme on the main market's card: whether the holder
+ * earns and what it has earned that is not claimable yet (in no value — it moves
+ * into Unclaimed once its root is accepted on the distributor).
+ */
+function ProgrammeStat({ rp }: { rp: AccountRewardsProgram }) {
+  const notEarning = rp.accounts.filter(a => a.status === 'not-earning')
+  const stages = rp.accounts.flatMap(a => a.stages)
+  const sym = rp.rewardAsset.symbol
+  const ends = rp.endsAt ? ` It ends ${rp.endsAt.slice(0, 10)}.` : ''
+  const title = `${rp.name}: ${sym} for HUSDC/HUSDT suppliers, paid by the rewards distributor (${rp.distributor}) in daily epochs — an epoch's amounts become claimable once its root passes the distributor's timelock and is accepted. An account with HOLLAR debt above $${rp.maxHollarDebtUsd} earns nothing.${ends} Snapshot of ${rp.asOf.slice(0, 16).replace('T', ' ')} UTC.`
+  return (
+    <Stat k={`${sym} programme`} title={title} className="bw-kpi-programme">
+      {notEarning.length
+        ? <span className="bw-unpriced" title={notEarning.map(a => `${a.holder}: ${a.reason === 'hollar_debt' ? `HOLLAR debt $${a.hollarDebtUsd ?? '?'} above $${rp.maxHollarDebtUsd}` : a.reason ?? 'not earning'}`).join('; ')}>not earning</span>
+        : rp.accounts.some(a => a.status === 'earning') ? <span>earning</span> : <span className="muted">not listed</span>}
+      {stages.map((st, i) => (
+        <span key={`${st.stage}-${i}`} className="bw-inc-part" title={st.claimableAt ? `Claimable from ${st.claimableAt.slice(0, 16).replace('T', ' ')} UTC` : undefined}>
+          {' · '}<span className="bw-inc-k">{PROGRAMME_STAGE_LABEL[st.stage]}</span>{st.amountUsd != null ? <Usd v={st.amountUsd} /> : <><Amt raw={st.amount} dec={rp.rewardAsset.decimals} /> {sym}</>}
+        </span>
+      ))}
+    </Stat>
+  )
+}
 
 function currentLtvPct(mm: MoneyMarketPosition): number {
   const collateral = Number(mm.totalCollateralBase)
@@ -232,7 +261,8 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
       </header>
       <div className="mm-card bw-body">
         {mm && <BorrowRiskBar mm={mm} />}
-        <BorrowKpis mm={mm} yields={yields} yieldsLoading={yieldsLoading} hist={hist} earned={earned} />
+        <BorrowKpis mm={mm} yields={yields} yieldsLoading={yieldsLoading} hist={hist} earned={earned}
+          programme={area.rewardsProgram?.marketKey === spec.marketKey ? area.rewardsProgram : undefined} />
         <DisclosureRule open={open} onToggle={() => setOpen(o => !o)} controls={detailsId} meta={open ? undefined : detailsMeta(spec, hist)}>
           {open ? 'Hide' : 'Show'} {area.address ? 'details & history' : 'reserves'}
         </DisclosureRule>
@@ -304,7 +334,7 @@ function NetEarnedValue({ e }: { e: EarnedState }) {
   </>
 }
 
-function BorrowKpis({ mm, yields, yieldsLoading, hist, earned }: { mm: MoneyMarketPosition | null; yields: Record<string, ReserveYield> | undefined; yieldsLoading: boolean; hist: HistState; earned: EarnedState }) {
+function BorrowKpis({ mm, yields, yieldsLoading, hist, earned, programme }: { mm: MoneyMarketPosition | null; yields: Record<string, ReserveYield> | undefined; yieldsLoading: boolean; hist: HistState; earned: EarnedState; programme?: AccountRewardsProgram }) {
   const claimed = claimedIncentivesUsd(hist.market)
   const rewards = (mm?.unclaimedRewards ?? []).filter(r => rawHeld(r.claimable))
   const pricedRewards = rewards.filter(r => r.claimableUsd != null)
@@ -312,7 +342,10 @@ function BorrowKpis({ mm, yields, yieldsLoading, hist, earned }: { mm: MoneyMark
   const basis = earnedBasis(earned.data, hist.data)
   const supplyUsd = mm ? Number(mm.totalSuppliedBase ?? mm.totalCollateralBase) / 1e8 : null
   const debtUsd = mm ? Number(mm.totalDebtBase) / 1e8 : null
-  const apy = mm ? netApy(mm.reserves ?? [], yields) : null
+  // The programme pays nobody with HOLLAR debt above its limit: such a holder's net
+  // APY leaves its rate out (one holder per card here, so any not-earning entry is it).
+  const withoutProgramme = !!programme?.accounts.some(a => a.status === 'not-earning')
+  const apy = mm ? netApy(mm.reserves ?? [], yields, { withoutProgramme }) : null
   const apyRows: YieldRow[] = apy && apy.netPct != null ? [
     { key: 'sb', label: 'Supply APY', pct: apy.supplyBasePct },
     ...(apy.supplyAccrualPct ? [{ key: 'sa', label: 'Token yield', note: 'accruing collateral', pct: apy.supplyAccrualPct }] : []),
@@ -326,13 +359,14 @@ function BorrowKpis({ mm, yields, yieldsLoading, hist, earned }: { mm: MoneyMark
         <Stat k="Supplied"><Usd v={supplyUsd} /></Stat>
         <Stat k="Borrowed">{debtUsd ? <Usd v={debtUsd} /> : '—'}</Stat>
         <Stat k="Net"><Usd v={supplyUsd! - debtUsd!} /></Stat>
-        <Stat k="Net APY" title="Current rates on current balances, as the Hydration UI states it: Σ supplied × (supply APY + the supplied token's own yield + incentives) − Σ borrowed × (borrow APY − incentives), over net. Unknown when any held reserve lacks a rate or price.">
+        <Stat k="Net APY" title={`Current rates on current balances, as the Hydration UI states it: Σ supplied × (supply APY + the supplied token's own yield + incentives) − Σ borrowed × (borrow APY − incentives), over net. Unknown when any held reserve lacks a rate or price.${withoutProgramme ? ' The PRIME rewards programme\'s rate is left out: it pays nothing to an account with HOLLAR debt above its limit.' : ''}`}>
           {yieldsLoading ? <span className="muted">…</span>
             : <YieldHover total={apy?.netPct ?? null} rows={apyRows} title="Net APY on equity"
                 note="Each part is weighted by the reserve's current USD and divided by net (supplied − borrowed)." />}
         </Stat>
       </>}
       <Stat k="Net earned" title={EARNED_TITLE + basis} className="bw-kpi-earned"><NetEarnedValue e={earned} /></Stat>
+      {programme && <ProgrammeStat rp={programme} />}
       <Stat k="Incentives" title={`${CLAIMED_TITLE} ${UNCLAIMED_TITLE}`} className="bw-kpi-inc">
         <span className="bw-inc">
           <span className="bw-inc-part"><span className="bw-inc-k">claimed</span>{pending(hist) ?? (claimed ? <><Usd v={claimed.usd} />{claimed.unpriced > 0 && <span className="bw-unpriced" title={`${claimed.unpriced} claim${claimed.unpriced === 1 ? '' : 's'} without a price left out`}> +{claimed.unpriced}?</span>}</> : '—')}</span>

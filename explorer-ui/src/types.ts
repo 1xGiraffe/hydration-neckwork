@@ -616,7 +616,25 @@ export interface FarmRewardsSummary {
 // (`moneyMarketRewards` on the account/tag detail, `unclaimedRewards` per market):
 // the chain's own getAllUserRewards. Like farm rewards, already INSIDE
 // portfolioUsd and never inside a market's collateral — the UI states the share.
-export interface MoneyMarketRewardUi { marketKey: string; asset: AssetRef; claimable: string; claimableUsd: number | null; belowExistentialDeposit?: boolean }
+// `source: 'distributor'` is the main market's off-chain PRIME programme, paid by its
+// rewards distributor (its accepted root's amount less what it has paid); absent or
+// 'controller' is the RewardsController.
+export interface MoneyMarketRewardUi { marketKey: string; asset: AssetRef; claimable: string; claimableUsd: number | null; belowExistentialDeposit?: boolean; source?: 'controller' | 'distributor' }
+
+// The off-chain PRIME programme as an account's EVM holders meet it (GET /explorer/address
+// `rewardsProgram`): eligibility in its newest hourly snapshot and what is earned but not
+// claimable yet — under a root in the distributor's timelock, under the closed epoch's root,
+// and the open epoch's estimate. In no value. Absent from older APIs.
+export type RewardsProgramStage = 'pending' | 'closed' | 'accruing'
+export interface AccountRewardsProgram extends RewardsProgramMeta {
+  accounts: Array<{
+    holder: string
+    status: 'earning' | 'not-earning' | 'not-listed'
+    reason: string | null
+    hollarDebtUsd: string | null
+    stages: Array<{ stage: RewardsProgramStage; amount: string; amountUsd: number | null; claimableAt: string | null }>
+  }>
+}
 export interface MoneyMarketRewardsSummary { asOfBlock: number; totalUsd: number; items?: MoneyMarketRewardUi[] }
 // A DCA order's price limit per trade, on one axis whatever its kind or
 // direction: `price` is the most it will pay for a unit of what it buys (assetIn
@@ -805,6 +823,7 @@ export interface AddressDetail {
   // Unclaimed rewards, already inside `portfolioUsd`; absent when their snapshot is stale.
   farmRewards?: FarmRewardsSummary
   moneyMarketRewards?: MoneyMarketRewardsSummary
+  rewardsProgram?: AccountRewardsProgram
 }
 
 export interface AssetBalancePoint { ts: string; blockHeight: number; balance: number }
@@ -3062,14 +3081,16 @@ export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' |
 // Kamino), else the token's on-chain redemption-rate growth over 180 days; stHDX's
 // is its staking exchange rate's growth, the base APR /v1/staking/gigahdx/apr publishes ('gigahdx-rate').
 export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain' | 'gigahdx-rate'
-export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: AssetRef; weightPct?: number; source?: TokenYieldSource }
+// `incentiveSource: 'distributor'` marks an 'mm-incentive' paid by the main market's
+// off-chain rewards programme — its rate for an ELIGIBLE supplier (ExplorerYields.rewardsProgram).
+export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: AssetRef; weightPct?: number; source?: TokenYieldSource; incentiveSource?: 'distributor' }
 // A farm's state: `active` inside its planned schedule (the pallet's rate);
 // `past-end` past it, still paying from its pot (the rate it paid over 30 days);
 // `ended` its pot is empty, 0 % until a top-up. Absent from older APIs.
 export type FarmRateState = 'active' | 'past-end' | 'ended'
 export interface FarmYield { globalFarmId: number; yieldFarmId: number; rewardAsset: AssetRef; aprPct: number | null; state?: FarmRateState }
 export interface PoolYield { totalAprPct: number | null; components: YieldComponent[]; farms: FarmYield[] }
-export interface ReserveIncentiveYield { rewardAsset: AssetRef; aprPct: number | null }
+export interface ReserveIncentiveYield { rewardAsset: AssetRef; aprPct: number | null; source?: 'distributor' }
 export interface ReserveYield {
   supplyApyPct: number | null
   borrowApyPct: number | null
@@ -3088,6 +3109,18 @@ export interface ExplorerYields {
   moneyMarket: Record<string, Record<string, ReserveYield>>
   /** Stableswap share id → the aToken minted over it (GDOT over 2-Pool-GDOT): a pool surface rates such a pool as that aToken's supply yield. Absent from older APIs. */
   shareWrappers?: Record<string, LpShareWrapper>
+  /** The off-chain rewards programme behind every distributor incentive; absent without a fresh snapshot or from older APIs. */
+  rewardsProgram?: RewardsProgramMeta
+}
+export interface RewardsProgramMeta {
+  name: string
+  marketKey: string
+  distributor: string
+  rewardAsset: AssetRef
+  /** An account whose HOLLAR debt is above this (USD) earns nothing. */
+  maxHollarDebtUsd: string
+  endsAt: string | null
+  asOf: string
 }
 
 // GET …/order-history — finished DCA schedules, DCA intents and limit orders.

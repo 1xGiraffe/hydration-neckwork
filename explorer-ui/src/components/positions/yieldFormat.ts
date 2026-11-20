@@ -65,7 +65,8 @@ export function yieldComponentRow(c: YieldComponent, i: number, ctx: YieldRowCon
   const source = c.kind === 'token-yield' && c.source ? TOKEN_YIELD_SOURCE[c.source] : undefined
   const hdxOwn = c.kind === 'omnipool-fee' && ctx.omnipoolAsset?.assetId === 0 ? 'HDX\'s own fees · the Hydration app shows 0%' : undefined
   const ownSupply = c.kind === 'mm-supply' && ctx.ownSupply && ctx.omnipoolAsset && !share ? `${ctx.omnipoolAsset.symbol}'s own lending yield · not in the Hydration app` : undefined
-  const note = [share, source, hdxOwn, ownSupply].filter(Boolean).join(' · ') || undefined
+  const programme = c.kind === 'mm-incentive' && c.incentiveSource === 'distributor' ? 'rewards programme · eligible suppliers' : undefined
+  const note = [share, source, hdxOwn, ownSupply, programme].filter(Boolean).join(' · ') || undefined
   const label = weighted || c.kind === 'mm-incentive'
     ? `${YIELD_LABELS[c.kind]}${c.asset ? ` · ${c.asset.symbol}` : ''}`
     : YIELD_LABELS[c.kind]

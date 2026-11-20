@@ -76,6 +76,22 @@ describe('netApy', () => {
     expect(r.supplyIncentivePct).toBeCloseTo(3)
     expect(netApy(reserves, { ...y, 43: ry({ ...y[43], supply: { ...supply, totalAprPct: null } }) }).netPct).toBeNull()
   })
+  // The off-chain PRIME programme pays nobody with HOLLAR debt above its limit:
+  // such an account's net APY leaves its rate out, and nothing else.
+  it('leaves the rewards programme\'s rate out for an account it does not pay', () => {
+    const supply = { totalAprPct: 10, farms: [], components: [
+      { kind: 'mm-supply' as const, aprPct: 4 },
+      { kind: 'mm-incentive' as const, aprPct: 2, asset: HDX },
+      { kind: 'mm-incentive' as const, aprPct: 4, asset: HDX, incentiveSource: 'distributor' as const },
+    ] }
+    const y = { 43: ry({ supplyApyPct: 4, supplyIncentives: [{ rewardAsset: HDX, aprPct: 2 }, { rewardAsset: HDX, aprPct: 4, source: 'distributor' as const }], supply }), 1000: ry({ borrowApyPct: 8 }) }
+    // Earning: (30k × 10% − 10k × 8%) / 20k = 11%; not: (30k × 6% − 800) / 20k = 5%.
+    expect(netApy(reserves, y).netPct).toBeCloseTo(11)
+    const r = netApy(reserves, y, { withoutProgramme: true })
+    expect(r.netPct).toBeCloseTo(5)
+    expect(r.supplyIncentivePct).toBeCloseTo(3)
+    expect(r.supplyAccrualPct).toBeCloseTo(0)
+  })
   it('ignores reserves the position does not hold', () => {
     const r = netApy([...reserves, reserve({ assetId: 99 })], { 43: ry({ supplyApyPct: 4 }), 1000: ry({ borrowApyPct: 8 }) })
     expect(r.netPct).toBeCloseTo((1200 - 800) / 20_000 * 100)
