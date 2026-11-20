@@ -54,14 +54,15 @@ export const zMmRewardPoint = z.object({
 
 /** One claimable lending-incentive amount now (current positions), per reward asset, under its market. */
 export const zMmRewardCurrent = z.object({
+  source: z.enum(['controller', 'distributor']).describe('Who pays it: `controller` — the Aave RewardsController (claimAllRewards); `distributor` — the main market\'s rewards distributor (the off-chain PRIME programme for HUSDC/HUSDT suppliers that replaced the controller\'s PRIME programmes on 2026-11-20; a merkle claim against its live root). One reward asset can be owed by both, as two entries.'),
   assetId: zAssetId.describe('The reward asset; `amount` is in its raw units.'),
-  amount: z.string().describe('The chain\'s own RewardsController.getAllUserRewards at `rewardsAsOfBlock` over this market\'s incentivized aTokens: what one claimAllRewards would pay then (stored accrual plus every incentivized aToken\'s pending accrual to that block), less any RewardsClaimed indexed since (floored at zero).'),
+  amount: z.string().describe('What one claim would pay at `rewardsAsOfBlock`, less any claim indexed since (floored at zero). `controller`: the chain\'s own RewardsController.getAllUserRewards over this market\'s incentivized aTokens (stored accrual plus every incentivized aToken\'s pending accrual to that block). `distributor`: the cumulative claimable under the distributor\'s live root less its claimed(account, reward) at that block — only epochs whose root is accepted; what accrues since is not claimable yet and not here.'),
   valueUsd: z.string().nullable().describe('At the current price, 2 decimals; null when unpriced (then in no total).'),
-  reconciled: z.boolean().describe('Whether the indexed log arithmetic (the chain\'s accrual at B0 plus every Accrued less every RewardsClaimed, plus scaled balance × index difference per aToken) reproduces `amount` to the unit. false means an indexed log or balance gap for this account: the amount is still the chain\'s, but /money-market/history cannot state this reward and counts it in `rewardsIncomplete`.'),
-  belowExistentialDeposit: z.boolean().describe('0 < amount < the reward asset\'s existential deposit: a claimAllRewards including it reverts until the account holds that deposit of the asset or the amount grows past it. It is owed, not forfeited, and still counted.'),
+  reconciled: z.boolean().describe('Always true for `distributor` (no log model behind it). Otherwise: whether the indexed log arithmetic (the chain\'s accrual at B0 plus every Accrued less every RewardsClaimed, plus scaled balance × index difference per aToken) reproduces `amount` to the unit. false means an indexed log or balance gap for this account: the amount is still the chain\'s, but /money-market/history cannot state this reward and counts it in `rewardsIncomplete`.'),
+  belowExistentialDeposit: z.boolean().describe('0 < amount < the reward asset\'s existential deposit: a claim including it reverts until the account holds that deposit of the asset or the amount grows past it. It is owed, not forfeited, and still counted.'),
   legs: z.array(z.object({
     aTokenAddress: z.string().describe('The incentivized aToken contract.'),
     aTokenAssetId: zAssetId.nullable().describe('Its registry asset, when the registry lists one.'),
     pending: z.string().describe('The log arithmetic\'s pending accrual on this aToken (scaled balance × (programme index at `rewardsAsOfBlock` − the account\'s index) / 10^decimals), raw units of the reward. Informative: `amount` is the chain\'s total, and the stored accrual part is per reward, not per aToken.'),
-  })).describe('The incentivized aTokens the account holds, with the arithmetic\'s pending part of each.'),
+  })).describe('The incentivized aTokens the account holds, with the arithmetic\'s pending part of each; empty for `distributor`.'),
 })

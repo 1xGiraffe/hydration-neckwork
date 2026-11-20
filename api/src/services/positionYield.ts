@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { RAY, SECONDS_PER_YEAR as AAVE_SECONDS_PER_YEAR, rayMul } from './aaveMath.ts'
 import { cached, cachedSwr } from './cache.ts'
 import { externalTokenApys } from './externalTokenApy.ts'
+import { REWARDS_PROGRAM_MARKET, programMetaFields, programReserveRates } from './mmRewardsProgram.ts'
 import { gigahdxApr } from './gigahdxApr.ts'
 import {
   MM_MARKETS, SHARE_WRAPPER, assetDecimalsOrNull, assetDescriptor, assetIdFromMmAddress, currentPriceOf, displayDescriptor, isStableswapShareToken,
@@ -62,6 +63,14 @@ import { loadV3Registry, v3PoolStats } from './uniswapV3Service.ts'
 //    underlying's price. The controller distributes over the SCALED total, and a
 //    holder's share of it equals their share of the actual total, so the rate per
 //    unit of balance is the same either way.
+//  * The main market's off-chain rewards programme (mmRewardsProgram.ts — PRIME for
+//    HUSDC/HUSDT suppliers, paid by the rewards distributor since the controller's
+//    PRIME programmes there ended on 2026-11-20): budget per day × 365 × the reward's
+//    price over the USD value ELIGIBLE to share it, from the programme's latest
+//    snapshot — the Hydration UI's rate, stated for an eligible supplier (an account
+//    with HOLLAR debt above the programme's limit earns none; ExplorerYields.rewardsProgram
+//    names the limit). A supply incentive with `incentiveSource: 'distributor'`, beside
+//    any controller programme on the same reserve.
 //
 // Stableswap shares and aTokens carry what their holder economically earns through
 // them: a share earns its pool's fee and, for every leg that is a money-market
@@ -82,7 +91,9 @@ import { loadV3Registry, v3PoolStats } from './uniswapV3Service.ts'
 export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' | 'v3-fee' | 'mm-supply' | 'mm-incentive' | 'token-yield' | 'farm'
 /** Where a token-yield rate comes from: the Hydration UI's external sources, else the on-chain peg growth; stHDX's is its staking exchange rate's (gigahdxApr's base APR). */
 export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain' | 'gigahdx-rate'
-export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: ExplorerAsset; weightPct?: number; source?: TokenYieldSource }
+/** Who pays an 'mm-incentive' when it is not the RewardsController: the main market's rewards distributor (the off-chain programme). */
+export type IncentiveSource = 'distributor'
+export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: ExplorerAsset; weightPct?: number; source?: TokenYieldSource; incentiveSource?: IncentiveSource }
 export interface FarmYield {
   globalFarmId: number
   yieldFarmId: number
@@ -95,8 +106,9 @@ export interface PoolYield { totalAprPct: number | null; components: YieldCompon
 export interface ReserveYield {
   supplyApyPct: number | null
   borrowApyPct: number | null
-  supplyIncentives: { rewardAsset: ExplorerAsset; aprPct: number | null }[]
-  borrowIncentives: { rewardAsset: ExplorerAsset; aprPct: number | null }[]
+  /** Each programme paying suppliers; `source: 'distributor'` for the off-chain programme (rate for an eligible supplier). */
+  supplyIncentives: { rewardAsset: ExplorerAsset; aprPct: number | null; source?: IncentiveSource }[]
+  borrowIncentives: { rewardAsset: ExplorerAsset; aprPct: number | null; source?: IncentiveSource }[]
   /**
    * Everything supplying this reserve earns, composed like a pool's yield: the
    * reserve's supply APY and incentives, plus what the underlying accrues by itself
@@ -122,6 +134,24 @@ export interface ExplorerYields {
    * an account's Stablepool row carries (LpPosition.wrapper).
    */
   shareWrappers: Record<string, ShareWrapperRef>
+  /**
+   * The off-chain rewards programme behind every `incentiveSource: 'distributor'`
+   * incentive, as of its newest snapshot; absent while there is no fresh one (then
+   * no reserve carries its rate).
+   */
+  rewardsProgram?: RewardsProgramMeta
+}
+export interface RewardsProgramMeta {
+  name: string
+  marketKey: string
+  distributor: string
+  rewardAsset: ExplorerAsset
+  /** An account whose HOLLAR debt is above this (USD, decimal string) earns nothing. */
+  maxHollarDebtUsd: string
+  /** ISO time the programme ends; null when it has none. */
+  endsAt: string | null
+  /** ISO start of the hour the snapshot describes. */
+  asOf: string
 }
 export interface ShareWrapperRef { asset: ExplorerAsset; marketKey: string; named: boolean }
 
@@ -271,7 +301,7 @@ function weighted(v: bigint | null, w: bigint | null): bigint | null {
 
 // ── composition ──
 
-interface Part { kind: YieldComponentKind; apr: bigint | null; assetId?: number; weight?: bigint | null; source?: TokenYieldSource }
+interface Part { kind: YieldComponentKind; apr: bigint | null; assetId?: number; weight?: bigint | null; source?: TokenYieldSource; incentiveSource?: IncentiveSource }
 
 const KIND_ORDER: Record<YieldComponentKind, number> = {
   'omnipool-fee': 0, 'stablepool-fee': 0, 'xyk-fee': 0, 'v3-fee': 0, 'mm-supply': 1, 'token-yield': 1, 'mm-incentive': 2, farm: 3,
@@ -296,6 +326,7 @@ export function assemblePoolYield(parts: Part[], farms: FarmYield[] = []): PoolY
     const c: YieldComponent = { kind: p.kind, aprPct: pctNumber(p.apr) }
     if (p.assetId != null) c.asset = displayDescriptor(p.assetId)
     if (p.source) c.source = p.source
+    if (p.incentiveSource) c.incentiveSource = p.incentiveSource
     if ((p.kind === 'mm-supply' || p.kind === 'token-yield') && p.weight != null) c.weightPct = pctNumber(divHalfUp(p.weight * 100n * PCT_UNIT, WEIGHT_UNIT)) as number
     return c
   })
@@ -312,8 +343,8 @@ interface MmReserve {
   debt: bigint | null
   supplyApy: bigint | null
   borrowApy: bigint | null
-  supplyIncentives: Array<{ rewardAssetId: number; apr: bigint | null }>
-  borrowIncentives: Array<{ rewardAssetId: number; apr: bigint | null }>
+  supplyIncentives: Array<{ rewardAssetId: number; apr: bigint | null; source?: IncentiveSource }>
+  borrowIncentives: Array<{ rewardAssetId: number; apr: bigint | null; source?: IncentiveSource }>
 }
 
 export interface YieldContext {
@@ -347,7 +378,7 @@ export function underlyingParts(assetId: number, weight: bigint | null, ctx: Yie
   const reserve = ctx.aTokenReserve.get(assetId)
   if (reserve) {
     out.push({ kind: 'mm-supply', apr: weighted(reserve.supplyApy, weight), assetId: reserve.underlyingId ?? undefined, weight })
-    for (const inc of reserve.supplyIncentives) out.push({ kind: 'mm-incentive', apr: weighted(inc.apr, weight), assetId: inc.rewardAssetId })
+    for (const inc of reserve.supplyIncentives) out.push({ kind: 'mm-incentive', apr: weighted(inc.apr, weight), assetId: inc.rewardAssetId, ...(inc.source ? { incentiveSource: inc.source } : {}) })
     if (reserve.underlyingId != null && reserve.underlyingId !== assetId) out.push(...underlyingParts(reserve.underlyingId, weight, ctx, depth + 1))
     return out
   }
@@ -561,6 +592,12 @@ async function loadMmReserves(c: ClickHouseClient, anchorSec: bigint, price: (id
     programmes.set(p.asset_address.toLowerCase(), list)
   }
 
+  // The off-chain programme's rates, by the reserve's underlying address (main market only).
+  const programme = programReserveRates(addr => {
+    const id = assetIdFromMmAddress(addr)
+    return id == null ? null : price(id)
+  })
+
   const out: MmReserve[] = []
   for (const m of mapRows) {
     if (!markets.has(m.market_key)) continue
@@ -578,6 +615,8 @@ async function loadMmReserves(c: ClickHouseClient, anchorSec: bigint, price: (id
         p.emission, assetDescriptor(p.rewardAssetId).decimals, price(p.rewardAssetId), total, tokenDecimals, tokenPrice),
     }))
     const aTokenAssetId = Number(m.atoken_asset_id)
+    const programmeRate = m.market_key === REWARDS_PROGRAM_MARKET ? programme.get(m.reserve_address.toLowerCase()) : undefined
+    const programmeReward = programmeRate ? assetIdFromMmAddress(programmeRate.rewardAddress) : null
     out.push({
       market: m.market_key,
       underlyingId,
@@ -588,7 +627,10 @@ async function loadMmReserves(c: ClickHouseClient, anchorSec: bigint, price: (id
       debt,
       supplyApy: r ? rayAprToApyPctScaled(BigInt(r.liquidity_rate || '0')) : null,
       borrowApy: r ? rayAprToApyPctScaled(BigInt(r.variable_borrow_rate || '0')) : null,
-      supplyIncentives: incentives(m.atoken, supplied),
+      supplyIncentives: [
+        ...incentives(m.atoken, supplied),
+        ...(programmeRate && programmeReward != null ? [{ rewardAssetId: programmeReward, apr: programmeRate.aprPct, source: 'distributor' as const }] : []),
+      ],
       borrowIncentives: incentives(m.vdebt, debt),
     })
   }
@@ -670,7 +712,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
   const moneyMarket: ExplorerYields['moneyMarket'] = {}
   for (const r of reserves) {
     if (r.underlyingId == null) continue
-    const incentives = (list: MmReserve['supplyIncentives']) => list.map(i => ({ rewardAsset: displayDescriptor(i.rewardAssetId), aprPct: pctNumber(i.apr) }))
+    const incentives = (list: MmReserve['supplyIncentives']) => list.map(i => ({ rewardAsset: displayDescriptor(i.rewardAssetId), aprPct: pctNumber(i.apr), ...(i.source ? { source: i.source } : {}) }))
     const entry = {
       supplyApyPct: pctNumber(r.supplyApy),
       borrowApyPct: pctNumber(r.borrowApy),
@@ -683,7 +725,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
         ? underlyingParts(r.aTokenAssetId, WEIGHT_UNIT, ctx)
         : [
           { kind: 'mm-supply', apr: r.supplyApy, assetId: r.underlyingId, weight: WEIGHT_UNIT },
-          ...r.supplyIncentives.map(inc => ({ kind: 'mm-incentive' as const, apr: inc.apr, assetId: inc.rewardAssetId })),
+          ...r.supplyIncentives.map(inc => ({ kind: 'mm-incentive' as const, apr: inc.apr, assetId: inc.rewardAssetId, ...(inc.source ? { incentiveSource: inc.source } : {}) })),
           ...underlyingParts(r.underlyingId, WEIGHT_UNIT, ctx),
         ]),
     }
@@ -784,10 +826,21 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
     uniswapV3[pool.address.toLowerCase()] = assemblePoolYield([{ kind: 'v3-fee', apr: lpFee == null || windowSec == null ? null : feeAprPctScaledSeconds(lpFee, tvl, windowSec) }])
   }))
 
+  const programme = rewardsProgramMeta()
   return {
     asOf: omni.asOf ?? iso(anchor.anchor), feeWindow: '30d', omnipool, stableswap, xyk, uniswapV3, moneyMarket,
     shareWrappers: shareWrapperRefs(Object.keys(SHARE_WRAPPER).map(Number)),
+    ...(programme ? { rewardsProgram: programme } : {}),
   }
+}
+
+/** The fresh programme snapshot as the wire's RewardsProgramMeta; null without one or when its reward is no registry asset. */
+export function rewardsProgramMeta(nowMs = Date.now()): RewardsProgramMeta | null {
+  const f = programMetaFields(nowMs)
+  const rewardAssetId = f ? assetIdFromMmAddress(f.rewardAddress) : null
+  if (!f || rewardAssetId == null) return null
+  const { rewardAddress: _reward, ...rest } = f
+  return { ...rest, rewardAsset: displayDescriptor(rewardAssetId) }
 }
 
 /** GET /explorer/yields: global and current; ten minutes fresh, served stale for half an hour while one rebuild runs. */

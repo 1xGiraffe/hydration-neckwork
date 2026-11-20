@@ -632,7 +632,8 @@ async function farmRewards(client: ClickHouseClient, forms: string[]): Promise<M
 /**
  * Claimable-now money-market incentives per stored form, in raw units of the reward
  * asset — the explorer's own read of the `mm-incentives` snapshot
- * (services/mmIncentiveSnapshot: the chain's getAllUserRewards per holder), so this
+ * (services/mmIncentiveSnapshot: the chain's getAllUserRewards per holder, and the
+ * rewards distributor's owed amount for the off-chain PRIME programme), so this
  * endpoint and the account page cannot value them two ways. Null when no snapshot
  * is published or it is older than MM_INCENTIVE_MAX_AGE_SECONDS. Incentives accrue
  * to an H160; they are keyed by its ETH-form AccountId32, the form the money-market

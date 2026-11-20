@@ -2,7 +2,8 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { priceAssetId, assetIdFromMmAddress } from './explorerAssets.ts'
 import { bucketPricerFrom, type CandleClose } from './lpHistory.ts'
 import { loadMmIncentiveProgrammeRows } from './mmIncentiveHistory.ts'
-import { mmPrimaryMarket } from './mmIncentiveSnapshot.ts'
+import { mmPrimaryMarket, type MmIncentiveSource } from './mmIncentiveSnapshot.ts'
+import { REWARDS_PROGRAM_MARKET } from './mmRewardsProgram.ts'
 import { tagged } from './queryTag.ts'
 import { PRICE_LOOKBACK_DAYS, scaledUsd } from './valuation.ts'
 
@@ -16,10 +17,16 @@ import { PRICE_LOOKBACK_DAYS, scaledUsd } from './valuation.ts'
 // market (mmPrimaryMarket over the markets whose aTokens the reward incentivizes). Every
 // programme today lies within one market, which makes the split exact.
 //
+// The main market's rewards distributor pays too (mmRewardsProgram.ts, the off-chain
+// PRIME programme): its Claimed(account, reward, amount) events
+// (price_data.mm_distributor_claims) are claims of the same kind, filed under the
+// programme's market.
+//
 // The holder set is the caller's (`moneyMarketIdentities(...).h160s`, the set every
 // incentive surface uses); user_address is stored as the lower-case H160.
 
 export interface MmIncentiveClaimRow {
+  source: MmIncentiveSource
   reward: string
   /** Unix seconds of the claim's block. */
   ts: number
@@ -45,14 +52,14 @@ export interface MmClaimedIncentive {
  */
 export function aggregateMmIncentiveClaims(
   rows: readonly MmIncentiveClaimRow[],
-  marketOfReward: (reward: string) => string,
+  marketOfReward: (reward: string, source: MmIncentiveSource) => string,
   priceOf: (rewardAssetId: number, amount: bigint, i: number) => bigint | null,
 ): MmClaimedIncentive[] {
   const out = new Map<string, MmClaimedIncentive>()
   rows.forEach((row, i) => {
     const rewardAssetId = assetIdFromMmAddress(row.reward)
     if (rewardAssetId == null || row.amount <= 0n) return
-    const marketKey = marketOfReward(row.reward)
+    const marketKey = marketOfReward(row.reward, row.source)
     const key = `${marketKey}|${rewardAssetId}`
     const acc = out.get(key) ?? out.set(key, { marketKey, rewardAssetId, amount: 0n, valueUsd: null, claims: 0, unpricedClaims: 0 }).get(key)!
     acc.amount += row.amount
@@ -82,15 +89,19 @@ export async function loadMmIncentiveClaims(
   if (!hs.length) return []
   const res = await client.query(tagged({
     query: `-- mm:incentive-claims-total
-            SELECT reward_address AS reward, toUInt32(toUnixTimestamp(block_timestamp)) AS ts, toString(amount) AS amount
+            SELECT 'controller' AS source, reward_address AS reward, toUInt32(toUnixTimestamp(block_timestamp)) AS ts, toString(amount) AS amount
             FROM price_data.mm_incentive_claims FINAL
+            WHERE user_address IN {hs:Array(String)}
+            UNION ALL
+            SELECT 'distributor' AS source, reward_address AS reward, toUInt32(toUnixTimestamp(block_timestamp)) AS ts, toString(amount) AS amount
+            FROM price_data.mm_distributor_claims FINAL
             WHERE user_address IN {hs:Array(String)}
             ORDER BY ts`,
     query_params: { hs },
     format: 'JSONEachRow',
   }))
-  const rows: MmIncentiveClaimRow[] = (await res.json<{ reward: string; ts: number; amount: string }>())
-    .map(r => ({ reward: r.reward.toLowerCase(), ts: Number(r.ts), amount: BigInt(r.amount) }))
+  const rows: MmIncentiveClaimRow[] = (await res.json<{ source: string; reward: string; ts: number; amount: string }>())
+    .map(r => ({ source: r.source === 'distributor' ? 'distributor' as const : 'controller' as const, reward: r.reward.toLowerCase(), ts: Number(r.ts), amount: BigInt(r.amount) }))
   if (!rows.length) return []
 
   const marketsOf = new Map<string, Set<string>>()
@@ -101,7 +112,8 @@ export async function loadMmIncentiveClaims(
     const reward = p.reward.toLowerCase()
     ;(marketsOf.get(reward) ?? marketsOf.set(reward, new Set()).get(reward)!).add(market)
   }
-  const marketOfReward = (reward: string) => mmPrimaryMarket([...(marketsOf.get(reward) ?? [])])
+  const marketOfReward = (reward: string, source: MmIncentiveSource) =>
+    source === 'distributor' ? REWARDS_PROGRAM_MARKET : mmPrimaryMarket([...(marketsOf.get(reward) ?? [])])
 
   const aliasIds = [...new Set(rows.map(r => assetIdFromMmAddress(r.reward)).filter((id): id is number => id != null).map(id => priceAssetId(id)))]
   const closes = new Map<number, CandleClose[]>()

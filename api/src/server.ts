@@ -78,6 +78,7 @@ import { initRevenueService } from './services/revenueService.ts'
 import { initHollarService } from './services/hollarService.ts'
 import { initPositionYield } from './services/positionYield.ts'
 import { initExternalTokenApy } from './services/externalTokenApy.ts'
+import { initMmRewardsProgram } from './services/mmRewardsProgram.ts'
 import { initIceService } from './services/iceService.ts'
 import { initJuicerService } from './services/juicerService.ts'
 import { initBilService } from './services/bilService.ts'
@@ -339,6 +340,8 @@ async function start() {
     initPositionYield(client)
     // Token APYs from the Hydration UI's sources, refreshed in the background.
     initExternalTokenApy()
+    // The main market's off-chain rewards programme (latest.json), refreshed in the background.
+    initMmRewardsProgram()
     initIceService(client)
     initOrderHistory(client)
     initLpRewardClaims(client)

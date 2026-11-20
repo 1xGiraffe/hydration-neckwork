@@ -5,6 +5,7 @@ import { assetDecimalsOrNull, assetIdFromMmAddress } from './explorerAssets.ts'
 import { readExistentialDeposits } from './lmRewardService.ts'
 import { loadMmReserveMap } from './moneyMarketHistory.ts'
 import { MM_MARKET_ROW_PREFIX, mmIncentiveAccountForm, mmPrimaryMarket } from './mmIncentiveSnapshot.ts'
+import { DISTRIBUTOR_ROW_ASSET, REWARDS_PROGRAM_MARKET, distributorOwed, readDistributorAt, type DistributorState } from './mmRewardsProgram.ts'
 import { pendingNodeApi } from './pendingHeadService.ts'
 import { queryTag } from './queryTag.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
@@ -46,6 +47,12 @@ import { loadIndexedHead as loadIndexedHeadShared, loadPinnedBlock as loadPinned
 //     programme asset, holder) per candidate;
 //  3. the reward assets' existential deposits (AssetRegistry.Assets at the block);
 //  4. persist a generation + pointer (checksum-skipped when nothing changed).
+//
+// The same cycle reads the main market's rewards distributor at the same block
+// (mmRewardsProgram.ts — the off-chain PRIME programme that replaced the
+// controller's on HUSDC/HUSDT): per account the live root's cumulative claimable
+// less the distributor's claimed(), published as rows of their own
+// (DISTRIBUTOR_ROW_ASSET) beside the controller's, with no log model to reconcile.
 //
 // Failure policy (the lm-rewards one): any failed read aborts the cycle and keeps
 // the previous generation; so does a missing or split anchor (the aToken anchor and
@@ -272,6 +279,28 @@ export function buildMmIncentiveRows(inp: MmIncentiveInputs): { rows: MmIncentiv
   return { rows, reconciledPairs, unreconciled }
 }
 
+/**
+ * The distributor's claimables as snapshot rows: one per account it owes (the
+ * tree's cumulative claimable less claimed), filed under the programme's market.
+ * There is no log model behind them, so model = claimable and reconciled holds by
+ * construction; the readers keep them out of the controller's reconciliation. Pure.
+ */
+export function buildDistributorRows(state: Pick<DistributorState, 'rowsTree' | 'claimed'>, block: number, eds: ReadonlyMap<number, bigint>): MmIncentiveSnapshotRow[] {
+  const tree = state.rowsTree
+  if (!tree) return []
+  const rewardAssetId = assetIdFromMmAddress(tree.reward)
+  if (rewardAssetId == null) {
+    console.warn(`[mm-incentives] distributor reward ${tree.reward} resolves to no registry asset; its claimables are left out`)
+    return []
+  }
+  const ed = eds.get(rewardAssetId)
+  return [...distributorOwed(tree, state.claimed)].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([holder, owed]) => ({
+    accountId: mmIncentiveAccountForm(holder), holder, rewardAssetId, rewardAddress: tree.reward, assetAddress: DISTRIBUTOR_ROW_ASSET,
+    marketKey: REWARDS_PROGRAM_MARKET, claimableRaw: owed, modelRaw: owed, accruedRaw: 0n, pendingRaw: 0n,
+    scaledBalance: 0n, userIndex: 0n, assetIndex: 0n, reconciled: true, belowEd: ed != null && owed < ed, snapshotBlock: block,
+  }))
+}
+
 // ───────────────────────── indexed reads ─────────────────────────
 
 async function select<T>(ch: ClickHouseClient, query: string, params: Record<string, unknown> = {}): Promise<T[]> {
@@ -440,6 +469,10 @@ export interface MmIncentiveCycle {
   /** Programme aTokens whose chain getAssetDecimals disagrees with the registry's decimals of their underlying. */
   decimalsMismatches: Array<{ asset: string; chain: number; registry: number }>
   rows: MmIncentiveSnapshotRow[]
+  /** How many of `rows` are the rewards distributor's. */
+  distributorRows: number
+  /** The distributor's live root at the block; null before its first. */
+  distributorRoot: string | null
   reconciledPairs: number
   unreconciled: Array<{ holder: string; reward: string; chain: string; model: string | null }>
 }
@@ -470,6 +503,7 @@ export interface MmIncentiveDeps {
   eds?: (hash: string, ids: number[]) => Promise<Map<number, bigint>>
   rpc?: RpcFn
   registryDecimals?: (assetId: number) => number | null
+  readDistributor?: (ethCall: EthCall, at: EthBlockRef, block: number) => Promise<Pick<DistributorState, 'rowsTree' | 'claimed' | 'liveRoot'>>
 }
 
 /** Read + reconcile, with no write — the refresher's whole computation. */
@@ -514,7 +548,11 @@ export async function computeMmIncentives(ch: ClickHouseClient, deps: MmIncentiv
     })
   }
 
-  const rewardIds = [...new Set(programmes.map(p => assetIdFromMmAddress(p.reward)).filter((x): x is number => x != null))]
+  // A failed eth_call aborts the cycle like any other read; a tree the rewards host
+  // does not serve is handled inside (readDistributorAt).
+  const distributor = await (deps.readDistributor ?? readDistributorAt)(ethCall, at, block)
+  const distributorReward = distributor.rowsTree ? assetIdFromMmAddress(distributor.rowsTree.reward) : null
+  const rewardIds = [...new Set([...programmes.map(p => assetIdFromMmAddress(p.reward)), distributorReward].filter((x): x is number => x != null))]
   let edMap: Map<number, bigint>
   if (deps.eds) edMap = await deps.eds(blockHash, rewardIds)
   else {
@@ -526,9 +564,11 @@ export async function computeMmIncentives(ch: ClickHouseClient, deps: MmIncentiv
     block, candidates, programmes, chain, assetIndex, decimals, scaled: state.scaled, accrued: state.accrued, userIndex: state.userIndex,
     eds: edMap, marketOf, chainByMarket,
   })
+  const distributorRows = buildDistributorRows(distributor, block, edMap)
   return {
     block, blockHash, indexedHead: pinned.indexedHead, finalizedHead: pinned.finalizedHead, candidates: candidates.length, decimalsMismatches,
-    rows: built.rows, reconciledPairs: built.reconciledPairs, unreconciled: built.unreconciled,
+    rows: [...built.rows, ...distributorRows], distributorRows: distributorRows.length, distributorRoot: distributor.liveRoot,
+    reconciledPairs: built.reconciledPairs, unreconciled: built.unreconciled,
   }
 }
 
@@ -546,7 +586,7 @@ async function refresh(): Promise<void> {
   })
   console.info('[mm-incentives] snapshot', {
     block: cycle.block, indexedHead: cycle.indexedHead, finalizedHead: cycle.finalizedHead, candidates: cycle.candidates, rows: cycle.rows.length,
-    decimalsMismatches: cycle.decimalsMismatches.length,
+    distributorRows: cycle.distributorRows, distributorRoot: cycle.distributorRoot, decimalsMismatches: cycle.decimalsMismatches.length,
     reconciled: cycle.reconciledPairs, unreconciled: cycle.unreconciled.length, ms: Date.now() - t0, result,
     ...(cycle.unreconciled.length ? { unreconciledSample: cycle.unreconciled.slice(0, 5) } : {}),
   })

@@ -17,13 +17,13 @@ const snapshot = (over: Partial<MmIncentiveSnapshotView> = {}): MmIncentiveSnaps
   asOfBlock: 15_000_000,
   rewards: [
     // 3 GDOT (asset 69, $1 a unit here), reconciled.
-    { accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 69, rewardAddress: '0x0000000000000000000000000000000100000045', claimable: 3_000_000_000_000n, model: 3_000_000_000_000n, accrued: 0n, reconciled: true, belowExistentialDeposit: false, legs: [{ assetAddress: A690, scaledBalance: 1n, userIndex: 1n, assetIndex: 2n, pending: 3_000_000_000_000n }] },
+    { source: 'controller', accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 69, rewardAddress: '0x0000000000000000000000000000000100000045', claimable: 3_000_000_000_000n, model: 3_000_000_000_000n, accrued: 0n, reconciled: true, belowExistentialDeposit: false, legs: [{ assetAddress: A690, scaledBalance: 1n, userIndex: 1n, assetIndex: 2n, pending: 3_000_000_000_000n }] },
     // 2 HDX, below the ED: owed and counted, but out of the ex-HDX twin.
-    { accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 0, rewardAddress: '0x0000000000000000000000000000000100000000', claimable: 2_000_000_000_000n, model: 1n, accrued: 1n, reconciled: false, belowExistentialDeposit: true, legs: [] },
+    { source: 'controller', accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 0, rewardAddress: '0x0000000000000000000000000000000100000000', claimable: 2_000_000_000_000n, model: 1n, accrued: 1n, reconciled: false, belowExistentialDeposit: true, legs: [] },
     // An unpriced reward (asset 9): listed, in no sum.
-    { accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 9, rewardAddress: '0x0000000000000000000000000000000100000009', claimable: 5n, model: 5n, accrued: 5n, reconciled: true, belowExistentialDeposit: false, legs: [] },
+    { source: 'controller', accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 9, rewardAddress: '0x0000000000000000000000000000000100000009', claimable: 5n, model: 5n, accrued: 5n, reconciled: true, belowExistentialDeposit: false, legs: [] },
     // Nothing claimable: not listed.
-    { accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 14, rewardAddress: '0x000000000000000000000000000000010000000e', claimable: 0n, model: 0n, accrued: 0n, reconciled: true, belowExistentialDeposit: false, legs: [] },
+    { source: 'controller', accountId: `0x45544800${H160.slice(2)}0000000000000000`, holder: H160, marketKey: 'core', rewardAssetId: 14, rewardAddress: '0x000000000000000000000000000000010000000e', claimable: 0n, model: 0n, accrued: 0n, reconciled: true, belowExistentialDeposit: false, legs: [] },
   ],
   ...over,
 })
@@ -101,15 +101,16 @@ describe('the chart and the directory take the incentives the same way', () => {
     expect(page).toContain("LEFT JOIN mm_acct mma ON mma.holder = ${MM_ETH_FORM_SQL('latest.account_id')}")
     expect(page).toContain('FROM (${mmCountedIncentiveRowsSql(currentMmIncentiveGenerationSql())}) i')
     expect(page).toContain('sum(toFloat64(i.counted_raw) * transform(toString(i.reward_asset_id), ${idsSql}, ${unitsSql}, 0.)) AS usd')
-    // Pair totals only, less the claims indexed after the snapshot block.
+    // Pair totals and distributor rows only, each less its payer's claims indexed after the snapshot block.
     const sql = mmCountedIncentiveRowsSql("'gen'")
-    expect(sql).toContain("WHERE snapshot_id = 'gen' AND asset_address = ''")
-    expect(sql).toContain('toUInt256(greatest(toInt256(i.claimable_raw) - toInt256(ifNull(c.claimed, 0)), toInt256(0)))')
+    expect(sql).toContain("WHERE snapshot_id = 'gen' AND (asset_address = '' OR startsWith(asset_address, 'distributor:'))")
+    expect(sql).toContain('toUInt256(greatest(toInt256(i.claimable_raw) - toInt256(ifNull(c.claimed_raw, 0)), toInt256(0)))')
     expect(sql).toContain('GROUP BY u, reward, block_height, event_index')
   })
 
   it('reads the page\'s, the tag\'s and the chart\'s incentives for one holder set (moneyMarketIdentities)', () => {
-    expect(src).toContain('await getUnclaimedRewards([...related], moneyMarketIdentities([...related], norm).h160s, lpPositions)')
+    expect(src).toContain('const mmH160s = moneyMarketIdentities([...related], norm).h160s')
+    expect(src).toContain('getUnclaimedRewards([...related], mmH160s, lpPositions)')
     expect(src).toContain('const rewardH160s = moneyMarketIdentities(members).h160s')
     expect(src).toContain('const historyH160s = moneyMarketIdentities(accounts).h160s')
     expect(src).toContain('const { h160s, primary } = moneyMarketIdentities(accounts, owner)')

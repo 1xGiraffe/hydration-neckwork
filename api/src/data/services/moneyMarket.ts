@@ -60,6 +60,7 @@ const wireHistoryObservation = (o: MmObservation, time: string | null): WireHist
 // ---------------------------------------------------------------------------
 
 export interface WireMmRewardCurrent {
+  source: 'controller' | 'distributor'
   assetId: string
   amount: string
   valueUsd: string | null
@@ -169,7 +170,7 @@ export async function moneyMarketCurrentPositions(client: ClickHouseClient, pars
     const valueUsd = usdOf(r.rewardAssetId, r.claimable)
     if (valueUsd != null) rewardsTotal += valueUsd
     marketFor(r.marketKey, pool).unclaimedRewards.push({
-      assetId: String(r.rewardAssetId), amount: r.claimable.toString(), valueUsd: valueUsd == null ? null : renderUsd(valueUsd),
+      source: r.source, assetId: String(r.rewardAssetId), amount: r.claimable.toString(), valueUsd: valueUsd == null ? null : renderUsd(valueUsd),
       reconciled: r.reconciled, belowExistentialDeposit: r.belowExistentialDeposit,
       legs: r.legs.map(l => ({ aTokenAddress: l.assetAddress, aTokenAssetId: atokenAssetOf(l.assetAddress), pending: l.pending.toString() })),
     })
