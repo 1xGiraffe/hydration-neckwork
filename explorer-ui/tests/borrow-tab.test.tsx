@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BorrowTab } from '../src/components/positions/BorrowTab'
 import { BorrowHistoryCharts } from '../src/components/positions/BorrowHistory'
-import { HF_CAP, borrowCards, earnedRows, exposureLines, healthFactorLines, marketEarned, marketSeries, netApy, netEarnedRows, netEarnedUsd, paidRows, parseHealthFactor, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct, windowedMarketSeries } from '../src/components/positions/borrowMath'
+import { HF_CAP, programmeNotice, yieldsWithoutProgramme, borrowCards, earnedRows, exposureLines, healthFactorLines, marketEarned, marketSeries, netApy, netEarnedRows, netEarnedUsd, paidRows, parseHealthFactor, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct, windowedMarketSeries } from '../src/components/positions/borrowMath'
 import { MM_DIP, mockMoneyMarketEarned, mockMoneyMarketHistory, mockMoneyMarketYields } from './fixtures/positionsMock'
 import type { MmReserve, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../src/types'
 
@@ -95,6 +95,28 @@ describe('netApy', () => {
   it('ignores reserves the position does not hold', () => {
     const r = netApy([...reserves, reserve({ assetId: 99 })], { 43: ry({ supplyApyPct: 4 }), 1000: ry({ borrowApyPct: 8 }) })
     expect(r.netPct).toBeCloseTo((1200 - 800) / 20_000 * 100)
+  })
+})
+
+describe('the PRIME rewards programme for an account it does not pay', () => {
+  const rp = (status: string, reason: string | null) => ({ rewardAsset: { symbol: 'PRIME' }, assets: ['HUSDC', 'HUSDT'], maxHollarDebtUsd: '5.00', accounts: [{ status, reason }] })
+  it('states the Hydration app\'s notice, and nothing for an earning account', () => {
+    expect(programmeNotice(rp('not-earning', 'hollar_debt'))).toBe('This account is not earning PRIME rewards on HUSDC, HUSDT. An account with more than $5.00 of HOLLAR debt earns nothing while it has that debt.')
+    expect(programmeNotice(rp('not-earning', 'other'))).toBe('This account is excluded from PRIME rewards on HUSDC, HUSDT.')
+    expect(programmeNotice(rp('earning', null))).toBeNull()
+    expect(programmeNotice(undefined)).toBeNull()
+  })
+  it('takes the programme\'s incentive out of every reserve rate, and leaves other reserves as they are', () => {
+    const supply = { totalAprPct: 10, farms: [], components: [
+      { kind: 'mm-supply' as const, aprPct: 6 },
+      { kind: 'mm-incentive' as const, aprPct: 4, asset: HDX, incentiveSource: 'distributor' as const },
+    ] }
+    const plain = ry({ supplyApyPct: 3 })
+    const out = yieldsWithoutProgramme({ 110: ry({ supplyApyPct: 6, supplyIncentives: [{ rewardAsset: HDX, aprPct: 4, source: 'distributor' }], supply }), 5: plain })!
+    expect(reserveSupplyPct(out['110'])).toBe(6)
+    expect(out['110'].supplyIncentives).toEqual([])
+    expect(out['110'].supply?.components.map(c => c.kind)).toEqual(['mm-supply'])
+    expect(out['5']).toBe(plain)
   })
 })
 

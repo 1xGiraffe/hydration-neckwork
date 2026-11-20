@@ -9,7 +9,7 @@ import { useRevenueHollarColor } from '../../hooks/useRevenueHollarColor'
 import { yieldComponentRow, type YieldRow } from './yieldFormat'
 import { BorrowHistoryCharts } from './BorrowHistory'
 import { defisimSupportsMarket, defisimUrl } from '../../utils/defisim'
-import { borrowCards, claimedIncentivesUsd, marketEarned, netApy, netEarnedRows, netEarnedUsd, rawHeld, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct } from './borrowMath'
+import { borrowCards, claimedIncentivesUsd, marketEarned, netApy, netEarnedRows, netEarnedUsd, programmeNotice, rawHeld, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct, yieldsWithoutProgramme } from './borrowMath'
 import type { BorrowCardSpec } from './borrowMath'
 
 // One holder's money-market footprint: the address its history is read by, the
@@ -208,7 +208,7 @@ function pending(h: HistState): ReactNode | null {
   return null
 }
 
-function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, defisimAddress }: {
+function BorrowCard({ spec, area, yields: marketYields, yieldsLoading, owner, defaultOpen, defisimAddress }: {
   spec: BorrowCardSpec
   area: BorrowArea
   yields: Record<string, ReserveYield> | undefined
@@ -218,6 +218,12 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
   defisimAddress?: string
 }) {
   const [open, setOpen] = useState(defaultOpen)
+  // The off-chain PRIME programme pays nothing to an account with HOLLAR debt above
+  // its limit: on its market's card such an account gets the Hydration app's notice,
+  // and no reserve rate or Net APY of that card carries the programme's rate.
+  const programme = area.rewardsProgram?.marketKey === spec.marketKey ? area.rewardsProgram : undefined
+  const notice = programmeNotice(programme)
+  const yields = notice ? yieldsWithoutProgramme(marketYields) : marketYields
   // Read whether or not the card is open: the KPI row (interest, claimed
   // incentives) is the collapsed card's summary and comes from the history, and
   // one read per account serves every market card of that account.
@@ -261,8 +267,8 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
       </header>
       <div className="mm-card bw-body">
         {mm && <BorrowRiskBar mm={mm} />}
-        <BorrowKpis mm={mm} yields={yields} yieldsLoading={yieldsLoading} hist={hist} earned={earned}
-          programme={area.rewardsProgram?.marketKey === spec.marketKey ? area.rewardsProgram : undefined} />
+        {notice && <div className="bw-notice" role="note">{notice}</div>}
+        <BorrowKpis mm={mm} yields={yields} yieldsLoading={yieldsLoading} hist={hist} earned={earned} programme={programme} />
         <DisclosureRule open={open} onToggle={() => setOpen(o => !o)} controls={detailsId} meta={open ? undefined : detailsMeta(spec, hist)}>
           {open ? 'Hide' : 'Show'} {area.address ? 'details & history' : 'reserves'}
         </DisclosureRule>
@@ -342,10 +348,9 @@ function BorrowKpis({ mm, yields, yieldsLoading, hist, earned, programme }: { mm
   const basis = earnedBasis(earned.data, hist.data)
   const supplyUsd = mm ? Number(mm.totalSuppliedBase ?? mm.totalCollateralBase) / 1e8 : null
   const debtUsd = mm ? Number(mm.totalDebtBase) / 1e8 : null
-  // The programme pays nobody with HOLLAR debt above its limit: such a holder's net
-  // APY leaves its rate out (one holder per card here, so any not-earning entry is it).
+  // A holder the programme does not pay already reads `yields` without its rate (BorrowCard).
   const withoutProgramme = !!programme?.accounts.some(a => a.status === 'not-earning')
-  const apy = mm ? netApy(mm.reserves ?? [], yields, { withoutProgramme }) : null
+  const apy = mm ? netApy(mm.reserves ?? [], yields) : null
   const apyRows: YieldRow[] = apy && apy.netPct != null ? [
     { key: 'sb', label: 'Supply APY', pct: apy.supplyBasePct },
     ...(apy.supplyAccrualPct ? [{ key: 'sa', label: 'Token yield', note: 'accruing collateral', pct: apy.supplyAccrualPct }] : []),

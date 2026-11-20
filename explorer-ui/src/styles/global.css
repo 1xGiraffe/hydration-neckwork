@@ -4161,6 +4161,7 @@ a.rev-pill-label:hover { color: var(--accent-text); }
 .bw-inc-k { font-size: 10px; font-weight: 400; color: var(--text-low); }
 .bw-inc-sep { color: var(--text-low); font-weight: 400; }
 .bw-unpriced { font-size: 10px; font-weight: 400; color: var(--amber-text); }
+.bw-notice { margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; background: var(--amber-soft); color: var(--amber-text); font-size: 12px; line-height: 1.4; }
 .bw-tbl-wrap { overflow-x: auto; margin: 0 -4px; border-bottom: 1px solid var(--separator); }
 .tbl.bw-tbl { min-width: 0; }
 .bw-tbl thead th { padding: 8px 8px; }
