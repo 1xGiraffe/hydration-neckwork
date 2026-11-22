@@ -106,10 +106,15 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
       await expect(first.locator('.cmt-replies > .cmt')).toHaveCount(2)
       await first.getByRole('button', { name: 'Show 2 more replies' }).click()
       await expect(first.locator('.cmt-replies > .cmt')).toHaveCount(4)
+      // A long comment folds like the description: its opening under a fade, the faded
+      // text itself the control (the keyboard's way in is the fade's button); a short one does not.
       const long = page.locator('#c-c3')
-      await expect(long.locator('.cmt-body.clamped')).toHaveCount(1)
-      await long.getByRole('button', { name: 'Show more' }).click()
-      await expect(long.locator('.cmt-body.clamped')).toHaveCount(0)
+      await expect(long.locator('.gov-post-fold.clamped')).toHaveCount(1)
+      await expect(long.getByRole('button', { name: 'Show the full text' })).toHaveCount(1)
+      await expect(page.locator('#c-c2 .gov-post-fold.clamped')).toHaveCount(0)
+      await long.locator('.cmt-md').click()
+      await expect(long.locator('.gov-post-fold.clamped')).toHaveCount(0)
+      await expect(long.locator('.cmt-md')).toContainText('Line 30 of a long comment.')
       await page.getByRole('button', { name: 'Show all 5 threads' }).click()
       await expect(page.locator('.cmt-list > .cmt')).toHaveCount(5)
 

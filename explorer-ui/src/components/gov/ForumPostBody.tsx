@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type RefObject } from 'react'
+import { useEffect, useState, type RefObject } from 'react'
 import { Markdown } from '../../markdown/Markdown'
 import { forumApi } from '../../api/explorer'
 import { useForumThread } from '../../hooks/useGovernance'
@@ -11,6 +11,7 @@ import { ForumComposer } from './ForumComposer'
 import { ModerateButtons, ReportButton, RevisionList } from './ForumActions'
 import { PostEditor } from './PostEditor'
 import { PollCard } from './PollCard'
+import { BodyFold } from './BodyFold'
 import { stripLeadingTitle } from '../../utils/leadingTitle'
 import './forum.css'
 
@@ -67,60 +68,6 @@ export function PostToc({ root }: { root: RefObject<HTMLElement | null> }) {
   )
 }
 
-/** Code blocks past this many lines show their first lines and a "Show all N lines". */
-const CODE_LINES = 16
-
-/**
- * A long post stays readable: a code block over CODE_LINES lines is cut to its first
- * lines with a button for the rest, and each image (capped in height by forum.css)
- * opens full size in a new tab. Applied to the rendered body (re-applied whenever it
- * re-renders); the controls are built with DOM calls and text only, and an image
- * link points only at the image's own /ipfs/ address, which the renderer has already
- * vetted.
- */
-function useLongBodyControls(root: RefObject<HTMLElement | null>) {
-  useEffect(() => {
-    const el = root.current
-    if (!el) return
-    const apply = () => {
-      for (const pre of Array.from(el.querySelectorAll<HTMLPreElement>('.gov-post-md pre'))) {
-        if (pre.dataset.clamp) continue
-        const lines = (pre.textContent ?? '').replace(/\n$/, '').split('\n').length
-        if (lines <= CODE_LINES) { pre.dataset.clamp = 'none'; continue }
-        pre.dataset.clamp = 'on'
-        const btn = document.createElement('button')
-        btn.type = 'button'
-        btn.className = 'gov-more md-pre-more'
-        btn.setAttribute('aria-expanded', 'false')
-        btn.textContent = `Show all ${lines} lines`
-        btn.addEventListener('click', () => {
-          const opening = pre.dataset.clamp === 'on'
-          pre.dataset.clamp = opening ? 'off' : 'on'
-          btn.setAttribute('aria-expanded', String(opening))
-          btn.textContent = opening ? 'Show fewer lines' : `Show all ${lines} lines`
-        })
-        pre.after(btn)
-      }
-      for (const img of Array.from(el.querySelectorAll<HTMLImageElement>('.gov-post-md img.md-img'))) {
-        const src = img.getAttribute('src') ?? ''
-        if (img.closest('a') || !/^\/ipfs\/[A-Za-z0-9]+$/.test(src)) continue
-        const a = document.createElement('a')
-        a.href = src
-        a.target = '_blank'
-        a.rel = 'noopener noreferrer'
-        a.className = 'md-img-open'
-        a.title = 'Open the full image'
-        img.replaceWith(a)
-        a.append(img)
-      }
-    }
-    apply()
-    const obs = new MutationObserver(apply)
-    obs.observe(el, { childList: true, subtree: true })
-    return () => obs.disconnect()
-  }, [root])
-}
-
 function DeletePost({ post }: { post: ForumPostDetail }) {
   const after = useAfterForumWrite()
   const [confirm, setConfirm] = useState(false)
@@ -156,7 +103,9 @@ function PostUpdates({ postId, canPost }: { postId: string; canPost: boolean }) 
       {updates.map(u => (
         <article key={u.commentId} id={`c-${u.commentId}`} className="gov-update">
           <header className="cmt-head"><ForumAuthorName author={u.author} /><span className="cmt-time">{humanDate(u.createdAt, false)}</span></header>
-          {u.body != null ? <Markdown body={u.body} format={u.bodyFormat} media={u.media} className="cmt-md" native={u.source == null} /> : <p className="cmt-stub">{u.deleted ? 'Deleted.' : 'Hidden by moderation.'}</p>}
+          {u.body != null
+            ? <BodyFold size="inline" open={window.location.hash === `#c-${u.commentId}`}><Markdown body={u.body} format={u.bodyFormat} media={u.media} className="cmt-md" native={u.source == null} /></BodyFold>
+            : <p className="cmt-stub">{u.deleted ? 'Deleted.' : 'Hidden by moderation.'}</p>}
         </article>
       ))}
       {canPost && (open
@@ -166,54 +115,10 @@ function PostUpdates({ postId, canPost }: { postId: string; canPost: boolean }) 
   )
 }
 
-/** A clamped body that would hide less than this (about two lines) is shown whole instead. */
-const CLAMP_SLACK_PX = 48
-
-/**
- * `clamp`: a long body shows its opening under a fade (the height is in the CSS), and
- * the faded text itself is the control — a tap or click anywhere on it shows the rest.
- * A click that follows a link, presses a control in the text or ends a text selection
- * is left alone, so reading and copying work as on any page; a mouse sees the hint
- * on hover, a keyboard reaches the same expand through the fade's own button. Whether
- * the text overflows is measured, not guessed from its length, and re-measured as
- * images load or the width changes.
- */
-function useBodyClamp(enabled: boolean) {
-  const box = useRef<HTMLDivElement>(null)
-  const [expanded, setExpanded] = useState(false)
-  const [overflows, setOverflows] = useState<boolean | null>(null)
-  const active = enabled && !expanded
-  useLayoutEffect(() => {
-    const el = box.current?.querySelector<HTMLElement>('.gov-post-md')
-    if (!active || !el) return
-    const measure = () => setOverflows(el.scrollHeight - el.clientHeight > CLAMP_SLACK_PX)
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(el)
-    for (const child of Array.from(el.children)) ro.observe(child)
-    return () => ro.disconnect()
-  }, [active])
-  const clamped = active && overflows !== false
-  const expand = () => {
-    setExpanded(true)
-    // The fade's button goes with the fold: keep the keyboard where the text continues.
-    box.current?.focus({ preventScroll: true })
-  }
-  const onClick = (e: MouseEvent<HTMLDivElement>) => {
-    if (!clamped) return
-    const t = e.target as HTMLElement
-    if (t.closest('a, button, summary, input, textarea, select, label, [role="button"]')) return
-    const sel = window.getSelection()
-    if (sel && !sel.isCollapsed && box.current?.contains(sel.anchorNode)) return
-    expand()
-  }
-  return { box, clamped, expand, onClick }
-}
-
 /**
  * `plain`: no card, the author and date in one meta line above the text (a
  * referendum's description, under its section heading). `title`: drop the text's
- * opening heading when it only repeats this title. `clamp`: see useBodyClamp.
+ * opening heading when it only repeats this title. `clamp`: a long text is folded (BodyFold).
  */
 export function ForumPostBody({ post, showAuthor = true, plain = false, clamp = false, title }: { post: ForumPostDetail; showAuthor?: boolean; plain?: boolean; clamp?: boolean; title?: string | null }) {
   const session = useSession()
@@ -221,9 +126,6 @@ export function ForumPostBody({ post, showAuthor = true, plain = false, clamp = 
   const perms = usePostPermissions(post.postId)
   const [revisionsOpen, setRevisionsOpen] = useState(false)
   const [editing, setEditing] = useState(false)
-  const root = useRef<HTMLDivElement>(null)
-  useLongBodyControls(root)
-  const fold = useBodyClamp(clamp)
   const body = stripLeadingTitle(post.body, post.bodyFormat, title)
   const hasText = post.body.trim().length > 0
   const own = !!session && post.author.account?.accountId === session.accountId
@@ -243,7 +145,7 @@ export function ForumPostBody({ post, showAuthor = true, plain = false, clamp = 
   }
 
   return (
-    <div ref={root} className={`gov-post${plain ? ' plain' : ''}`}>
+    <div className={`gov-post${plain ? ' plain' : ''}`}>
       {showAuthor && hasText && (
         <div className="gov-post-meta">
           <ForumAuthorName author={post.author} />
@@ -254,15 +156,9 @@ export function ForumPostBody({ post, showAuthor = true, plain = false, clamp = 
       {post.tldr && <p className="gov-tldr"><strong>In short:</strong> {post.tldr}</p>}
       {hasText
         ? (
-          <div ref={fold.box} tabIndex={-1} className={`gov-post-fold${fold.clamped ? ' clamped' : ''}`} onClick={fold.onClick}>
+          <BodyFold fold={clamp}>
             <Markdown body={body} format={post.bodyFormat} media={post.media} className="gov-post-md" native={post.source == null} />
-            {fold.clamped && (
-              <button type="button" className="gov-post-fold-more" aria-expanded={false} onClick={fold.expand}>
-                <span className="sr-only">Show the full text</span>
-                <svg aria-hidden viewBox="0 0 16 16" width="16" height="16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              </button>
-            )}
-          </div>
+          </BodyFold>
         )
         : <p className="gov-empty">No description was written for this.{perms.data?.edit ? ' As its proposer, you can write one.' : ''}</p>}
       {post.poll != null && <PollCard poll={post.poll} />}

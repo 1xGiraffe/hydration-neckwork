@@ -5075,18 +5075,21 @@ html:has(.gov-section-nav) { scroll-padding-top: calc(var(--safe-top) + 120px); 
 .gov-post.plain { background: none; border: 0; border-radius: 0; padding: 0; }
 .gov-post.plain .gov-post-meta { margin: -4px 0 12px; gap: 8px; font-size: 12px; color: var(--text-low); }
 .gov-post.plain .gov-post-foot { margin-top: 12px; padding-top: 0; border-top: 0; }
-/* A long body fades out (ForumPostBody's clamp): a tap or click on the text shows the rest.
+/* A long text fades out (BodyFold — a description, an update, a comment): a tap or click on the text shows the rest.
    The fade's lowest stretch is its button — the pointer there, a chevron that answers the
    hover anywhere on the text, and the keyboard's way in; the text above stays selectable. */
 .gov-post-fold { position: relative; }
 .gov-post-fold:focus { outline: none; }
-.gov-post-fold.clamped .gov-post-md { max-height: clamp(280px, 42vh, 440px); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 140px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 140px), transparent); }
+.gov-post-fold.clamped > .md-body { max-height: clamp(280px, 42vh, 440px); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 140px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 140px), transparent); }
 .gov-post-fold-more { position: absolute; left: 0; right: 0; bottom: 0; height: 72px; display: flex; align-items: flex-end; justify-content: center; padding: 0; border: 0; background: none; color: var(--text-low); cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .gov-post-fold-more svg { box-sizing: content-box; padding: 5px; border-radius: 9999px; border: 1px solid var(--border); background: var(--bg); transition: color .15s, border-color .15s, transform .15s; }
 .gov-post-fold.clamped:hover .gov-post-fold-more svg { color: var(--text-high); border-color: color-mix(in srgb, var(--text-high) 30%, transparent); transform: translateY(2px); }
 .gov-post-fold-more:focus-visible { outline: none; }
 .gov-post-fold-more:focus-visible svg { color: var(--text-high); outline: 2px solid var(--lavender); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .gov-post-fold-more svg { transition: none; } .gov-post-fold.clamped:hover .gov-post-fold-more svg { transform: none; } }
+/* An update or a comment folds sooner, under a shorter fade. */
+.gov-post-fold.inline.clamped > .md-body { max-height: clamp(200px, 30vh, 260px); -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); }
+.gov-post-fold.inline .gov-post-fold-more { height: 52px; }
 /* What it does: plain text on a rule, not a card. */
 .gov-ref .gov-wtd { background: none; border: 0; border-left: 2px solid var(--separator); border-radius: 0; padding: 2px 0 2px 16px; }
 
@@ -5126,7 +5129,6 @@ html:has(.gov-section-nav) { scroll-padding-top: calc(var(--safe-top) + 120px); 
 .cmt-thread .cmt.cmt-reply { border-top: 0; padding: 10px 0 4px; }
 .cmt-thread .cmt.cmt-target { box-shadow: inset 3px 0 0 var(--lavender); padding-left: 12px; }
 .cmt-thread .cmt-replies { margin: 8px 0 0 4px; padding-left: 14px; gap: 0; }
-.cmt-body.clamped { max-height: 186px; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); mask-image: linear-gradient(to bottom, #000 70%, transparent); }
 .cmt-thread .gov-more { margin: 8px 0 4px; }
 .cmt-head .gov-position { padding: 0; background: none; color: var(--text-low); }
 .cmt-head .gov-position.aye .gov-position-side { color: var(--green-text); font-weight: 600; }
@@ -5157,9 +5159,9 @@ html:has(.gov-section-nav) { scroll-padding-top: calc(var(--safe-top) + 120px); 
   .gov-post-layout:has(.gov-post-toc) .gov-post-aside { max-height: calc(100vh - 120px); overflow: auto; overscroll-behavior: contain; }
 }
 .gov-post-toc .toc-l1 button { padding-left: 22px; font-size: 12.5px; }
-.gov-post-md pre[data-clamp="on"] { max-height: 420px; max-height: calc(16lh + 24px); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent); mask-image: linear-gradient(to bottom, #000 80%, transparent); }
+.md-body pre[data-clamp="on"] { max-height: 420px; max-height: calc(16lh + 24px); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent); mask-image: linear-gradient(to bottom, #000 80%, transparent); }
 .md-body .md-pre-more { max-width: 75ch; margin: -6px 0 14px; }
-.gov-post-md .md-img { width: auto; max-height: 520px; object-fit: contain; }
+.gov-post-md .md-img, .cmt-md .md-img { width: auto; max-height: 520px; object-fit: contain; }
 .md-body a.md-img-open { display: block; width: fit-content; max-width: 100%; text-decoration: none; cursor: zoom-in; }
 .md-body a.md-img-open:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; border-radius: 10px; }
 

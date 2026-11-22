@@ -11,6 +11,7 @@ import { ForumAuthorName, NotReady, PositionBadge, humanDate, relativeTime } fro
 import { ForumComposer } from './ForumComposer'
 import { FollowThread } from './FollowThread'
 import { ModerateButtons, ReportButton, RevisionList } from './ForumActions'
+import { BodyFold } from './BodyFold'
 import './forum.css'
 
 // A forum thread: top-level comments with their replies (two levels, as Subsquare
@@ -34,35 +35,11 @@ const SORTS: { key: ThreadSort; label: string }[] = [
   { key: 'new', label: 'Newest' },
 ]
 
-/** A comment taller than this (about eight lines) shows its first eight lines until the reader asks for the rest. */
-const CLAMP_PX = 186
-/** …unless the rest is only a line or two, which reads better shown than folded. */
-const CLAMP_SLACK_PX = 64
-
-/** A comment's text, clamped to its first lines when it is long. */
+/** A comment's text, folded to its opening when it is long (BodyFold), open when a permalink points at it. */
 function ClampedBody({ c }: { c: ForumComment }) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [over, setOver] = useState(false)
-  const [expanded, setExpanded] = useState(() => window.location.hash === `#c-${c.commentId}`)
-  useEffect(() => {
-    const el = ref.current
-    if (!el || expanded) return
-    // The text renders (and its images load) after this mounts, so it is measured
-    // whenever it resizes; scrollHeight is its full height, clamped or not.
-    const check = () => setOver(el.scrollHeight > CLAMP_PX + CLAMP_SLACK_PX)
-    check()
-    const ro = new ResizeObserver(check)
-    for (const child of Array.from(el.children)) ro.observe(child)
-    return () => ro.disconnect()
-  }, [expanded, c.body])
-  return (
-    <>
-      <div ref={ref} className={`cmt-body${over && !expanded ? ' clamped' : ''}`}><CommentBody c={c} /></div>
-      {(over || expanded) && (
-        <button type="button" className="gov-more cmt-more" aria-expanded={expanded} onClick={() => setExpanded(e => !e)}>{expanded ? 'Show less' : 'Show more'}</button>
-      )}
-    </>
-  )
+  const body = <CommentBody c={c} />
+  if (c.deleted || c.hidden || c.body == null) return <div className="cmt-body">{body}</div>
+  return <div className="cmt-body"><BodyFold size="inline" open={window.location.hash === `#c-${c.commentId}`}>{body}</BodyFold></div>
 }
 
 function CommentBody({ c }: { c: ForumComment }) {
