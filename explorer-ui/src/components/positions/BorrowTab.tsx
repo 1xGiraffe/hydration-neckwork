@@ -219,11 +219,13 @@ function BorrowCard({ spec, area, yields: marketYields, yieldsLoading, owner, de
 }) {
   const [open, setOpen] = useState(defaultOpen)
   // The off-chain PRIME programme pays nothing to an account with HOLLAR debt above
-  // its limit: on its market's card such an account gets the Hydration app's notice,
-  // and no reserve rate or Net APY of that card carries the programme's rate.
+  // its limit: no reserve rate or Net APY of its market's card carries the programme's
+  // rate, and such an account that supplies the programme's assets there gets the
+  // Hydration app's notice.
   const programme = area.rewardsProgram?.marketKey === spec.marketKey ? area.rewardsProgram : undefined
-  const notice = programmeNotice(programme)
-  const yields = notice ? yieldsWithoutProgramme(marketYields) : marketYields
+  const unpaid = !!programme?.accounts.some(a => a.status === 'not-earning')
+  const yields = unpaid ? yieldsWithoutProgramme(marketYields) : marketYields
+  const notice = programmeNotice(programme, spec.current?.reserves ?? [], marketYields)
   // Read whether or not the card is open: the KPI row (interest, claimed
   // incentives) is the collapsed card's summary and comes from the history, and
   // one read per account serves every market card of that account.

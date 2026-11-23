@@ -34,8 +34,7 @@ export function yieldsWithoutProgramme(yields: Record<string, ReserveYield> | un
   const out: Record<string, ReserveYield> = {}
   for (const [id, y] of Object.entries(yields)) {
     const programme = programmeSupplyPct(y)
-    const has = y.supplyIncentives.some(i => i.source === 'distributor') || !!y.supply?.components.some(c => c.incentiveSource === 'distributor')
-    if (!has) { out[id] = y; continue }
+    if (!paysProgramme(y)) { out[id] = y; continue }
     out[id] = {
       ...y,
       supplyIncentives: y.supplyIncentives.filter(i => i.source !== 'distributor'),
@@ -49,10 +48,28 @@ export function yieldsWithoutProgramme(yields: Record<string, ReserveYield> | un
   return out
 }
 
-/** The text the Hydration app shows an account the programme does not pay (its RewardsProgramNotice); null for any other. */
-export function programmeNotice(rp: { rewardAsset: { symbol: string }; assets?: string[]; maxHollarDebtUsd: string; accounts: Array<{ status: string; reason: string | null }> } | undefined): string | null {
+/** Whether a reserve's supply side carries the off-chain rewards programme's incentive. */
+function paysProgramme(y: ReserveYield | undefined): boolean {
+  return !!y && (y.supplyIncentives.some(i => i.source === 'distributor') || !!y.supply?.components.some(c => c.incentiveSource === 'distributor'))
+}
+
+/**
+ * The text the Hydration app shows an account the programme does not pay (its
+ * RewardsProgramNotice); null for any other. The programme's snapshot lists every
+ * account over its HOLLAR debt limit, supplier or not, so the notice goes only to an
+ * account that supplies one of the programme's reserves on this market — one whose
+ * rate carries the programme's incentive, or (while the rates load) one by the
+ * programme's own asset names.
+ */
+export function programmeNotice(
+  rp: { rewardAsset: { symbol: string }; assets?: string[]; maxHollarDebtUsd: string; accounts: Array<{ status: string; reason: string | null }> } | undefined,
+  reserves: MmReserve[],
+  yields: Record<string, ReserveYield> | undefined,
+): string | null {
   const out = rp?.accounts.find(a => a.status === 'not-earning')
   if (!rp || !out) return null
+  const supplies = reserves.some(r => rawHeld(r.supplied) && (yields ? paysProgramme(yields[String(r.assetId)]) : !!rp.assets?.includes(r.symbol)))
+  if (!supplies) return null
   const assets = rp.assets?.length ? rp.assets.join(', ') : 'HUSDC, HUSDT'
   const limit = `$${Number(rp.maxHollarDebtUsd).toFixed(2)}`
   return out.reason === 'hollar_debt'

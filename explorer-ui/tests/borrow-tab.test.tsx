@@ -100,11 +100,25 @@ describe('netApy', () => {
 
 describe('the PRIME rewards programme for an account it does not pay', () => {
   const rp = (status: string, reason: string | null) => ({ rewardAsset: { symbol: 'PRIME' }, assets: ['HUSDC', 'HUSDT'], maxHollarDebtUsd: '5.00', accounts: [{ status, reason }] })
-  it('states the Hydration app\'s notice, and nothing for an earning account', () => {
-    expect(programmeNotice(rp('not-earning', 'hollar_debt'))).toBe('This account is not earning PRIME rewards on HUSDC, HUSDT. An account with more than $5.00 of HOLLAR debt earns nothing while it has that debt.')
-    expect(programmeNotice(rp('not-earning', 'other'))).toBe('This account is excluded from PRIME rewards on HUSDC, HUSDT.')
-    expect(programmeNotice(rp('earning', null))).toBeNull()
-    expect(programmeNotice(undefined)).toBeNull()
+  const paid = ry({ supplyApyPct: 6, supplyIncentives: [{ rewardAsset: HDX, aprPct: 4, source: 'distributor' }] })
+  const husdc = reserve({ assetId: 1110, symbol: 'HUSDC', decimals: 6, supplied: '1000000', suppliedUsd: 1 })
+  const yields = { 1110: paid, 5: ry({ supplyApyPct: 3 }) }
+  it('states the Hydration app\'s notice to a supplier of the programme\'s assets, and nothing for an earning account', () => {
+    expect(programmeNotice(rp('not-earning', 'hollar_debt'), [husdc], yields)).toBe('This account is not earning PRIME rewards on HUSDC, HUSDT. An account with more than $5.00 of HOLLAR debt earns nothing while it has that debt.')
+    expect(programmeNotice(rp('not-earning', 'other'), [husdc], yields)).toBe('This account is excluded from PRIME rewards on HUSDC, HUSDT.')
+    expect(programmeNotice(rp('earning', null), [husdc], yields)).toBeNull()
+    expect(programmeNotice(undefined, [husdc], yields)).toBeNull()
+  })
+  // The programme's snapshot lists every HOLLAR borrower, supplier or not: the notice
+  // is only for an account that has something there to not earn on.
+  it('says nothing to an account that supplies none of the programme\'s assets', () => {
+    const dot = reserve({ supplied: '1', suppliedUsd: 1 })
+    expect(programmeNotice(rp('not-earning', 'hollar_debt'), [dot, reserve({ assetId: 1110, symbol: 'HUSDC', debt: '1' })], yields)).toBeNull()
+    expect(programmeNotice(rp('not-earning', 'hollar_debt'), [], yields)).toBeNull()
+  })
+  it('knows a programme asset by its name while the rates load', () => {
+    expect(programmeNotice(rp('not-earning', 'hollar_debt'), [husdc], undefined)).not.toBeNull()
+    expect(programmeNotice(rp('not-earning', 'hollar_debt'), [reserve({ supplied: '1' })], undefined)).toBeNull()
   })
   it('takes the programme\'s incentive out of every reserve rate, and leaves other reserves as they are', () => {
     const supply = { totalAprPct: 10, farms: [], components: [
