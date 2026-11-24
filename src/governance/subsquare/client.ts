@@ -50,6 +50,24 @@ export function wellFormed(v: unknown): unknown {
   return v
 }
 
+/**
+ * An ISOLATED request (one item's detail, thread, appendants or poll, or one list in an
+ * incremental cycle) that failed all its attempts: the caller skips that one piece and
+ * goes on. It never opens the breaker on its own — one item Subsquare cannot serve must
+ * not stall every cycle — but ISOLATED_FAILURES_TO_OPEN different ones failing in a row
+ * (no success between) is an outage, and that does.
+ */
+export class ItemRequestError extends Error {
+  constructor(message: string) { super(message); this.name = 'ItemRequestError' }
+}
+
+/** Attempts an isolated request gets: fewer than the breaker threshold, so it alone never trips it. */
+export const ISOLATED_MAX_RETRIES = 2
+/** Different isolated requests failing in a row that count as an outage and open the breaker. */
+export const ISOLATED_FAILURES_TO_OPEN = 3
+
+export interface GetOptions { isolated?: boolean }
+
 export class CircuitOpenError extends Error {
   constructor(message: string) { super(message); this.name = 'CircuitOpenError' }
 }
@@ -91,6 +109,8 @@ export class SubsquareClient {
   requests = 0
   cacheHits = 0
   failuresInRow = 0
+  /** Isolated requests that failed all their attempts since the last success. */
+  isolatedFailuresInRow = 0
   private lastStart = 0
   private chain: Promise<unknown> = Promise.resolve()
   private readonly opts: Required<Omit<ClientOptions, 'cache' | 'baseUrl' | 'rps'>> & Pick<ClientOptions, 'cache'>
@@ -100,7 +120,7 @@ export class SubsquareClient {
    * only a successful request clears the count, which an open breaker never sends:
    * without this one trip would abort every later cycle unasked.
    */
-  resetBreaker(): void { this.failuresInRow = 0 }
+  resetBreaker(): void { this.failuresInRow = 0; this.isolatedFailuresInRow = 0 }
 
   constructor(options: ClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
@@ -118,9 +138,9 @@ export class SubsquareClient {
   }
 
   /** GET `path` (with its query string). Resolves 200 and 404 (and other 4xx) answers; throws on exhausted retries or an open breaker. */
-  get(path: string): Promise<FetchResult> {
+  get(path: string, opts: GetOptions = {}): Promise<FetchResult> {
     // One request in flight: every call queues behind the previous one.
-    const run = this.chain.then(() => this.getNow(path))
+    const run = this.chain.then(() => this.getNow(path, opts))
     this.chain = run.catch(() => undefined)
     return run
   }
@@ -147,7 +167,7 @@ export class SubsquareClient {
     return join(this.opts.cache.dir, createHash('sha1').update(path).digest('hex') + '.json')
   }
 
-  private async getNow(path: string): Promise<FetchResult> {
+  private async getNow(path: string, opts: GetOptions = {}): Promise<FetchResult> {
     const file = this.cachePath(path)
     if (file && this.opts.cache!.mode !== 'write') {
       try {
@@ -157,6 +177,9 @@ export class SubsquareClient {
       } catch { /* miss */ }
     }
     if (this.failuresInRow >= this.opts.breakerThreshold) throw new CircuitOpenError(`circuit open after ${this.failuresInRow} consecutive failures`)
+    const isolated = opts.isolated === true
+    const before = this.failuresInRow
+    const maxRetries = isolated ? Math.min(ISOLATED_MAX_RETRIES, this.opts.maxRetries) : this.opts.maxRetries
     for (let attempt = 0; ; attempt++) {
       const wait = this.lastStart + this.minIntervalMs - this.opts.now()
       if (wait > 0) await this.opts.sleep(wait)
@@ -185,6 +208,7 @@ export class SubsquareClient {
       }
       if (status >= 200 && status < 500 && status !== 429) {
         this.failuresInRow = 0
+        this.isolatedFailuresInRow = 0
         const result = { status, body }
         if (file && this.opts.cache!.mode !== 'read' && (status === 200 || status === 404)) {
           await mkdir(this.opts.cache!.dir, { recursive: true })
@@ -193,8 +217,20 @@ export class SubsquareClient {
         return result
       }
       this.failuresInRow++
-      if (this.failuresInRow >= this.opts.breakerThreshold) throw new CircuitOpenError(`circuit open after ${this.failuresInRow} consecutive failures (last status ${status})`)
-      if (attempt >= this.opts.maxRetries) throw new Error(`GET ${path.split('?')[0]} failed after ${attempt + 1} attempts (status ${status})`)
+      if (!isolated && this.failuresInRow >= this.opts.breakerThreshold) throw new CircuitOpenError(`circuit open after ${this.failuresInRow} consecutive failures (last status ${status})`)
+      if (attempt >= maxRetries) {
+        if (isolated) {
+          // Its own attempts never count toward the breaker; a run of different ones does.
+          this.failuresInRow = before
+          this.isolatedFailuresInRow++
+          if (this.isolatedFailuresInRow >= ISOLATED_FAILURES_TO_OPEN) {
+            this.failuresInRow = this.opts.breakerThreshold
+            throw new CircuitOpenError(`circuit open after ${this.isolatedFailuresInRow} isolated requests failed in a row (last status ${status})`)
+          }
+          throw new ItemRequestError(`GET ${path.split('?')[0]} failed after ${attempt + 1} attempts (status ${status})`)
+        }
+        throw new Error(`GET ${path.split('?')[0]} failed after ${attempt + 1} attempts (status ${status})`)
+      }
       await this.opts.sleep(retryAfter ?? backoffMs(attempt))
     }
   }

@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../../db/client.js'
-import type { SubsquareClient } from './client.js'
+import { ItemRequestError, type GetOptions, type SubsquareClient } from './client.js'
+import { Quarantine } from './quarantine.js'
 import { linkOptions, motionIdsOf, planWrites, type DiffStats, type SourceView } from './diff.js'
 import {
   COLLECTIONS, fetchDetail, fetchDiscussionByUid, fetchPollVotes, fetchReferendumAppendants, fetchSummary, fetchThread,
@@ -147,6 +148,8 @@ export interface FullSource {
   detailOutcome: Map<string, 'fetched' | 'gone' | 'invalid' | 'skipped'>
 }
 
+const SKIPPED: unique symbol = Symbol('skipped')
+
 export class GovernanceSync {
   private inventory = new Map<string, SsItem>()
   /** the last rotation tick swept (sweepSlot), so a late cycle catches up the slots it overran; null after a start */
@@ -154,6 +157,8 @@ export class GovernanceSync {
   private seqCounter = 0
   /** The Internet Archive's queue: one request at a time, a second apart. */
   private readonly archive = spacedQueue(1_000)
+  /** Items Subsquare keeps failing to serve (quarantine.ts). */
+  private readonly quarantine = new Quarantine()
   /** Rows and revisions this process found already normalised (normalise.ts). */
   private readonly normaliseMemo: NormaliseMemo = new Map()
   private readonly now: () => number
@@ -182,6 +187,32 @@ export class GovernanceSync {
 
   private emptyFetched(): CycleResult['fetched'] {
     return { listPages: 0, details: 0, gone: 0, invalid: 0, threads: 0, appendants: 0, polls: 0, uidProbes: 0, head: 0, sweep: 0 }
+  }
+
+  /**
+   * One piece of an incremental cycle (a list, an item's detail, thread, appendants or
+   * poll) fetched in isolation: if Subsquare fails it on every attempt, the cycle skips
+   * just that piece (SKIPPED) and goes on, instead of aborting — and an item that keeps
+   * failing is set aside for a while (`hold`, off for lists, which new items arrive
+   * through). An outage still aborts the cycle: the client opens its breaker when
+   * several isolated requests fail in a row.
+   */
+  private async isolated<T>(key: string, w: Warnings, fn: (opts: GetOptions) => Promise<T>, hold = true): Promise<T | typeof SKIPPED> {
+    const now = this.now()
+    if (hold && this.quarantine.held(key, now)) { warn(w, 'item-held'); return SKIPPED }
+    try {
+      const out = await fn({ isolated: true })
+      if (hold) this.quarantine.ok(key)
+      return out
+    } catch (err) {
+      if (!(err instanceof ItemRequestError)) throw err
+      warn(w, hold ? 'item-failed' : `list-failed:${key}`)
+      if (hold && this.quarantine.failed(key, now)) {
+        warn(w, 'item-quarantined')
+        ;(this.deps.log ?? console.log)(`[governance-sync] ${key}: Subsquare failed it in several cycles in a row; skipped for a while`)
+      }
+      return SKIPPED
+    }
   }
 
   /** The one-time import (and a forced re-import): every collection, every uid, every thread — skipping what is stored unchanged. */
@@ -284,7 +315,7 @@ export class GovernanceSync {
   }
 
   /** Expired polls whose results are not stored yet: read once. */
-  private async pollResults(items: Map<string, SsItem>, subjects: Iterable<string>, state: ForumState, fetched: CycleResult['fetched'], w: Warnings): Promise<Map<string, string>> {
+  private async pollResults(items: Map<string, SsItem>, subjects: Iterable<string>, state: ForumState, fetched: CycleResult['fetched'], w: Warnings, isolate = false): Promise<Map<string, string>> {
     const out = new Map<string, string>()
     for (const subject of subjects) {
       const it = items.get(subject)
@@ -293,7 +324,11 @@ export class GovernanceSync {
       const expired = it.poll.expiresTime != null && it.poll.expiresTime < this.now()
       if (pollSettled(stored)) { out.set(subject, stored); continue }
       if (!expired) { out.set(subject, pollJsonOf(it.poll, null)); continue }
-      const votes = await fetchPollVotes(this.deps.client, it.poll.id)
+      const pollId = it.poll.id
+      const votes = isolate
+        ? await this.isolated(`poll:${subject}`, w, opts => fetchPollVotes(this.deps.client, pollId, opts))
+        : await fetchPollVotes(this.deps.client, pollId)
+      if (votes === SKIPPED) { out.set(subject, state.posts.get(subject)?.poll_json || pollJsonOf(it.poll, null)); continue }
       fetched.polls++
       if (!votes) warn(w, 'poll-votes')
       out.set(subject, pollJsonOf(it.poll, votes))
@@ -313,7 +348,8 @@ export class GovernanceSync {
     // Every list in full: the thread model (which items share a thread) and every
     // item's comment count and activity, read fresh each cycle.
     for (const c of COLLECTIONS) {
-      const list = await listAll(client, c, w)
+      const list = await this.isolated(c, w, opts => listAll(client, c, w, opts), false)
+      if (list === SKIPPED) continue
       fetched.listPages += list.pages
       for (const it of list.items) {
         this.inventory.set(it.subject, it)
@@ -350,7 +386,8 @@ export class GovernanceSync {
       const isItem = 'collection' in ref
       const collection: CollectionName = isItem ? ref.collection : 'discussions'
       if (!isItem) fetched.uidProbes++
-      const d = await fetchDetail(client, collection, isItem ? ref : { uid: ref.uid, sourceId: '' })
+      const d = await this.isolated(subject, w, opts => fetchDetail(client, collection, isItem ? ref : { uid: ref.uid, sourceId: '' }, opts))
+      if (d === SKIPPED) continue
       if (d === 'gone') { if (state.posts.has(subject)) { gone.add(subject); fetched.gone++ }; continue }
       if (d === 'invalid') { warn(w, 'detail-invalid'); fetched.invalid++; continue }
       items.set(subject, d); fetchedSubjects.add(subject); fetched.details++
@@ -368,7 +405,9 @@ export class GovernanceSync {
       if (!g || threads.has(g.rootPostId)) continue
       const storedThread = [...state.comments.values()].some(c => c.thread_key === g.owner)
       if (!g.members.some(m => m.commentsCount > 0) && !storedThread) continue
-      threads.set(g.rootPostId, await fetchThread(client, items.get(subject)!, w))
+      const thread = await this.isolated(`thread:${g.rootPostId}`, w, opts => fetchThread(client, items.get(subject)!, w, opts))
+      if (thread === SKIPPED) continue
+      threads.set(g.rootPostId, thread)
       fetched.threads++
     }
     const appendants = new Map<string, ReturnType<typeof parseInlineAppendants>>()
@@ -376,12 +415,14 @@ export class GovernanceSync {
       const it = items.get(subject)!
       if (it.collection === 'discussions' && it.appendantsRaw?.length) appendants.set(subject, parseInlineAppendants(it.appendantsRaw, w))
       if (it.collection === 'opengov' && it.refs.referendumIndex != null) {
-        const list = await fetchReferendumAppendants(client, it.refs.referendumIndex, w)
+        const index = it.refs.referendumIndex
+        const list = await this.isolated(`appendants:${subject}`, w, opts => fetchReferendumAppendants(client, index, w, opts))
+        if (list === SKIPPED) continue
         fetched.appendants++
         if (list?.length) appendants.set(subject, list)
       }
     }
-    const pollJson = await this.pollResults(items, fetchedSubjects, state, fetched, w)
+    const pollJson = await this.pollResults(items, fetchedSubjects, state, fetched, w, true)
     const view: SourceView = { items, gone, groups, discussionById, links, threads, appendants, pollJson, motionIds: motionIdsOf(this.inventory.values()) }
     return this.finish('incremental', view, state, false, w, fetched, startRequests)
   }

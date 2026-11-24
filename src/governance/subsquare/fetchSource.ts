@@ -1,4 +1,4 @@
-import type { SubsquareClient } from './client.js'
+import { ItemRequestError, type GetOptions, type SubsquareClient } from './client.js'
 import {
   COLLECTIONS, LIST_PATH, parseAppendant, parseComment, parseItem, parsePage, parsePollVotes,
   type CollectionName, type SsAppendant, type SsComment, type SsItem, type SsPollVotes,
@@ -15,13 +15,16 @@ export const warn = (w: Warnings, reason: string) => { w[reason] = (w[reason] ??
 export interface ListResult { total: number; items: SsItem[]; pages: number }
 
 /** Every page of a collection's list. */
-export async function listAll(client: SubsquareClient, collection: CollectionName, w: Warnings): Promise<ListResult> {
+export async function listAll(client: SubsquareClient, collection: CollectionName, w: Warnings, opts: GetOptions = {}): Promise<ListResult> {
   const items: SsItem[] = []
   let total = 0, pages = 0, seen = 0
   for (let page = 1; page <= 200; page++) {
-    const res = await client.get(`${LIST_PATH[collection]}?page=${page}&page_size=${PAGE_SIZE}`)
+    const res = await client.get(`${LIST_PATH[collection]}?page=${page}&page_size=${PAGE_SIZE}`, opts)
     const parsed = res.status === 200 ? parsePage(res.body) : null
-    if (!parsed) throw new Error(`list ${collection} page ${page}: unexpected answer (status ${res.status})`)
+    if (!parsed) {
+      const msg = `list ${collection} page ${page}: unexpected answer (status ${res.status})`
+      throw opts.isolated ? new ItemRequestError(msg) : new Error(msg)
+    }
     pages++
     total = parsed.total
     seen += parsed.items.length
@@ -38,9 +41,9 @@ export async function listAll(client: SubsquareClient, collection: CollectionNam
 export type Detail = SsItem | 'gone' | 'invalid'
 
 /** An item's detail (content, Subsquare's hide/isMalicious flags). */
-export async function fetchDetail(client: SubsquareClient, collection: CollectionName, ref: { uid?: number | null; sourceId: string }): Promise<Detail> {
+export async function fetchDetail(client: SubsquareClient, collection: CollectionName, ref: { uid?: number | null; sourceId: string }, opts: GetOptions = {}): Promise<Detail> {
   const path = collection === 'discussions' ? `/posts/${ref.uid}` : `${LIST_PATH[collection]}/${ref.sourceId}`
-  const res = await client.get(path)
+  const res = await client.get(path, opts)
   if (res.status === 404) return 'gone'
   if (res.status !== 200) return 'invalid'
   return parseItem(collection, res.body) ?? 'invalid'
@@ -53,12 +56,12 @@ export async function fetchDiscussionByUid(client: SubsquareClient, uid: number)
 export interface ThreadResult { ok: boolean; comments: SsComment[]; total: number }
 
 /** A merged thread's comments (top level, replies nested), every page. `ok` only when every page and comment parsed. */
-export async function fetchThread(client: SubsquareClient, via: SsItem, w: Warnings): Promise<ThreadResult> {
+export async function fetchThread(client: SubsquareClient, via: SsItem, w: Warnings, opts: GetOptions = {}): Promise<ThreadResult> {
   const base = `${LIST_PATH[via.collection]}/${via.sourceId}/comments`
   const comments: SsComment[] = []
   let ok = true, total = 0, seen = 0
   for (let page = 1; page <= 100; page++) {
-    const res = await client.get(`${base}?page=${page}&page_size=${PAGE_SIZE}`)
+    const res = await client.get(`${base}?page=${page}&page_size=${PAGE_SIZE}`, opts)
     const parsed = res.status === 200 ? parsePage(res.body) : null
     if (!parsed) { warn(w, 'thread-page'); return { ok: false, comments, total } }
     total = parsed.total
@@ -74,8 +77,8 @@ export async function fetchThread(client: SubsquareClient, via: SsItem, w: Warni
 }
 
 /** An OpenGov referendum's appendants (the proposer's Updates). */
-export async function fetchReferendumAppendants(client: SubsquareClient, index: number, w: Warnings): Promise<SsAppendant[] | null> {
-  const res = await client.get(`/gov2/referenda/${index}/appendants`)
+export async function fetchReferendumAppendants(client: SubsquareClient, index: number, w: Warnings, opts: GetOptions = {}): Promise<SsAppendant[] | null> {
+  const res = await client.get(`/gov2/referenda/${index}/appendants`, opts)
   if (res.status !== 200 || !Array.isArray(res.body)) { warn(w, 'appendants'); return null }
   const out: SsAppendant[] = []
   for (const raw of res.body) {
@@ -96,8 +99,8 @@ export function parseInlineAppendants(raw: unknown[] | null, w: Warnings): SsApp
   return out
 }
 
-export async function fetchPollVotes(client: SubsquareClient, pollId: string): Promise<SsPollVotes | null> {
-  const res = await client.get(`/polls/${pollId}/votes`)
+export async function fetchPollVotes(client: SubsquareClient, pollId: string, opts: GetOptions = {}): Promise<SsPollVotes | null> {
+  const res = await client.get(`/polls/${pollId}/votes`, opts)
   return res.status === 200 ? parsePollVotes(res.body) : null
 }
 
