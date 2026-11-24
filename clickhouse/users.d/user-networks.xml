@@ -1,0 +1,30 @@
+<clickhouse>
+    <!--
+      Where the `default` user may connect from: loopback, and the private ranges
+      Docker's default address pools allocate bridge networks from (every service
+      reaches ClickHouse over a Compose network; the published ports are bound to the
+      host's loopback only). Nothing outside these ranges is a legitimate client.
+
+      The official image's entrypoint rewrites users.d/default-user.xml on every
+      start, defining `default` with networks ::/0. Files in users.d are merged in
+      name order, so this one sorts after it, and replace="replace" swaps the whole
+      list rather than merging into it.
+
+      The SQL-defined users (governance_sync and the readers) carry the same list
+      through ALTER USER ... HOST, outside this file.
+
+      Reloads without a restart: copy into the container's
+      /etc/clickhouse-server/users.d/ and run SYSTEM RELOAD CONFIG; verify on a NEW
+      connection: SELECT name, host_ip FROM system.users WHERE name = 'default'.
+    -->
+    <users>
+        <default>
+            <networks replace="replace">
+                <ip>::1</ip>
+                <ip>127.0.0.1</ip>
+                <ip>172.16.0.0/12</ip>
+                <ip>192.168.0.0/16</ip>
+            </networks>
+        </default>
+    </users>
+</clickhouse>

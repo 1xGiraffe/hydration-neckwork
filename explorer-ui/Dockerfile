@@ -37,7 +37,9 @@ RUN id=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' dist/index.html | head -1 |
 RUN node -e "const fs=require('fs'),c=require('crypto');const h=fs.readFileSync('dist/index.html','utf8');const tags=[...h.matchAll(/<script\\b([^>]*)>([\\s\\S]*?)<\\/script>/g)];const inline=tags.filter(t=>!/\\bsrc=/.test(t[1]));if(inline.length!==1||inline[0][1].trim()!==''){console.error('expected exactly one bare inline <script> in dist/index.html, found',inline.length);process.exit(1)}fs.writeFileSync('/app/csp_script_hash',\"'sha256-\"+c.createHash('sha256').update(inline[0][2],'utf8').digest('base64')+\"'\")" \
  && cat /app/csp_script_hash
 
-FROM nginx:1.31.3-alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752
+# 1.31.10 (2026-11-23) taken inside the 14-day release cooldown by an explicit decision on
+# 2026-11-24: it carries the November security releases (1.31.9 "nginx2root" and follow-ups).
+FROM nginx:1.31.10-alpine@sha256:aceb952b920393b7d0bc7b978927fc283370bea89fb082c6fef0ce18c60f96a9
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
@@ -49,5 +51,14 @@ RUN sed -i "s|__CSP_SCRIPT_HASH__|$(cat /tmp/csp_script_hash)|" /etc/nginx/conf.
 # Shared include for the page-URL locations (see seo_page.conf's own comment).
 COPY seo_page.conf /etc/nginx/seo_page.conf
 COPY --from=build /app/bundle_id.conf /etc/nginx/bundle_id.conf
+
+# Unprivileged: UID 10001 (reserved for the stack's containers, see docker-compose.yml's
+# x-hardened). Master and workers run as it — no `user` switch; the pid file
+# (/run) and the cache and temp dirs (/var/cache/nginx) are tmpfs mounts owned by it, the
+# root filesystem is read-only (docker-compose.yml). Port 80 binds unprivileged inside
+# the container's network namespace.
+RUN sed -i '/^user /d' /etc/nginx/nginx.conf \
+ && touch /etc/nginx/rate-exempt.local.conf
+USER 10001:10001
 
 EXPOSE 80

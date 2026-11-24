@@ -20,7 +20,10 @@ x-service: &service
 # cannot rewrite the code it runs or plant files — the root filesystem is read-only;
 # only /tmp (tsx's compile cache) is writable, in memory. Nothing in these processes
 # writes elsewhere (verified 2026-11-01).
+# Runs as UID 10001, reserved for these containers: an ID no host account is expected to
+# use, so a container escape does not land in a real user's account.
 x-hardened: &hardened
+  user: "10001:10001"
   read_only: true
   tmpfs:
     - /tmp
@@ -110,7 +113,7 @@ services:
         condition: service_healthy
 
   indexer:
-    <<: *service
+    <<: [*service, *hardened]
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-indexer
@@ -137,7 +140,7 @@ services:
       - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
 
   raw-indexer:
-    <<: *service
+    <<: [*service, *hardened]
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-raw-indexer
@@ -157,7 +160,7 @@ services:
     command: ["src/raw/cli.ts"]
 
   raw-live:
-    <<: *service
+    <<: [*service, *hardened]
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-raw-live
@@ -180,7 +183,7 @@ services:
   # `docker compose up` gets identities with no manual step. IDENTITY_CHAINS is
   # forwarded only when set, so the code default in src/config.ts stays canonical.
   identity-snapshot:
-    <<: *service
+    <<: [*service, *hardened]
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-identity-snapshot
@@ -205,7 +208,7 @@ services:
   # server. See ops/backup-user-tables.sh for the export/retention/restore
   # procedure.
   user-backup:
-    <<: *service
+    <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-user-backup
     entrypoint: ["/bin/sh", "/backup-user-tables.sh"]
@@ -228,7 +231,7 @@ services:
   # reads the narrow referendum_preimage_events table, so it runs every 2 minutes;
   # a failed decode is retried every 30.
   referendum-proposals:
-    <<: *service
+    <<: [*service, *hardened]
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-referendum-proposals
@@ -256,7 +259,7 @@ services:
   # the differences (snapshot_reconcile rows; any diff is logged as
   # balance_reconcile_drift). The raw indexer observes every changed balance.
   balance-snapshot:
-    <<: *service
+    <<: [*service, *hardened]
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-balance-snapshot
@@ -290,7 +293,7 @@ services:
   # by the raw indexer): each block with an open raw_parser_warnings row is re-read
   # against this service's archive RPC_URL (src/scripts/lmEntryCapture.ts).
   atoken-anchor:
-    <<: *service
+    <<: [*service, *hardened]
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-atoken-anchor
@@ -306,7 +309,7 @@ services:
     command: ["src/scripts/snapshot-atoken-anchors.ts", "--loop", "--refresh-hours=${ATOKEN_ANCHOR_REFRESH_HOURS:-6}"]
 
   ingestion-supervisor:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: .
       dockerfile: ops/supervisor.Dockerfile
@@ -319,6 +322,8 @@ services:
       schema-bootstrap:
         condition: service_completed_successfully
     environment:
+      # docker/compose CLI state; the root filesystem is read-only.
+      - HOME=/tmp
       - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-hydration-neckwork}
       - ROOT_DIR=/etc/hydration-neckwork
       - CLICKHOUSE_DATABASE=price_data
@@ -388,7 +393,7 @@ services:
   # Config is deserialized with deny_unknown_fields: a typo in any
   # SMART_CONTRACT_VERIFIER__* variable PANICS at startup rather than warning.
   smart-contract-verifier:
-    <<: *service
+    <<: [*service, *hardened]
     image: ghcr.io/blockscout/smart-contract-verifier:v1.10.6
     container_name: hydration-neckwork-smart-contract-verifier
     environment:
@@ -417,7 +422,7 @@ services:
   # user-backup with its own script and volume; see ops/backup-contract-tables.sh
   # for the export/retention/restore procedure.
   contract-backup:
-    <<: *service
+    <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-contract-backup
     entrypoint: ["/bin/sh", "/backup-contract-tables.sh"]
@@ -450,6 +455,7 @@ services:
     <<: *service
     image: ipfs/kubo:v0.43.1@sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48
     container_name: hydration-neckwork-ipfs
+    # UID 10001, like the hardened services (see x-hardened).
     user: "10001:10001"
     read_only: true
     tmpfs:
@@ -464,6 +470,14 @@ services:
     # The image's own command plus --enable-gc: blocks no pin holds are removed
     # (ops/ipfs-init.sh sets the ceiling and period).
     command: ["daemon", "--migrate=true", "--agent-version-suffix=docker", "--enable-gc"]
+    # The three clients' RPC tokens (ops/ipfs-init.sh enforces them only when all are set).
+    env_file:
+      - path: ./secrets/ipfs-token-sync.env
+        required: false
+      - path: ./secrets/ipfs-token-api.env
+        required: false
+      - path: ./secrets/ipfs-token-backup.env
+        required: false
     environment:
       - IPFS_ANNOUNCE=${IPFS_ANNOUNCE:-true}
     volumes:
@@ -494,6 +508,8 @@ services:
     networks:
       - neckwork
       - ipfs-internal
+      # Reaches the isolated image fetcher (governance-image-fetcher) and nothing else there.
+      - governance-fetch
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -501,7 +517,14 @@ services:
         condition: service_completed_successfully
       ipfs:
         condition: service_started
+    # IPFS_TOKEN_SYNC: its bearer token for the IPFS node's RPC (ops/ipfs-init.sh). The
+    # secrets/ files are never committed (mode 600); absent, no token is sent.
+    env_file:
+      - path: ./secrets/ipfs-token-sync.env
+        required: false
     environment:
+      # Strangers' image URLs are fetched by the isolated fetcher, never from here.
+      - IMAGE_FETCHER_URL=http://hydration-neckwork-governance-image-fetcher:8090
       - CLICKHOUSE_HOST=http://clickhouse:8123
       # Its own user, holding SELECT/INSERT on the forum_* tables and nothing else
       # (grants per 021_forum.sql); never `default`.
@@ -516,15 +539,36 @@ services:
       - IPFS_API_URL=http://hydration-neckwork-ipfs:5001
     command: ["src/scripts/sync-subsquare-content.ts", "--loop", "--cycle-minutes=${SUBSQUARE_CYCLE_MINUTES:-10}"]
 
+  # The one process that connects to URLs strangers wrote (src/governance/subsquare/
+  # imageFetcher.ts): the sync's SSRF-guarded image fetch, in a container whose only
+  # network reaches the internet and the sync — never ClickHouse, the IPFS RPC or any
+  # other service — and which holds no credentials at all. A URL that slipped past the
+  # guard would find nothing internal to reach. Same image as the sync.
+  governance-image-fetcher:
+    <<: [*service, *hardened]
+    image: hydration-neckwork-governance-sync
+    container_name: hydration-neckwork-governance-image-fetcher
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    networks:
+      - governance-fetch
+    command: ["src/scripts/image-fetcher.ts"]
+
   # Nightly export of the forum tables (021_forum.sql) — public, but authored by the
   # api and the Subsquare import, so no projection rebuild can regenerate them — plus
   # every forum image as a CAR file from the ipfs node. Mirrors contract-backup; see
   # ops/backup-forum-tables.sh for the export/retention/restore procedure.
   forum-backup:
-    <<: *service
+    <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-forum-backup
     entrypoint: ["/bin/sh", "/backup-forum-tables.sh"]
+    # IPFS_TOKEN_BACKUP: its bearer token for the IPFS node's RPC (dag/export, pin/rm,
+    # repo/gc; ops/ipfs-init.sh); secrets/ is never committed (mode 600).
+    env_file:
+      - path: ./secrets/ipfs-token-backup.env
+        required: false
     networks:
       - neckwork
       - ipfs-internal
@@ -564,6 +608,11 @@ services:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:3000:3000"
+    # IPFS_TOKEN_API: the api's bearer token for the forum IPFS node's RPC (ops/ipfs-init.sh);
+    # secrets/ is never committed (mode 600). Absent, no token is sent.
+    env_file:
+      - path: ./secrets/ipfs-token-api.env
+        required: false
     environment:
       # Per-group page/window logging for the notification lanes; off unless set.
       - NOTIFICATIONS_DEBUG=${NOTIFICATIONS_DEBUG:-}
@@ -844,7 +893,13 @@ services:
   # external reverse proxy (outside this repo) points the public hostname here,
   # never at api-public directly.
   api-public-nginx:
-    <<: *service
+    <<: [*service, *hardened]
+    # Unprivileged nginx (UID 10001, its Dockerfile): read-only root; the pid file and the
+    # proxy cache and temp dirs live in memory, owned by that UID (cache sized to its max_size).
+    tmpfs:
+      - /tmp
+      - /run:size=1m,uid=10001,gid=10001,mode=0755
+      - /var/cache/nginx:size=256m,uid=10001,gid=10001,mode=0700
     build:
       context: ./public-nginx
       dockerfile: Dockerfile
@@ -855,7 +910,13 @@ services:
       - "127.0.0.1:8081:80"
 
   preis-ui:
-    <<: *service
+    <<: [*service, *hardened]
+    # Unprivileged nginx (UID 10001, its Dockerfile): read-only root; the pid file and the
+    # proxy cache and temp dirs live in memory, owned by that UID (cache sized to its max_size).
+    tmpfs:
+      - /tmp
+      - /run:size=1m,uid=10001,gid=10001,mode=0755
+      - /var/cache/nginx:size=64m,uid=10001,gid=10001,mode=0700
     build:
       context: ./preis-ui
       dockerfile: Dockerfile
@@ -870,7 +931,13 @@ services:
       - "127.0.0.1:5173:80"
 
   explorer-ui:
-    <<: *service
+    <<: [*service, *hardened]
+    # Unprivileged nginx (UID 10001, its Dockerfile): read-only root; the pid file and the
+    # proxy cache and temp dirs live in memory, owned by that UID (cache sized to its max_size).
+    tmpfs:
+      - /tmp
+      - /run:size=1m,uid=10001,gid=10001,mode=0755
+      - /var/cache/nginx:size=1300m,uid=10001,gid=10001,mode=0700
     build:
       context: ./explorer-ui
       dockerfile: Dockerfile
@@ -908,4 +975,9 @@ networks:
   # The ipfs node's own outbound path to the IPFS network; nothing else joins it.
   ipfs-egress:
     name: hydration-neckwork-ipfs-egress
+    driver: bridge
+  # The image fetcher's only network: a route out to the internet, and the sync (which
+  # asks it for images). No other service joins it.
+  governance-fetch:
+    name: hydration-neckwork-governance-fetch
     driver: bridge

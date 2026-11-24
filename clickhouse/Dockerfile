@@ -1,4 +1,4 @@
-FROM clickhouse/clickhouse-server:26.3.9.8
+FROM clickhouse/clickhouse-server:26.3.62.3@sha256:de3e47c64078aa196dae2349e048fc98ba81947f651f5c20e06e46baea8ae40a
 # System-log retention. Without this the stock image logs at `trace` with no
 # TTL on any system table — measured at 461 GiB (~6 GiB/day) against 158 GiB of actual data. See config.d/logging.xml.
 COPY config.d/ /etc/clickhouse-server/config.d/
