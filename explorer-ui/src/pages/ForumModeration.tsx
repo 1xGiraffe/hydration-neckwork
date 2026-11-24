@@ -125,7 +125,7 @@ function QueueItem({ item, now }: { item: ModerationItem; now: number }) {
         <ul className="mod-reports">
           {item.reports.map(r => (
             <li key={r.reportId}>
-              <strong>{r.reason}</strong>{r.note && <> — “{r.note}”</>} <span className="muted">· {r.reporter ? <AddrPill account={r.reporter} noCopy /> : 'unknown'} · {relativeTime(r.at, now)}</span>{' '}
+              <strong>{r.reason}</strong>{r.note && <> — “{r.note}”</>} <span className="muted">· {r.reporter ? <AddrPill account={r.reporter} noCopy /> : (r.system ?? 'unknown')} · {relativeTime(r.at, now)}</span>{' '}
               <button type="button" className="fa-link" onClick={async () => { try { await forumApi.setReport(r.reportId, 'dismissed'); setDone('Report dismissed.'); after(null) } catch (e) { setDone(errorText(e)) } }}>Dismiss</button>
             </li>
           ))}

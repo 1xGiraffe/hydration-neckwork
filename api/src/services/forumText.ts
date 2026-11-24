@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isLocalNetworkHref } from './localNetwork.ts'
 import { normalizeAddress } from './addressIdentity.ts'
 
 // The forum's text rules, shared by the write path (forumWrite.ts) and the forum
@@ -84,6 +85,21 @@ export function linkCount(body: string): number {
   const inline = body.match(/(?<!!)\[[^\]]*\]\([^)]*\)/g)?.length ?? 0
   const bare = body.replace(/!?\[[^\]]*\]\([^)]*\)/g, ' ').match(/\bhttps?:\/\/[^\s<>()]+/gi)?.length ?? 0
   return inline + bare
+}
+
+/**
+ * Every http(s) URL in a text — markdown links and images, autolinks, bare URLs, HTML
+ * attributes — that points into the reader's own network or machine (isLocalNetworkHref):
+ * a native write carrying one is refused, since such a link can only probe whoever
+ * opens it.
+ */
+export function localNetworkUrls(text: string): string[] {
+  const out: string[] = []
+  for (const m of text.matchAll(/https?:\/\/[^\s<>()"'`\[\]{}|\\^]+/gi)) {
+    const url = m[0].replace(/[.,;:!?]+$/, '')
+    if (isLocalNetworkHref(url) && !out.includes(url)) out.push(url)
+  }
+  return out
 }
 
 /** The content hash duplicate detection compares: case- and whitespace-insensitive. */

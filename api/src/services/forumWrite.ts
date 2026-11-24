@@ -10,7 +10,7 @@ import {
   type ForumCommentMeta, type ForumPostMeta, forumMediaUrlMap,
 } from './forumStore.ts'
 import { commentFromRow, getForumPost, imageUrlsIn, threadKeyFor, type CommentRow, type ForumComment, type ForumPostDetail, type ForumPostStub } from './forumRead.ts'
-import { FORUM_TOPICS, LIMITS, cleanBody, cleanLabels, cleanTitle, contentHash, hasVisibleText, linkCount, mentionsIn } from './forumText.ts'
+import { FORUM_TOPICS, LIMITS, cleanBody, cleanLabels, cleanTitle, contentHash, hasVisibleText, linkCount, localNetworkUrls, mentionsIn } from './forumText.ts'
 import { SlidingLimiter, limitMessage, type LimitAction } from './forumLimits.ts'
 
 // The forum's write side (/user/forum/*): discussions, comments and replies, edits
@@ -398,7 +398,21 @@ function validateBody(raw: unknown, max: number, standing: ForumStanding, what: 
   if (!standing.linksUnlimited && linkCount(body) > LIMITS.linksPerBodyLowBalance) {
     throw new ForumWriteError(422, `A ${what} can carry at most ${LIMITS.linksPerBodyLowBalance} links from an account holding under 1,000 HDX.`, 'too-many-links')
   }
+  refuseLocalNetworkLinks(body, `This ${what}`)
   return body
+}
+
+/**
+ * Refuses text that links into a private or local network (localhost, private IPs, bare
+ * one-label names, .local and similar, unusual ports): enforced here, in the api, so it
+ * holds for every client, not only the explorer's editor.
+ */
+function refuseLocalNetworkLinks(text: string, what: string): void {
+  const [first] = localNetworkUrls(text)
+  if (first) {
+    const shown = first.length > 120 ? `${first.slice(0, 119)}…` : first
+    throw new ForumWriteError(422, `${what} links to a private or local network address (${shown}). Only public web links are allowed.`, 'local-link')
+  }
 }
 
 function validateTitle(raw: unknown): string {
@@ -406,6 +420,7 @@ function validateTitle(raw: unknown): string {
   const title = cleanTitle(raw)
   if (!title) throw new ForumWriteError(400, 'The title is empty.', 'empty')
   if (title.length > LIMITS.titleChars) throw new ForumWriteError(422, `The title is ${title.length} characters; the limit is ${LIMITS.titleChars}.`, 'too-long')
+  refuseLocalNetworkLinks(title, 'The title')
   return title
 }
 
@@ -578,6 +593,7 @@ export async function editPost(ctx: WriteContext, postId: string, input: { title
         if (typeof input.tldr !== 'string') throw new ForumWriteError(400, 'The summary must be text.', 'invalid')
         next.tldr = cleanTitle(input.tldr)
         if (next.tldr.length > LIMITS.tldrChars) throw new ForumWriteError(422, `The summary is limited to ${LIMITS.tldrChars} characters.`, 'too-long')
+        refuseLocalNetworkLinks(next.tldr, 'The summary')
       }
       if (input.labels !== undefined) {
         if (base.kind !== 'discussion') throw new ForumWriteError(422, 'Only discussions have topics.', 'invalid')
@@ -901,6 +917,81 @@ async function maybeAutoHide(targetId: string): Promise<boolean> {
   // A moderator may have decided while the reporters were read: the hide re-reads the
   // item and its reports inside the item's serialized write, and yields to that decision.
   return (await moderate(AUTO_MODERATOR, targetId, 'hide', 'reported', stored => autoHideOpen(targetId, stored))) != null
+}
+
+// ---- import probes (the sync's guard refusals → the moderators' queue) ----
+//
+// The Subsquare import fetches the images imported text references, through an SSRF
+// guard (src/governance/subsquare/safeFetch.ts) that refuses a non-https scheme, an IP
+// literal, a port other than 443 and a name resolving to a non-public address, and
+// records the refusal in forum_media_urls. Honest text almost never trips those; a post
+// that does is likely probing the importer. Every visible post or comment that
+// references such a URL gets ONE report from the import guard — the reasons and URLs in
+// its note — so it reaches the moderators' queue. It only queues: hiding stays a
+// moderator's decision, and a decided report is never reopened.
+
+/** forum_media_urls reasons that mean the guard refused the address itself (not a dead or oversized image). */
+export const PROBE_FETCH_REASONS = ['fetch:scheme', 'fetch:ip-literal', 'fetch:port', 'fetch:private-address'] as const
+/** The reporter an import-guard report is filed under (never an account; the queue names it). */
+export const PROBE_REPORTER = 'system:import-guard'
+const PROBE_EVERY_MS = 10 * 60_000
+const PROBE_NEEDLES_PER_QUERY = 200
+
+/** Files the import guard's report on every visible item that references a refused address; returns how many it filed. */
+export async function flagImportProbes(): Promise<number> {
+  requireReady()
+  const res = await client.query({
+    query: `SELECT original_url AS u, reason AS r FROM price_data.forum_media_urls FINAL
+            WHERE status = 'failed' AND reason IN {reasons:Array(String)} LIMIT 2000`,
+    query_params: { reasons: [...PROBE_FETCH_REASONS] }, format: 'JSONEachRow', clickhouse_settings: READ_SETTINGS,
+  })
+  const refused = new Map((await res.json<{ u: string; r: string }>()).filter(x => x.u).map(x => [x.u, x.r]))
+  if (refused.size === 0) return 0
+  const urls = [...refused.keys()]
+  const hits = new Map<string, string[]>()
+  for (let i = 0; i < urls.length; i += PROBE_NEEDLES_PER_QUERY) {
+    const needles = urls.slice(i, i + PROBE_NEEDLES_PER_QUERY)
+    for (const [table, idCol] of [['forum_posts', 'post_id'], ['forum_comments', 'comment_id']] as const) {
+      const r = await client.query({
+        query: `SELECT ${idCol}, body FROM price_data.${table} FINAL
+                WHERE hidden = 0 AND deleted = 0 AND multiSearchAny(body, {n:Array(String)}) LIMIT 1000`,
+        query_params: { n: needles }, format: 'JSONEachRow', clickhouse_settings: READ_SETTINGS,
+      })
+      for (const row of await r.json<Record<string, unknown>>()) {
+        const id = String(row[idCol] ?? ''), body = row.body
+        const found = needles.filter(u => typeof body === 'string' && body.includes(u))
+        if (id && found.length) hits.set(id, [...(hits.get(id) ?? []), ...found])
+      }
+    }
+  }
+  let filed = 0
+  for (const [targetId, found] of hits) {
+    if (!visibleTarget(targetId)) continue
+    const id = reportId(PROBE_REPORTER, targetId)
+    const existing = await client.query({
+      query: `SELECT status FROM price_data.user_forum_reports FINAL WHERE report_id = {id:String} AND deleted = 0 LIMIT 1`,
+      query_params: { id }, format: 'JSONEachRow', clickhouse_settings: READ_SETTINGS,
+    })
+    if ((await existing.json<{ status: string }>()).length) continue
+    const list = [...new Set(found)].map(u => `${u} (${(refused.get(u) ?? '').replace(/^fetch:/, '')})`).join(', ')
+    let note = `Images aimed at internal addresses, refused by the import guard: ${list}`
+    if (note.length > LIMITS.reportNoteChars) note = `${note.slice(0, LIMITS.reportNoteChars - 1)}…`
+    const now = Date.now()
+    await insert('user_forum_reports', [{
+      report_id: id, reporter_account_id: PROBE_REPORTER, target_id: targetId, reason: 'other',
+      note, status: 'open', deleted: 0, created_at: ts(now).slice(0, 19), updated_at: ts(now),
+    }])
+    filed++
+  }
+  if (filed) console.log(`[forum] import guard: ${filed} item(s) referencing refused addresses queued for moderation`)
+  return filed
+}
+
+/** Every PROBE_EVERY_MS (the sync's cycle), once the forum store is ready. Never throws. */
+export function startImportProbeFlagging(): void {
+  const tick = () => { if (forumReady()) void flagImportProbes().catch(err => console.warn('[forum] import-guard flagging failed', err instanceof Error ? err.name : 'error')) }
+  setTimeout(tick, 60_000).unref()
+  setInterval(tick, PROBE_EVERY_MS).unref()
 }
 
 // ---- moderation ----

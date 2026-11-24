@@ -1,5 +1,6 @@
 import markdownIt, { type MarkdownIt, type StateCore, type Token } from 'markdown-it'
 import DOMPurify from 'dompurify'
+import { isLocalNetworkHref } from './localNetwork'
 
 // The ONE renderer for user-authored forum text (posts, comments, revisions,
 // previews). Every byte of it is hostile: Subsquare's imported set holds live XSS
@@ -191,6 +192,8 @@ export function isExternalHttp(href: string): boolean {
   return /^https?:\/\//i.test(href) && !/[\\\s]/.test(href)
 }
 
+export { isLocalNetworkHref } from './localNetwork'
+
 /**
  * A same-origin path, as the URL parser reads it: backslashes and whitespace are
  * refused outright (`/\evil.com` is another host to a browser), and what remains must
@@ -244,6 +247,12 @@ function enforcePolicy(root: DocumentFragment, media: Map<string, string>): void
       span.textContent = alt ? `Image unavailable: ${alt}` : 'Image unavailable'
       span.className = 'md-img-gone'
       img.replaceWith(span)
+    } else if (isExternalHttp(src) && isLocalNetworkHref(src)) {
+      // An address in the reader's own network: never a link, it could only probe it.
+      const span = doc.createElement('span')
+      span.textContent = alt ? `Image unavailable: ${alt}` : 'Image unavailable'
+      span.className = 'md-img-gone'
+      img.replaceWith(span)
     } else if (isExternalHttp(src)) {
       const a = doc.createElement('a')
       a.setAttribute('href', src)
@@ -263,7 +272,7 @@ function enforcePolicy(root: DocumentFragment, media: Map<string, string>): void
     const keepClass = a.className === 'md-img-link' ? 'md-img-link' : ''
     for (const attr of Array.from(a.attributes)) a.removeAttribute(attr.name)
     if (title) a.setAttribute('title', title)
-    if (isExternalHttp(href)) {
+    if (isExternalHttp(href) && !isLocalNetworkHref(href)) {
       a.setAttribute('href', href)
       a.setAttribute('target', '_blank')
       a.setAttribute('rel', EXTERNAL_REL)
@@ -278,7 +287,8 @@ function enforcePolicy(root: DocumentFragment, media: Map<string, string>): void
         if (/^\/account\/[^/?#]+$/.test(path) && (a.textContent ?? '').trimStart().startsWith('@')) a.className = 'md-mention'
       }
     }
-    // Any other scheme: no href, so it is inert text in an <a> with no target.
+    // Any other scheme, or an address in the reader's own network (isLocalNetworkHref):
+    // no href, so it is inert text in an <a> with no target.
   }
 }
 

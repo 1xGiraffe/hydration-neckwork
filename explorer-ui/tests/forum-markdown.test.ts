@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { markdownToHtml, type RefContext } from '../src/markdown/render'
+import { isLocalNetworkHref, markdownToHtml, type RefContext } from '../src/markdown/render'
 
 // The markdown stage of the forum renderer (src/markdown/render.ts), which runs
 // before DOMPurify and the link/image policy. Raw HTML in markdown must come out
@@ -53,5 +53,29 @@ describe('forum markdown stage', () => {
 
   it('keeps an image as an <img> for the policy pass to rehost or demote', () => {
     expect(markdownToHtml('![chart](https://i.example/a.png)')).toContain('<img src="https://i.example/a.png" alt="chart">')
+  })
+})
+
+describe('isLocalNetworkHref: links that could only probe the reader\'s own network', () => {
+  it('flags internal-service style targets and every spelling of a private address', () => {
+    for (const href of [
+      'http://db:8123/?query=SELECT%201', 'https://db./x.png', 'https://10.0.2.1/x.png',
+      'https://storage:5001/api/v0/version', 'http://localhost/', 'http://127.0.0.1/', 'http://2130706433/',
+      'http://0x7f.1/', 'http://192.168.1.1/admin', 'http://172.20.0.5/', 'http://169.254.169.254/latest/meta-data',
+      'http://100.64.1.1/', 'http://0.0.0.0/', 'http://[::1]/', 'http://[fd00::1]/', 'http://[fe80::1]/', 'http://[::ffff:192.168.0.1]/',
+      'http://router.local/', 'http://nas.home.arpa/', 'http://db.internal/', 'http://printer.lan/', 'https://example.com:8443/x',
+    ]) expect(isLocalNetworkHref(href), href).toBe(true)
+  })
+
+  it('leaves public web links alone', () => {
+    for (const href of [
+      'https://hydration.net', 'https://i.imgur.com/a.png', 'https://example.com:443/x', 'http://example.com:80/x',
+      'https://8.8.8.8/', 'https://[2606:4700::1111]/', 'https://github.com/galacticcouncil/hydration-node/pull/1571',
+      'https://example.org/img.png', 'https://localhost.example.com/',
+    ]) expect(isLocalNetworkHref(href), href).toBe(false)
+  })
+
+  it('is false for what is not an http(s) URL', () => {
+    for (const href of ['/account/abc', '#x', 'mailto:a@b.c', 'javascript:alert(1)', 'not a url']) expect(isLocalNetworkHref(href), href).toBe(false)
   })
 })

@@ -9,7 +9,7 @@ import { forumReady } from '../services/forumStore.ts'
 import { FORUM_TOPICS, LIMITS } from '../services/forumText.ts'
 import { FORUM_LIMITS } from '../services/forumLimits.ts'
 import {
-  ForumWriteError, MOD_ACTIONS, MOD_REASONS, REPORT_REASONS, addUpdate, applyModeration, createComment, createDiscussion, deleteComment,
+  ForumWriteError, MOD_ACTIONS, MOD_REASONS, PROBE_REPORTER, REPORT_REASONS, addUpdate, applyModeration, createComment, createDiscussion, deleteComment,
   deletePost, editComment, editPost, fileReport, isForumModerator, moderationQueue, postPermissions, setMute, setReportStatus,
   standingOf, type WriteContext,
 } from '../services/forumWrite.ts'
@@ -166,7 +166,7 @@ export async function forumRoutes(fastify: FastifyInstance): Promise<void> {
     const q = await moderationQueue()
     const ref = (id: string) => (/^0x[0-9a-f]{64}$/.test(id) ? accountRef(id) : null)
     const shape = (i: Awaited<ReturnType<typeof moderationQueue>>['reported'][number]) => ({
-      ...i, author: ref(i.author), reports: i.reports.map(r => ({ ...r, reporter: ref(r.reporter) })),
+      ...i, author: ref(i.author), reports: i.reports.map(r => ({ ...r, reporter: ref(r.reporter), ...(r.reporter === PROBE_REPORTER ? { system: 'Import guard' } : {}) })),
     })
     return { reported: q.reported.map(shape), recent: q.recent.map(shape), actions: MOD_ACTIONS, reasons: MOD_REASONS, reportReasons: REPORT_REASONS }
   })

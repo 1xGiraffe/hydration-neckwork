@@ -124,3 +124,21 @@ test('headings start one level below the page title, and an @name account link r
   expect(html).toContain('<a href="/account/15V2Rfi6METM3FJpZJH5QVM3WYHEmNLcQ52FcMPYTtdTipA4" data-internal="1" class="md-mention">@Alice</a>')
   expect(html).toContain('<a href="/account/15V2Rfi6METM3FJpZJH5QVM3WYHEmNLcQ52FcMPYTtdTipA4" data-internal="1">her page</a>')
 })
+
+test('links and images that point into the reader\'s own network render as inert text', async ({ page }) => {
+  await page.goto('/')
+  const html = await page.evaluate(async () => {
+    const mod = await import('/src/markdown/render.ts')
+    return mod.renderForumBodyToString({
+      format: 'markdown',
+      body: '![c](http://db:8123/?query=SELECT%201) ![d](https://10.0.2.1/x.png) ![e](https://storage:5001/api/v0/version) ![f](https://db./x.png)'
+        + '\n\n[router](http://192.168.1.1/admin) [meta](http://169.254.169.254/latest/meta-data) [site](https://hydration.net)',
+      media: {},
+    })
+  })
+  for (const target of ['db:8123', '10.0.2.1', 'storage:5001', '192.168.1.1', '169.254.169.254']) expect(html).not.toContain(target)
+  expect(html).toContain('<span class="md-img-gone">Image unavailable: c</span>')
+  expect(html).toContain('<span class="md-img-gone">Image unavailable: f</span>')
+  expect(html).toContain('<a>router</a>')
+  expect(html).toContain('<a href="https://hydration.net" target="_blank" rel="noopener noreferrer nofollow ugc" class="md-ext">site</a>')
+})

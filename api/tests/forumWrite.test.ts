@@ -53,6 +53,7 @@ function forumFake(balances: Record<string, bigint>) {
   const posts = new Map<string, Row>(), comments = new Map<string, Row>(), revisions = new Map<string, Row>()
   const modlog: Row[] = [], reports = new Map<string, Row>(), sanctions = new Map<string, Row>()
   const media = new Map<string, Row>(), commands: string[] = []
+  const mediaUrls: Row[] = []
   const client = {
     query: async ({ query, query_params }: { query: string; query_params?: Record<string, unknown> }) => ({
       json: async () => {
@@ -68,6 +69,7 @@ function forumFake(balances: Record<string, bigint>) {
         if (query.includes('user_forum_reports') && query.includes('AS r,')) return [...reports.values()].filter(r => r.target_id === p.t).map(r => ({ r: r.reporter_account_id, status: r.status }))
         if (query.includes('user_forum_reports') && p.id) return [...reports.values()].filter(r => r.report_id === p.id)
         if (query.includes('user_forum_reports')) return [...reports.values()]
+        if (query.includes('forum_media_urls')) return mediaUrls.filter(r => r.status === 'failed' && (p.reasons as string[]).includes(String(r.reason))).map(r => ({ u: r.original_url, r: r.reason }))
         if (query.includes('forum_media FINAL WHERE uploader')) return [{ bytes: 0, recent: [] }]
         if (query.includes('forum_media')) return [...media.values()].filter(r => r.cid === p.c)
         return []
@@ -89,7 +91,7 @@ function forumFake(balances: Record<string, bigint>) {
       if (query.startsWith('DELETE FROM price_data.forum_revisions')) for (const k of [...revisions.keys()]) if (k.startsWith(`${query_params?.id}|`)) revisions.delete(k)
     },
   } as unknown as ClickHouseClient
-  return { client, posts, comments, revisions, modlog, reports, sanctions, media, commands }
+  return { client, posts, comments, revisions, modlog, reports, sanctions, media, mediaUrls, commands }
 }
 
 const meta = (p: Partial<import('../src/services/forumStore.ts').ForumPostMeta> & { postId: string }) => ({
@@ -513,5 +515,65 @@ describe('routes', () => {
     const res = await app.inject({ method: 'POST', url: '/user/forum/discussions', headers: { authorization: `Bearer ${bob}` }, payload: { title: 't', body: 'b' } })
     expect(res.statusCode).toBe(403)
     expect(res.json().error).toMatch(/100 HDX/)
+  })
+})
+
+describe('import-guard flagging', () => {
+  const refuse = (url: string, reason: string) => fake.mediaUrls.push({ original_url: url, cid: '', status: 'failed', reason, attempts: 1 })
+  // Probe text arrives through the import (native writes refuse it): a post written here,
+  // then its stored body replaced as the sync would store an imported one.
+  const imported = async (title: string, body: string) => {
+    const { post } = await write.createDiscussion(ctx(ALICE), { title, body: 'placeholder' })
+    fake.posts.set(post.postId, { ...fake.posts.get(post.postId)!, body })
+    return { post }
+  }
+
+  it('files one import-guard report on an item whose images the SSRF guard refused, and never twice', async () => {
+    const { post } = await imported('Probe', '![c](http://db:8123/?query=SELECT%201)\n\n![d](https://10.0.2.1/x.png)\n\n![ok](https://i.imgur.com/a.png)')
+    const { post: clean } = await write.createDiscussion(ctx(ALICE), { title: 'Clean', body: '![ok](https://i.imgur.com/a.png)' })
+    refuse('http://db:8123/?query=SELECT%201', 'fetch:scheme')
+    refuse('https://10.0.2.1/x.png', 'fetch:ip-literal')
+    refuse('https://i.imgur.com/a.png', 'fetch:http-404') // a dead image is not a probe
+    expect(await write.flagImportProbes()).toBe(1)
+    const filed = [...fake.reports.values()]
+    expect(filed).toHaveLength(1)
+    expect(filed[0]).toMatchObject({ reporter_account_id: write.PROBE_REPORTER, target_id: post.postId, reason: 'other', status: 'open' })
+    expect(String(filed[0].note)).toContain('http://db:8123/?query=SELECT%201 (scheme)')
+    expect(String(filed[0].note)).toContain('https://10.0.2.1/x.png (ip-literal)')
+    expect(filed.some(r => r.target_id === clean.postId)).toBe(false)
+    expect(await write.flagImportProbes()).toBe(0)
+    expect(fake.posts.get(post.postId)).toMatchObject({ hidden: 0 }) // it only queues
+  })
+
+  it('never reopens a report a moderator decided, and skips hidden items', async () => {
+    const { post } = await imported('Probe', '![e](https://storage:5001/api/v0/version)')
+    refuse('https://storage:5001/api/v0/version', 'fetch:port')
+    expect(await write.flagImportProbes()).toBe(1)
+    const [id] = [...fake.reports.keys()]
+    fake.reports.set(id, { ...fake.reports.get(id)!, status: 'dismissed' })
+    expect(await write.flagImportProbes()).toBe(0)
+    expect(fake.reports.get(id)).toMatchObject({ status: 'dismissed' })
+
+    const { post: other } = await imported('Probe 2', '![f](https://db./x.png)')
+    refuse('https://db./x.png', 'fetch:private-address')
+    await write.applyModeration(MOD, other.postId, 'hide', 'spam')
+    expect(await write.flagImportProbes()).toBe(0)
+    expect([...fake.reports.values()].some(r => r.target_id === other.postId)).toBe(false)
+    expect(post.postId).not.toBe(other.postId)
+  })
+})
+
+describe('links into a private or local network', () => {
+  it('are refused in every native write — discussion, title, comment, Update, edit, summary — through the api', async () => {
+    const probe = '![c](http://db:8123/?query=SELECT%201)'
+    await expect(write.createDiscussion(ctx(ALICE), { title: 'Notes', body: probe })).rejects.toMatchObject({ status: 422, code: 'local-link' })
+    await expect(write.createDiscussion(ctx(ALICE), { title: 'see http://192.168.1.1/admin', body: 'x' })).rejects.toMatchObject({ status: 422, code: 'local-link' })
+    await expect(write.createComment(ctx(BOB), { threadKey: 'opengov:3', body: 'look https://10.0.2.1/x.png' })).rejects.toMatchObject({ status: 422, code: 'local-link' })
+    const { post } = await write.createDiscussion(ctx(ALICE), { title: 'Fine', body: 'See https://hydration.net' })
+    await expect(write.editPost(ctx(ALICE), post.postId, { body: 'now <http://localhost:5001/api/v0/config>' })).rejects.toMatchObject({ status: 422, code: 'local-link' })
+    await expect(write.editPost(ctx(ALICE), post.postId, { tldr: 'http://nas.local/' })).rejects.toMatchObject({ status: 422, code: 'local-link' })
+    const { comment } = await write.createComment(ctx(BOB), { threadKey: 'opengov:3', body: 'public https://github.com/x' })
+    await expect(write.editComment(ctx(BOB), comment.commentId, { body: 'https://storage:5001/api/v0/version' })).rejects.toMatchObject({ status: 422, code: 'local-link' })
+    expect(fake.posts.get(post.postId)).toMatchObject({ body: 'See https://hydration.net' })
   })
 })

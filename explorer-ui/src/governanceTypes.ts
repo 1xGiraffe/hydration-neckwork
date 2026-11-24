@@ -439,7 +439,7 @@ export interface ModerationItem {
   hidden: boolean
   hiddenReason: string
   moderated: boolean
-  reports: Array<{ reportId: string; reporter: AccountRef | null; reason: string; note: string; at: string }>
+  reports: Array<{ reportId: string; reporter: AccountRef | null; system?: string; reason: string; note: string; at: string }>
 }
 
 export interface ModerationQueue { reported: ModerationItem[]; recent: ModerationItem[]; actions: string[]; reasons: string[]; reportReasons: string[] }

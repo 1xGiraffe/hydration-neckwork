@@ -42,7 +42,7 @@ import { initGovernanceTreasury } from './services/governanceTreasury.ts'
 import { initGovernanceStats } from './services/governanceStats.ts'
 import { initForumStore, refreshForumStore, startForumStoreRefresh } from './services/forumStore.ts'
 import { initForumRead } from './services/forumRead.ts'
-import { initForumWrite } from './services/forumWrite.ts'
+import { initForumWrite, startImportProbeFlagging } from './services/forumWrite.ts'
 import { initForumMedia, startForumMediaHousekeeping } from './services/forumMedia.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
 import { loadRuntimeErrorNames, stopRuntimeErrorNamesRefresh } from './services/runtimeErrorNames.ts'
@@ -450,6 +450,8 @@ async function start() {
     startForumStoreRefresh()
     // Forum uploads: seed the day's global budget, then unpin unreferenced uploads periodically.
     void startForumMediaHousekeeping()
+    // Imported items whose images the sync's SSRF guard refused: queued for the moderators.
+    startImportProbeFlagging()
     // H160 → bound substrate owner map for display resolution.
     await loadEvmBindings().catch(err => console.warn('[evm] binding load failed; bound EVM signers display unresolved until the refresh succeeds', err))
     startEvmBindingsRefresh()
