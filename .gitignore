@@ -23,3 +23,6 @@ playwright-report/
 
 # planning/spec/report scratch (AGENTS: do not commit task plans, agent reports)
 docs/superpowers/
+
+# Credentials compose injects with env_file (IPFS RPC tokens): never committed.
+secrets/

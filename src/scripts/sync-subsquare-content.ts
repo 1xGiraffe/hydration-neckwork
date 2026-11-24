@@ -2,6 +2,7 @@ import { writeFile } from 'node:fs/promises'
 import { createClickHouseClient } from '../db/client.js'
 import { hasFlag, integerOption, stringOption } from '../util/cliArgs.js'
 import { CircuitOpenError, SubsquareClient } from '../governance/subsquare/client.js'
+import { remoteSafeFetch } from '../governance/subsquare/imageFetcher.js'
 import { KuboClient } from '../governance/subsquare/kubo.js'
 import { buildReport, verifyMedia } from '../governance/subsquare/report.js'
 import { GovernanceSync, type CycleResult } from '../governance/subsquare/sync.js'
@@ -36,14 +37,19 @@ const enabled = (process.env.SUBSQUARE_SYNC_ENABLED ?? 'true').toLowerCase() !==
 const ipfsUrl = process.env.IPFS_API_URL ?? ''
 
 const ch = createClickHouseClient()
-const kubo = ipfsUrl ? new KuboClient(ipfsUrl) : null
+const kubo = ipfsUrl ? new KuboClient(ipfsUrl, fetch, process.env.IPFS_TOKEN_SYNC ?? '') : null
 const client = new SubsquareClient({
   baseUrl: process.env.SUBSQUARE_API_URL ?? 'https://hydration-api.subsquare.io',
   rps: Number(process.env.SUBSQUARE_RPS ?? 1) || 1,
   cache: cacheDir ? { dir: cacheDir, mode: cacheMode } : undefined,
 })
+// Strangers' image URLs are fetched by the isolated fetcher service when it is configured
+// (docker-compose.yml: governance-image-fetcher), never from this process's networks.
+const fetcherUrl = process.env.IMAGE_FETCHER_URL ?? ''
+console.log(fetcherUrl ? '[governance-sync] image fetches go through the isolated fetcher' : '[governance-sync] WARN: IMAGE_FETCHER_URL unset — image fetches run in this process')
 const sync = new GovernanceSync({
   client, ch, kubo, dryRun, images: !hasFlag('no-images') && !!kubo,
+  imageFetch: fetcherUrl ? remoteSafeFetch(fetcherUrl) : undefined,
   maxImagesPerCycle: integerOption('max-images', 400, { min: 0, max: 10_000, clamp: true }),
   cycleMinutes, sweepHours, refetchAll: hasFlag('refetch-all'),
 })

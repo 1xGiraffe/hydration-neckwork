@@ -1,7 +1,7 @@
 import { ImageError, MAX_IMAGE_BYTES, sanitizeImage } from './imageSanitize.js'
 import type { KuboClient } from './kubo.js'
 import { ipfsCidOf, sha256Hex, ts, type MediaRow, type MediaUrlRow } from './rows.js'
-import { SafeFetchError, safeFetch, type SafeFetchOptions } from './safeFetch.js'
+import { SafeFetchError, safeFetch, type SafeFetchOptions, type SafeFetchResult } from './safeFetch.js'
 import type { StoredMediaUrl } from './store.js'
 
 // Re-hosting the images imported bodies reference, and posts' banners, onto the
@@ -66,6 +66,8 @@ export const ARCHIVE_TIMEOUT_MS = 30_000
 export interface RehostDeps {
   kubo: KuboClient
   fetchOptions?: SafeFetchOptions
+  /** The guarded fetch itself; the sync passes the isolated fetcher's (imageFetcher.ts). Default: safeFetch in this process. */
+  fetch?: (url: string, options?: SafeFetchOptions) => Promise<SafeFetchResult>
   pinTimeoutMs?: number
   now: () => number
   /**
@@ -207,9 +209,11 @@ async function rehost(url: string, stored: StoredMediaUrl | undefined, deps: Reh
   }
   let bytes: Uint8Array
   try {
-    const fetchIt = () => safeFetch(url, deps.fetchOptions)
+    const fetchIt = () => (deps.fetch ?? safeFetch)(url, deps.fetchOptions)
     bytes = (await (deps.throttle && isSubsquareHost(url) ? deps.throttle(fetchIt) : fetchIt())).bytes
   } catch (err) {
+    // The isolated fetcher is down: our outage, not the image's — defer, never spend an attempt.
+    if (err instanceof SafeFetchError && err.reason === 'fetcher') throw new Deferred('fetcher-unavailable')
     const reason = err instanceof SafeFetchError ? `fetch:${err.reason}` : 'fetch:error'
     if (TAKEDOWN_STATUSES.has(reason)) return failed(reason)
     return (await fromArchive(url, existing, deps, ok, failed)) ?? failed(reason)
@@ -242,7 +246,7 @@ async function fromArchive(
   if (!deps.archiveThrottle) return null
   let bytes: Uint8Array
   try {
-    bytes = (await deps.archiveThrottle(() => safeFetch(archiveUrl(url), { ...deps.fetchOptions, timeoutMs: ARCHIVE_TIMEOUT_MS }))).bytes
+    bytes = (await deps.archiveThrottle(() => (deps.fetch ?? safeFetch)(archiveUrl(url), { ...deps.fetchOptions, timeoutMs: ARCHIVE_TIMEOUT_MS }))).bytes
   } catch { return null }
   const now = ts(deps.now())
   const row = (c: string, b: Uint8Array, img: { mime: string; width: number; height: number }, origin: string): MediaRow => ({

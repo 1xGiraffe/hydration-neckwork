@@ -13,6 +13,9 @@ set -eu
 HOST="${CLICKHOUSE_HOST:-clickhouse}"
 PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
 IPFS="${IPFS_API_URL:-http://hydration-neckwork-ipfs:5001}"
+# The node's RPC wants this client's bearer token once ops/ipfs-init.sh sets its
+# authorizations (IPFS_TOKEN_BACKUP, scoped to dag/export, pin/rm and repo/gc).
+ipfs_rpc() { if [ -n "${IPFS_TOKEN_BACKUP:-}" ]; then wget --header="Authorization: Bearer $IPFS_TOKEN_BACKUP" "$@"; else wget "$@"; fi; }
 q() { clickhouse-client --host "$HOST" --password "$PASSWORD" --mutations_sync=2 --lightweight_deletes_sync=2 --query "$1"; }
 
 ERASED="SELECT target_id FROM price_data.forum_moderation_log FINAL WHERE action IN ('delete', 'purge')"
@@ -40,7 +43,7 @@ q "INSERT INTO price_data.forum_media SELECT * REPLACE (1 AS deleted, now64(3) A
    FROM price_data.forum_media FINAL WHERE cid IN (SELECT target_id FROM price_data.forum_moderation_log FINAL WHERE action = 'media-remove') AND deleted = 0"
 for cid in $(q "SELECT DISTINCT target_id FROM price_data.forum_moderation_log FINAL WHERE action = 'media-remove' FORMAT TSV"); do
   case "$cid" in *[!A-Za-z0-9]*|'') continue ;; esac
-  wget -q -O /dev/null --post-data='' "$IPFS/api/v0/pin/rm?arg=$cid" || true
+  ipfs_rpc -q -O /dev/null --post-data='' "$IPFS/api/v0/pin/rm?arg=$cid" || true
 done
-wget -q -O /dev/null --post-data='' "$IPFS/api/v0/repo/gc?quiet=true" || true
+ipfs_rpc -q -O /dev/null --post-data='' "$IPFS/api/v0/repo/gc?quiet=true" || true
 echo "[forum-reapply-erasures] done"

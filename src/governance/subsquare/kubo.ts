@@ -2,13 +2,20 @@
 // FormData — no SDK. Reached only on the internal ipfs network.
 
 export class KuboClient {
-  constructor(private readonly apiUrl: string, private readonly fetchImpl: typeof fetch = fetch) {}
+  /**
+   * `token`: this client's bearer token for the node's RPC (API.Authorizations, set by
+   * ops/ipfs-init.sh, each token scoped to the paths its client uses); empty sends none,
+   * which a node without authorizations still accepts.
+   */
+  constructor(private readonly apiUrl: string, private readonly fetchImpl: typeof fetch = fetch, private readonly token = '') {}
 
   private async call(path: string, init: RequestInit = {}, timeoutMs = 60_000): Promise<Response> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const res = await this.fetchImpl(this.apiUrl.replace(/\/+$/, '') + '/api/v0/' + path, { method: 'POST', ...init, signal: controller.signal })
+      const headers = new Headers(init.headers)
+      if (this.token) headers.set('Authorization', `Bearer ${this.token}`)
+      const res = await this.fetchImpl(this.apiUrl.replace(/\/+$/, '') + '/api/v0/' + path, { method: 'POST', ...init, headers, signal: controller.signal })
       if (!res.ok) throw new Error(`ipfs ${path.split('?')[0]} → HTTP ${res.status}`)
       return res
     } finally {

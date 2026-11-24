@@ -16,6 +16,29 @@ set -eu
 ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001
 ipfs config Addresses.Gateway /ip4/0.0.0.0/tcp/8080
 
+# RPC authorization: one bearer token per client, each limited to the RPC paths that
+# client calls, so a request forged through one of them (the sync fetches strangers'
+# URLs) or a compromised container reaches only its own few commands — never config,
+# shutdown or another client's. The tokens come from secrets/ipfs-token-*.env (never
+# committed, mode 600; see docker-compose.yml). Enforced only when ALL three are set:
+# a node that required tokens before every client sends one would lock clients out
+# mid-rollout. The gateway (:8080) is a separate listener (local blocks only).
+tok_ok() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$'; }
+if tok_ok "${IPFS_TOKEN_SYNC:-}" && tok_ok "${IPFS_TOKEN_API:-}" && tok_ok "${IPFS_TOKEN_BACKUP:-}"; then
+  ipfs config --json API.Authorizations "$(cat <<JSON
+{
+  "sync":   { "AuthSecret": "bearer:${IPFS_TOKEN_SYNC}",   "AllowedPaths": ["/api/v0/add", "/api/v0/pin/add", "/api/v0/pin/rm", "/api/v0/files/stat", "/api/v0/cid/format", "/api/v0/repo/stat", "/api/v0/repo/gc", "/api/v0/cat"] },
+  "api":    { "AuthSecret": "bearer:${IPFS_TOKEN_API}",    "AllowedPaths": ["/api/v0/add", "/api/v0/pin/rm", "/api/v0/repo/stat", "/api/v0/repo/gc"] },
+  "backup": { "AuthSecret": "bearer:${IPFS_TOKEN_BACKUP}", "AllowedPaths": ["/api/v0/dag/export", "/api/v0/pin/rm", "/api/v0/repo/gc"] }
+}
+JSON
+)"
+  echo "[ipfs-init] RPC authorization enforced (sync, api, backup)"
+else
+  ipfs config --json API.Authorizations '{}'
+  echo "[ipfs-init] WARN: RPC authorization OFF — set all three IPFS_TOKEN_* (64 hex) in secrets/ipfs-token-*.env"
+fi
+
 # The gateway serves blocks already in the local repo only: an unknown CID is a
 # miss, never a network fetch on a stranger's behalf.
 ipfs config --json Gateway.NoFetch true

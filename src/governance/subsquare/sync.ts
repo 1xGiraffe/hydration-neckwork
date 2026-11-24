@@ -5,7 +5,7 @@ import {
   COLLECTIONS, fetchDetail, fetchDiscussionByUid, fetchPollVotes, fetchReferendumAppendants, fetchSummary, fetchThread,
   listAll, newestOverviewUid, parseInlineAppendants, warn, type Detail, type ListResult, type ThreadResult, type Warnings,
 } from './fetchSource.js'
-import { rehostImage, spacedQueue, urlDue } from './images.js'
+import { rehostImage, spacedQueue, urlDue, type RehostDeps } from './images.js'
 import type { KuboClient } from './kubo.js'
 import { planNormalisation, type NormaliseMemo, type NormaliseStats } from './normalise.js'
 import { voterActor } from './authors.js'
@@ -107,6 +107,8 @@ export interface SyncDeps {
   client: SubsquareClient
   ch: ClickHouseClient
   kubo: KuboClient | null
+  /** The guarded image fetch, run in the isolated fetcher service (imageFetcher.ts); absent, safeFetch in this process. */
+  imageFetch?: RehostDeps['fetch']
   dryRun: boolean
   images: boolean
   maxImagesPerCycle: number
@@ -440,7 +442,7 @@ export class GovernanceSync {
       done++
       const author = candidates.get(url) ?? ''
       const r = await rehostImage(url, state.mediaUrls.get(url), {
-        kubo, now: this.now,
+        kubo, now: this.now, fetch: this.deps.imageFetch,
         throttle: fn => this.deps.client.throttle(fn),
         onGarbage: () => { garbage = true },
         archiveThrottle: this.archive,

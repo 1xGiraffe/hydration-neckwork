@@ -25,6 +25,9 @@ set -eu
 HOST="${CLICKHOUSE_HOST:-clickhouse}"
 PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
 IPFS="${IPFS_API_URL:-http://hydration-neckwork-ipfs:5001}"
+# The node's RPC wants this client's bearer token once ops/ipfs-init.sh sets its
+# authorizations (IPFS_TOKEN_BACKUP, scoped to dag/export, pin/rm and repo/gc).
+ipfs_rpc() { if [ -n "${IPFS_TOKEN_BACKUP:-}" ]; then wget --header="Authorization: Bearer $IPFS_TOKEN_BACKUP" "$@"; else wget "$@"; fi; }
 DEST="${BACKUP_DIR:-/backups}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
 TABLES="forum_posts forum_comments forum_revisions forum_media forum_media_urls forum_moderation_log"
@@ -47,7 +50,7 @@ while true; do
       --query "SELECT cid FROM price_data.forum_media FINAL WHERE deleted = 0 FORMAT TSV"); do
     case "$cid" in *[!A-Za-z0-9]*|'') continue ;; esac
     [ -s "$DEST/images/$cid.car" ] && continue
-    if wget -q -O "$DEST/images/$cid.car.tmp" --post-data='' "$IPFS/api/v0/dag/export?arg=$cid&progress=false"; then
+    if ipfs_rpc -q -O "$DEST/images/$cid.car.tmp" --post-data='' "$IPFS/api/v0/dag/export?arg=$cid&progress=false"; then
       mv "$DEST/images/$cid.car.tmp" "$DEST/images/$cid.car"; exported=$((exported + 1))
     else
       rm -f "$DEST/images/$cid.car.tmp"; failed=$((failed + 1))

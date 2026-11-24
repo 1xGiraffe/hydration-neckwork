@@ -51,8 +51,17 @@ const WRITE_SETTINGS = { async_insert: 0, wait_for_async_insert: 1, date_time_in
 const READ_SETTINGS = { max_threads: 2 } as const
 const ts = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
 
+/**
+ * The api's bearer token for the node's RPC (API.Authorizations, ops/ipfs-init.sh: scoped to
+ * add, pin/rm, repo/stat and repo/gc); empty sends none, which a node without
+ * authorizations still accepts.
+ */
+const IPFS_TOKEN = process.env.IPFS_TOKEN_API ?? ''
+
 async function kubo(path: string, init: RequestInit = {}, timeoutMs = 30_000): Promise<Response> {
-  const res = await fetch(`${IPFS_API_URL}/api/v0/${path}`, { method: 'POST', ...init, signal: AbortSignal.timeout(timeoutMs) })
+  const headers = new Headers(init.headers)
+  if (IPFS_TOKEN) headers.set('Authorization', `Bearer ${IPFS_TOKEN}`)
+  const res = await fetch(`${IPFS_API_URL}/api/v0/${path}`, { method: 'POST', ...init, headers, signal: AbortSignal.timeout(timeoutMs) })
   if (!res.ok) throw new Error(`ipfs ${path.split('?')[0]} → HTTP ${res.status}`)
   return res
 }
