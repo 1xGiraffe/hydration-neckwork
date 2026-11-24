@@ -63,6 +63,8 @@ async function forumEmpty(): Promise<boolean> {
 }
 
 async function cycle(full: boolean): Promise<void> {
+  // A breaker that opened aborted the last cycle only: this one starts afresh.
+  client.resetBreaker()
   const result = full ? await sync.fullImport() : await sync.incremental()
   console.log(summaryLine(result))
   if (full && reportPath) {

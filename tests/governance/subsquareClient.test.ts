@@ -43,6 +43,22 @@ describe('polite Subsquare client', () => {
     expect(calls).toBe(5)
   })
 
+  it('closes the breaker for the next cycle: resetBreaker lets requests through again', async () => {
+    const clock = fakeClock()
+    let up = false
+    let calls = 0
+    const fetchImpl = (async () => { calls++; if (!up) throw new TypeError('fetch failed'); return new Response('{"ok":1}', { status: 200 }) }) as typeof fetch
+    const client = new SubsquareClient({ baseUrl: 'https://x', fetchImpl, now: clock.now, sleep: clock.sleep, maxRetries: 10 })
+    await expect(client.get('/a')).rejects.toBeInstanceOf(CircuitOpenError)
+    await expect(client.get('/a')).rejects.toBeInstanceOf(CircuitOpenError)
+    expect(calls).toBe(5)
+    up = true
+    client.resetBreaker()
+    await expect(client.get('/a')).resolves.toEqual({ status: 200, body: { ok: 1 } })
+    expect(calls).toBe(6)
+    expect(client.failuresInRow).toBe(0)
+  })
+
   it('returns 404 as an answer, not a failure', async () => {
     const clock = fakeClock()
     const client = new SubsquareClient({ baseUrl: 'https://x', fetchImpl: (async () => new Response('{"message":"Post not found"}', { status: 404 })) as typeof fetch, now: clock.now, sleep: clock.sleep })

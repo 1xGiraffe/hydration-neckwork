@@ -95,6 +95,13 @@ export class SubsquareClient {
   private chain: Promise<unknown> = Promise.resolve()
   private readonly opts: Required<Omit<ClientOptions, 'cache' | 'baseUrl' | 'rps'>> & Pick<ClientOptions, 'cache'>
 
+  /**
+   * Closes the breaker for a new cycle. The client lives as long as the process, and
+   * only a successful request clears the count, which an open breaker never sends:
+   * without this one trip would abort every later cycle unasked.
+   */
+  resetBreaker(): void { this.failuresInRow = 0 }
+
   constructor(options: ClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     const rps = options.rps && options.rps > 0 ? Math.min(options.rps, 1) : 1
