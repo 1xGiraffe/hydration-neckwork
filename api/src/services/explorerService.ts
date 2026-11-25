@@ -17751,6 +17751,12 @@ function isFeePurchaseSwap(keys: FeePurchaseSwapKeys, t: { blockHeight: number; 
   return keys.extrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)
     || (t.assetOut != null && keys.byAsset.has(`${t.blockHeight}:${t.extrinsicIndex}:${t.assetOut.assetId}`))
 }
+// A table entry named by request input (a feed's `action`). Own properties only: a
+// plain lookup would resolve a prototype key (`constructor`, `toString`,
+// `__proto__`) to an inherited member, which then fails as a value further down.
+function ownEntry<T>(table: Readonly<Record<string, T>>, key: string | null | undefined): T | undefined {
+  return key != null && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined
+}
 // Staking action label (as shown/filtered in the UI) → source event name.
 const STAKING_ACTION_EVENTS: Record<string, string[]> = {
   'Stake': ['Staking.PositionCreated'],
@@ -17808,7 +17814,7 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     // Asking SQL for exactly that stops an asset page walking the whole staking
     // history in pages to discard every row: a cold USDT feed read 10 pages here.
     const collatorOnly = assetId != null && assetId !== 0 && assetId !== 670
-    const actionNames = action && STAKING_ACTION_EVENTS[action] ? STAKING_ACTION_EVENTS[action] : null
+    const actionNames = ownEntry(STAKING_ACTION_EVENTS, action) ?? null
     const selectedNames = collatorOnly
       ? (actionNames ?? ['CollatorRewards.CollatorRewarded']).filter(n => n === 'CollatorRewards.CollatorRewarded')
       : actionNames
@@ -18116,8 +18122,9 @@ async function getRecentBondEvents(limit: number, from?: string, to?: string, ac
     const bound = tw ?? '1'
     const bondIds = bondIdsForTokens(assetIdsForToken(filters.token), assetId)
     if (bondIds && !bondIds.length) return []
-    if (action && !BOND_ACTION_EVENTS[action]) return []
-    const names = (action ? BOND_ACTION_EVENTS[action] : BOND_EVENT_NAMES).map(n => `'${n}'`).join(',')
+    const actionNames = action ? ownEntry(BOND_ACTION_EVENTS, action) : BOND_EVENT_NAMES
+    if (!actionNames) return []
+    const names = actionNames.map(n => `'${n}'`).join(',')
     const accountFilter = acctList ? `AND who IN (${acctList})` : ''
     const bondFilter = bondIds ? `AND ${BOND_ASSET_SQL} IN (${bondIds.join(',')})` : ''
     const valueFilter = eventValueFilterSql(BOND_ASSET_SQL, BOND_AMOUNT_SQL, 'block_timestamp', filters, prices, 'bond_price')
@@ -18174,7 +18181,7 @@ function juicerActionOf(e: JuicerEvent): JuicerAction | null {
 /** The action a feed `action` value names (a `juicer-*` slug or the action itself). */
 export function resolveJuicerAction(action?: string): JuicerAction | null | undefined {
   if (!action) return undefined
-  return JUICER_ACTION_SLUGS[action] ?? (JUICER_ROW_ACTIONS.some(([a]) => a === action) ? action as JuicerAction : null)
+  return ownEntry(JUICER_ACTION_SLUGS, action) ?? (JUICER_ROW_ACTIONS.some(([a]) => a === action) ? action as JuicerAction : null)
 }
 // The venue a Juicer contract's own scope lists: a vault's rows (its MainDebt's too), the SubLoop's loop rows.
 function juicerVenueMatches(row: ActivityRow, h160s: ReadonlySet<string>): boolean {
@@ -18358,7 +18365,7 @@ export async function bilPartyAccounts(): Promise<Map<string, string>> {
 /** The action a feed `action` value names (a `bil-*` slug or the action itself). */
 export function resolveBilAction(action?: string): BilAction | null | undefined {
   if (!action) return undefined
-  return BIL_ACTION_SLUGS[action] ?? ((BIL_ACTIONS as readonly string[]).includes(action) ? action as BilAction : null)
+  return ownEntry(BIL_ACTION_SLUGS, action) ?? ((BIL_ACTIONS as readonly string[]).includes(action) ? action as BilAction : null)
 }
 /**
  * Every BIL activity row, newest first, valued at CURRENT prices (callers that show
@@ -18674,7 +18681,7 @@ const OTC_ACTION_EVENTS: Record<string, string[]> = {
 const OTC_ACTION_ALIASES: Record<string, string> = { 'otc-place': 'Place', 'otc-pull': 'Pull', 'otc-fill': 'Fill' }
 function resolveOtcAction(action?: string): string | undefined {
   if (!action) return undefined
-  return OTC_ACTION_ALIASES[action] ?? action
+  return ownEntry(OTC_ACTION_ALIASES, action) ?? action
 }
 export interface BondSaleRef {
   venue: BondSaleVenue; kind: BondSaleKind; bondId: number; family: string | null; round: number | null; maturityAt: string | null
@@ -19005,7 +19012,7 @@ async function getRecentOtc(limit: number, from?: string, to?: string, offset = 
     const postFilter = tokenIds != null || accountSet != null || hasRowLevelFilter(filters)
     const want = offset + limit
     const resolvedAction = resolveOtcAction(action)
-    const names = (resolvedAction && OTC_ACTION_EVENTS[resolvedAction] ? OTC_ACTION_EVENTS[resolvedAction] : OTC_EVENT_NAMES).map(n => `'${n}'`).join(',')
+    const names = (ownEntry(OTC_ACTION_EVENTS, resolvedAction) ?? OTC_EVENT_NAMES).map(n => `'${n}'`).join(',')
     // Every order this account owns, resolved once for the whole feed rather
     // than per page: an account makes a handful of orders over its life, and
     // the set is what the third reference arm below is built from.
@@ -21636,7 +21643,7 @@ export function activityPagesInMemory(type: string, action?: string): boolean {
 
 function otcOnlyActivityAction(action?: string): boolean {
   const otcAction = resolveOtcAction(action)
-  return !!otcAction && !!OTC_ACTION_EVENTS[otcAction]
+  return ownEntry(OTC_ACTION_EVENTS, otcAction) != null
 }
 
 // A Trade-tab request for an intent action (`intent-place | intent-fill |
@@ -35924,7 +35931,7 @@ export function v3CompoundPlumbingSql(): string {
               AND block_timestamp > now() - INTERVAL 91 DAY))`
 }
 export function v3LiquidityHistogramNames(action?: string): string[] {
-  return action ? (V3_LIQUIDITY_HISTOGRAM_EVENTS[action] ?? []) : V3_LIQUIDITY_HISTOGRAM_NAMES
+  return action ? (ownEntry(V3_LIQUIDITY_HISTOGRAM_EVENTS, action) ?? []) : V3_LIQUIDITY_HISTOGRAM_NAMES
 }
 // The token-filter arm for the v3 histogram rows, which carry no asset_refs: a row is
 // the token's when its log came from a pool holding the token, or that pool's vault,
@@ -36032,13 +36039,13 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         // otc and intents fold under Trade: no sub-action selected merges swap+otc+intent
         // counts (mirrors the activity's row merge); an otc or intent sub-action narrows
         // to just that event set, as activityRowMatchesAction does.
-        const otcAction = resolveOtcAction(filters.action)
+        const otcNames = ownEntry(OTC_ACTION_EVENTS, resolveOtcAction(filters.action))
         if (filters.action === 'dca-failed') { names = ['DCA.TradeFailed']; ignoreToken = true }
         // The dca action admits a DCA intent's trade too (activityRowMatchesAction's
         // intent arm), so the bars count Intent.DcaTradeExecuted as well — or the
         // chart empties as schedules migrate while the list keeps its rows.
         else if (filters.action === 'dca') { names = ['DCA.TradeExecuted', 'DCA.TradeFailed', 'Intent.DcaTradeExecuted', 'Intent.DcaCompleted']; ignoreToken = true }
-        else if (otcAction && OTC_ACTION_EVENTS[otcAction]) { names = OTC_ACTION_EVENTS[otcAction]; ignoreToken = true }
+        else if (otcNames) { names = otcNames; ignoreToken = true }
         else if (intentActions) { names = intentActionNames; intentOnly = true }
         else if (filters.action === 'swap') names = [...SWAP_EVENTS, ...V3_SWAP_HISTOGRAM_EVENTS]
         else names = [...SWAP_EVENTS, ...V3_SWAP_HISTOGRAM_EVENTS, ...OTC_EVENT_NAMES, ...INTENT_EVENT_NAMES, 'DCA.TradeFailed']
@@ -36050,16 +36057,16 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
           ? ['Referrals.Claimed']
           : [...liquidityActionEventNames(filters.action), ...v3LiquidityHistogramNames(filters.action)]
       } else if (type === 'staking') {
-        names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES
+        names = ownEntry(STAKING_ACTION_EVENTS, filters.action) ?? STAKING_EVENT_NAMES
       } else if (type === 'bond') {
-        names = filters.action ? (BOND_ACTION_EVENTS[filters.action] ?? []) : BOND_EVENT_NAMES
+        names = filters.action ? (ownEntry(BOND_ACTION_EVENTS, filters.action) ?? []) : BOND_EVENT_NAMES
       } else if (type === 'intent') {
         names = filters.action ? intentActionNames : INTENT_EVENT_NAMES
         intentOnly = true
       } else if (type === 'vote') names = VOTE_EVENTS
       else if (type === 'otc') {
         const otcAction = resolveOtcAction(filters.action)
-        names = otcAction && OTC_ACTION_EVENTS[otcAction] ? OTC_ACTION_EVENTS[otcAction] : OTC_EVENT_NAMES
+        names = ownEntry(OTC_ACTION_EVENTS, otcAction) ?? OTC_EVENT_NAMES
         ignoreToken = true
       } else {
         names = [...TRANSFER_EVENTS, ...SWAP_EVENTS, ...LIQUIDITY_EVENTS, ...VOTE_EVENTS, ...STAKING_EVENT_NAMES, ...BOND_EVENT_NAMES, ...INTENT_EVENT_NAMES, ...OTC_EVENT_NAMES, ...V3_HISTOGRAM_NAMES]
@@ -36094,16 +36101,16 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         // (mirrors the activity's row merge); an otc sub-action narrows to just
         // that otc event set, excluding plain swap/dca — same as the activity's
         // activityRowMatchesAction.
-        const otcAction = resolveOtcAction(filters.action)
+        const otcNames = ownEntry(OTC_ACTION_EVENTS, resolveOtcAction(filters.action))
         if (filters.action === 'dca-failed')
           query = daily('raw_events', `event_name = 'DCA.TradeFailed'`)
         else if (filters.action === 'dca')
           query = daily('raw_events', `event_name IN ('DCA.TradeExecuted','DCA.TradeFailed')`)   // schedule join needed for token filtering → token filter N/A
-        else if (otcAction && OTC_ACTION_EVENTS[otcAction])
+        else if (otcNames)
           // Asset identity for non-Placed otc events lives on the order's Placed
           // event, not the event itself — token filtering N/A here (see the otc
           // branch below), same documented limitation.
-          query = daily('raw_events', `event_name IN (${sqlNames(OTC_ACTION_EVENTS[otcAction])})`)
+          query = daily('raw_events', `event_name IN (${sqlNames(otcNames)})`)
         else if (filters.action === 'swap')
           query = daily('raw_events', `event_name IN (${sqlNames(SWAP_EVENTS)})${sp(tradeTok)}`, '(block_height, extrinsic_index)')
         else
@@ -36113,12 +36120,12 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
             `(block_height, if(event_name IN (${sqlNames(SWAP_EVENTS)}), ifNull(extrinsic_index, event_index), event_index))`,
           )
       } else if (type === 'staking') {
-        const names = filters.action && STAKING_ACTION_EVENTS[filters.action] ? STAKING_ACTION_EVENTS[filters.action] : STAKING_EVENT_NAMES
+        const names = ownEntry(STAKING_ACTION_EVENTS, filters.action) ?? STAKING_EVENT_NAMES
         query = daily('raw_events', `event_name IN (${sqlNames(names)})${sp(stakingTok)}`)
       } else if (type === 'bond') {
         // The bond's own small table, filtered like the feed: by action (an event
         // name) and by token (the bond id, or a bond whose underlying is the token).
-        const names = filters.action ? (BOND_ACTION_EVENTS[filters.action] ?? []) : BOND_EVENT_NAMES
+        const names = filters.action ? (ownEntry(BOND_ACTION_EVENTS, filters.action) ?? []) : BOND_EVENT_NAMES
         const bondIds = bondIdsForTokens(tokenIds)
         const bondTok = bondIds == null ? '' : bondIds.length ? `AND ${BOND_ASSET_SQL} IN (${bondIds.join(',')})` : 'AND 0'
         query = `SELECT d, toUInt64(sum(v)) AS v FROM (${daily('bond_activity', `${names.length ? `event_name IN (${sqlNames(names)})` : '0'}${sp(bondTok)}`)} UNION ALL ${bondSaleDaily(filters.action, tokenIds ?? null)}) GROUP BY d ORDER BY d`
@@ -36147,7 +36154,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         // Accepts both the raw otcAction label (Place/Pull/Fill) and the
         // hyphenated otc-place/otc-pull/otc-fill values used under type=trade.
         const otcAction = resolveOtcAction(filters.action)
-        const names = otcAction && OTC_ACTION_EVENTS[otcAction] ? OTC_ACTION_EVENTS[otcAction] : OTC_EVENT_NAMES
+        const names = ownEntry(OTC_ACTION_EVENTS, otcAction) ?? OTC_EVENT_NAMES
         query = daily('raw_events', `event_name IN (${sqlNames(names)})`)
       } else if (type === 'xcm') {
         // raw_xcm_activity counts queue messages; Wormhole NTT is not XCM and leaves no
