@@ -31,18 +31,24 @@ export class MintValuationUnavailable extends Error {
 }
 
 /**
- * DATA_API_MIN_MINT_USD: a finite, non-negative USD amount; unset or empty is
- * the default. A malformed value stops the start, like ADMIN_ACCOUNT_IDS — a
- * typo must not silently open or close the gate.
+ * A USD threshold from the environment (DATA_API_MIN_MINT_USD here,
+ * FORUM_MIN_WRITE_USD for the forum's write gate): a finite, non-negative USD
+ * amount; unset or empty is the default. A malformed value stops the start,
+ * like ADMIN_ACCOUNT_IDS — a typo must not silently open or close a gate.
  */
-export function parseMinMintUsd(value: string | undefined): number {
+export function parseUsdThreshold(name: string, value: string | undefined, fallback: number): number {
   const trimmed = (value ?? '').trim()
-  if (!trimmed) return DEFAULT_MIN_MINT_USD
+  if (!trimmed) return fallback
   const parsed = Number(trimmed)
   if (!/^\d+(\.\d+)?$/.test(trimmed) || !Number.isFinite(parsed)) {
-    throw new Error(`DATA_API_MIN_MINT_USD must be a non-negative USD amount, received ${JSON.stringify(value)}`)
+    throw new Error(`${name} must be a non-negative USD amount, received ${JSON.stringify(value)}`)
   }
   return parsed
+}
+
+/** DATA_API_MIN_MINT_USD (parseUsdThreshold). */
+export function parseMinMintUsd(value: string | undefined): number {
+  return parseUsdThreshold('DATA_API_MIN_MINT_USD', value, DEFAULT_MIN_MINT_USD)
 }
 
 /** The account page's net value: gross holdings minus every non-custody market's debt (explorer-ui moneyMarketDebtUsd). */
@@ -51,7 +57,11 @@ export function netAccountValueUsd(detail: Pick<AddressDetail, 'portfolioUsd' | 
   return detail.portfolioUsd - debt
 }
 
-/** The account's current value in USD, or MintValuationUnavailable. */
+/**
+ * The account's current value in USD, or MintValuationUnavailable. The one
+ * valuation both USD gates read: the Data API token mint (at mint time) and
+ * every forum write (forumWrite.ts, through its short per-account cache).
+ */
 export async function mintHoldingsUsd(accountId: string, nowMs = Date.now()): Promise<number> {
   // One price generation for the freshness check and the valuation alike.
   return withAccountValuePrices(async () => {

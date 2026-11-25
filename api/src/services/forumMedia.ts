@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { applyLocalMedia, forumMedia } from './forumStore.ts'
 import { ImageError, MAX_IMAGE_BYTES, sanitizeImage } from './imageSanitize.ts'
-import { ForumWriteError, limiter, standingOf, type WriteContext } from './forumWrite.ts'
+import { ForumWriteError, limiter, standingOf, standingRefusal, type WriteContext } from './forumWrite.ts'
 import { limitMessage, type LimitAction, type LimitRefusal } from './forumLimits.ts'
 
 // Image uploads for forum posts (POST /user/forum/media): the bytes a signed-in
@@ -238,8 +238,8 @@ function reserve(ctx: WriteContext, bytes: number): Reservation {
 export async function uploadImage(ctx: WriteContext, raw: Uint8Array): Promise<UploadResult> {
   if (raw.length > MAX_IMAGE_BYTES) throw new ForumWriteError(413, IMAGE_REASONS['too-large'], 'too-large')
   // Facts first (every await that only reads), then one synchronous reservation.
-  const standing = await standingOf(ctx.accountId)
-  if (!standing.canComment) throw new ForumWriteError(403, standing.gate?.detail ?? 'This account cannot upload images here.', standing.gate?.reason ?? 'gated')
+  const refusal = standingRefusal(await standingOf(ctx.accountId), 'upload')
+  if (refusal) throw refusal
   let img
   try { img = sanitizeImage(raw) } catch (err) {
     const reason = err instanceof ImageError ? err.reason : 'not-an-image'

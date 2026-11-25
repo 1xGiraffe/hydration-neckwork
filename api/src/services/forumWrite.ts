@@ -6,6 +6,7 @@ import { hasVerifiedIdentity } from './identityService.ts'
 import { getReferendum } from './governanceService.ts'
 import { multisigCompositionFor, proxyInfoFor } from './proxyMultisigService.ts'
 import { isApiAdmin } from './userApiTokenService.ts'
+import { mintHoldingsUsd, parseUsdThreshold } from './apiTokenMintGate.ts'
 import {
   applyLocalComment, applyLocalPost, forumComment, forumComments, forumPost, forumPosts, forumReady, plainText,
   type ForumCommentMeta, type ForumPostMeta, forumMediaUrlMap,
@@ -26,8 +27,10 @@ import { SlidingLimiter, limitMessage, type LimitAction } from './forumLimits.ts
 //   identity). An item is its author's: the account that wrote it here, or the
 //   imported author when that is the same account (claiming needs no extra step). An
 //   on-chain subject's description belongs to its proposer's authority (§ below).
-// - GATES: posting needs some stake in the chain (HDX, a verified identity or a vote), a
-//   muted account cannot write, and every action has rate limits (forumLimits.ts).
+// - GATES: posting needs some stake in the chain (HDX, a verified identity or a vote)
+//   AND holdings worth more than FORUM_MIN_WRITE_USD (default $1: the explorer account
+//   page's value, read like the Data API token mint gate; admins exempt), a muted
+//   account cannot write, and every action has rate limits (forumLimits.ts).
 // - TEXT: lengths, link and mention caps and the duplicate rule (forumText.ts). Text
 //   is stored exactly as cleaned — never as trusted HTML; the explorer's one renderer
 //   makes it safe at read time.
@@ -39,7 +42,11 @@ import { SlidingLimiter, limitMessage, type LimitAction } from './forumLimits.ts
 // - PRIVACY: report notes, reporters and sanctions are user_* rows, never logged.
 
 let client: ClickHouseClient
-export function initForumWrite(c: ClickHouseClient): void { client = c; assertForumModeratorConfig() }
+export function initForumWrite(c: ClickHouseClient): void {
+  client = c
+  assertForumModeratorConfig()
+  minWriteUsd = parseUsdThreshold('FORUM_MIN_WRITE_USD', process.env.FORUM_MIN_WRITE_USD, DEFAULT_MIN_WRITE_USD)
+}
 
 const HDX = 10n ** 12n
 const envHdx = (name: string, def: number): bigint => {
@@ -52,6 +59,14 @@ const MIN_HDX_COMMENT = envHdx('FORUM_MIN_HDX_COMMENT', 1)
 const LINK_FREE_HDX = 1000n * HDX
 const DUPLICATE_WINDOW_MS = 24 * 3_600_000
 const GATE_TTL_MS = 5 * 60_000
+/** Every write also needs the account to hold MORE than this in USD (FORUM_MIN_WRITE_USD; ADMIN_ACCOUNT_IDS exempt). */
+export const DEFAULT_MIN_WRITE_USD = 1
+let minWriteUsd = DEFAULT_MIN_WRITE_USD
+export function forumMinWriteUsd(): number { return minWriteUsd }
+/** How long an account's value is reused: the standing is read on every signed-in forum page. */
+export const HOLDINGS_TTL_MS = 60_000
+/** A valuation that failed is retried no sooner than this, so an outage is not met with a read per request. */
+export const HOLDINGS_FAILURE_TTL_MS = 10_000
 /** Distinct eligible reporters (autoHideEligible) that hide an item until a moderator decides. */
 export const AUTO_HIDE_REPORTS = 3
 /** A reporter without a verified identity counts toward an automatic hide only with this much HDX… */
@@ -244,53 +259,132 @@ export async function gateFacts(accountId: string, fresh = false): Promise<GateF
   return facts
 }
 
-export interface ActionGate { ok: boolean; reason: string | null }
+// The USD half of the gate. Every write needs the account to hold more than
+// FORUM_MIN_WRITE_USD in total — the explorer account page's value, read by the
+// same function the Data API token mint gate reads (apiTokenMintGate.ts
+// mintHoldingsUsd: every asset at current prices, net of money-market debt, an
+// unpriced asset $0) — ON TOP of the stake rules below, never instead of them:
+// an identity or a vote opens the stake rule but not this one. It fails closed:
+// a value that cannot be read (a ClickHouse error, no price generation, prices
+// older than 30 minutes) refuses the write as retryable (503). ADMIN_ACCOUNT_IDS
+// accounts are exempt and never valued. One value per account is reused for
+// HOLDINGS_TTL_MS (a failure for HOLDINGS_FAILURE_TTL_MS), and concurrent
+// readers share one valuation.
+const holdingsCache = new Map<string, { at: number; usd: number | null }>()
+const holdingsInFlight = new Map<string, Promise<number | null>>()
+
+/** The account's value in USD, or null while it cannot be read. */
+export async function forumHoldingsUsd(accountId: string): Promise<number | null> {
+  const hit = holdingsCache.get(accountId)
+  if (hit && Date.now() - hit.at < (hit.usd == null ? HOLDINGS_FAILURE_TTL_MS : HOLDINGS_TTL_MS)) return hit.usd
+  const running = holdingsInFlight.get(accountId)
+  if (running) return running
+  const read = mintHoldingsUsd(accountId).then(
+    usd => usd,
+    (err: unknown) => { console.warn(`[forum] account value unavailable: ${err instanceof Error ? err.name : typeof err}`); return null },
+  ).then(usd => {
+    if (holdingsCache.size > 20_000) holdingsCache.clear()
+    holdingsCache.set(accountId, { at: Date.now(), usd })
+    return usd
+  }).finally(() => holdingsInFlight.delete(accountId))
+  holdingsInFlight.set(accountId, read)
+  return read
+}
+
+/** What the USD gate read: a value (null when it could not be read), or an exempt account. */
+export type HoldingsRead = { exempt: true } | { exempt: false; usd: number | null }
+export type HoldingsStatus = 'ok' | 'low' | 'unavailable' | 'exempt'
+
+export type ForumGateReason = 'muted' | 'no-stake-post' | 'no-stake-comment' | 'low-holdings' | 'valuation-unavailable'
+
+export interface ActionGate {
+  ok: boolean
+  reason: string | null
+  /** Why not, as a code (`valuation-unavailable` is the one retryable refusal); null when allowed. */
+  code: ForumGateReason | null
+}
 
 export interface ForumStanding {
   canPost: boolean
   canComment: boolean
   /** Per action, whether this account may do it now and, if not, why and what to do next. */
   actions: { comment: ActionGate; post: ActionGate; report: ActionGate; upload: ActionGate }
-  /** The facts the gate read (balance as raw planck, 12 decimals). */
-  facts: { hdx: string; identity: boolean; voted: boolean }
-  thresholds: { commentHdx: number; postHdx: number; autoHideHdx: number }
+  /**
+   * The facts the gate read (balance as raw planck, 12 decimals; `usd` the account's
+   * value, null when it could not be read or the account is exempt; `usdStatus` how
+   * it compares with `thresholds.minUsd`).
+   */
+  facts: { hdx: string; identity: boolean; voted: boolean; usd: number | null; usdStatus: HoldingsStatus }
+  /** `minUsd`: every write needs holdings worth MORE than this. */
+  thresholds: { commentHdx: number; postHdx: number; autoHideHdx: number; minUsd: number }
   /** Why not, in words a person can act on; null when every write is open. */
-  gate: { reason: 'muted' | 'no-stake-post' | 'no-stake-comment'; detail: string } | null
+  gate: { reason: ForumGateReason; detail: string } | null
   mutedUntil: string | null
   moderator: boolean
   linksUnlimited: boolean
 }
 
 const hdxWords = (v: bigint) => (v % HDX === 0n ? (v / HDX).toString() : (Number(v) / 1e12).toString())
+/** A held value in words, rounded down to the cent (so $0.999 never reads as the $1 it falls short of). */
+export function usdWords(v: number): string {
+  const cents = Math.floor(v * 100) / 100
+  const abs = Math.abs(cents)
+  const text = abs >= 1000 ? Math.floor(abs).toLocaleString('en-US') : abs.toFixed(2)
+  return `${cents < 0 ? '-' : ''}$${text}`
+}
 
-export function standingFrom(facts: GateFacts, mutedUntilMs: number | null, moderator: boolean): ForumStanding {
+export function standingFrom(facts: GateFacts, mutedUntilMs: number | null, moderator: boolean, holdings: HoldingsRead): ForumStanding {
   const stake = facts.identity || facts.voted
-  const canComment = stake || facts.hdx >= MIN_HDX_COMMENT
-  const canPost = stake || facts.hdx >= MIN_HDX_POST
+  const stakeComment = stake || facts.hdx >= MIN_HDX_COMMENT
+  const stakePost = stake || facts.hdx >= MIN_HDX_POST
+  const usdStatus: HoldingsStatus = holdings.exempt ? 'exempt' : holdings.usd == null || !Number.isFinite(holdings.usd) ? 'unavailable' : holdings.usd > minWriteUsd ? 'ok' : 'low'
+  const usdOk = usdStatus === 'ok' || usdStatus === 'exempt'
+  const usd = holdings.exempt ? null : usdStatus === 'unavailable' ? null : holdings.usd
+  const usdNeed = (subject: string) => `${subject} needs more than $${minWriteUsd} in holdings — every asset at current prices, net of money-market debt; this account holds ${usdWords(usd ?? 0)}.`
+  const unavailable = 'This account\'s holdings could not be checked right now, so writing is paused — try again in a minute.'
   const muted = mutedUntilMs != null && mutedUntilMs > Date.now()
+  const canComment = stakeComment && usdOk
+  const canPost = stakePost && usdOk
   const gate: ForumStanding['gate'] = muted
     ? { reason: 'muted', detail: `A moderator has paused writing for this account until ${new Date(mutedUntilMs!).toUTCString()}.` }
-    : !canComment ? { reason: 'no-stake-comment', detail: `To comment, an account needs at least ${hdxWords(MIN_HDX_COMMENT)} HDX, a verified on-chain identity, or a vote on any referendum.` }
-      : !canPost ? { reason: 'no-stake-post', detail: `To start a discussion, an account needs at least ${hdxWords(MIN_HDX_POST)} HDX, a verified on-chain identity, or a vote on any referendum. You can still comment.` }
-        : null
+    : !stakeComment ? { reason: 'no-stake-comment', detail: `To comment, an account needs at least ${hdxWords(MIN_HDX_COMMENT)} HDX, a verified on-chain identity, or a vote on any referendum.${usdStatus === 'low' ? ` ${usdNeed('It also')}` : ''}` }
+      : usdStatus === 'low' ? { reason: 'low-holdings', detail: usdNeed('Writing on the forum') }
+        : usdStatus === 'unavailable' ? { reason: 'valuation-unavailable', detail: unavailable }
+          : !stakePost ? { reason: 'no-stake-post', detail: `To start a discussion, an account needs at least ${hdxWords(MIN_HDX_POST)} HDX, a verified on-chain identity, or a vote on any referendum. You can still comment.` }
+            : null
   const held = `This account holds ${hdxWords(facts.hdx - facts.hdx % (HDX / 1000n))} HDX`
   const need = (what: string, min: bigint) => `${what} needs at least ${hdxWords(min)} HDX, a verified on-chain identity, or a vote on any referendum. ${held} — add HDX, have a registrar verify an identity, or vote, then try again.`
-  const mutedReason = muted ? gate!.detail : null
-  const commentGate: ActionGate = { ok: canComment && !muted, reason: mutedReason ?? (canComment ? null : need('Commenting', MIN_HDX_COMMENT)) }
-  const sameAsComment = (what: string): ActionGate => ({ ok: commentGate.ok, reason: mutedReason ?? (canComment ? null : need(what, MIN_HDX_COMMENT)) })
+  // One action's verdict: a mute first, then the stake rule (with the USD rule added
+  // when it fails too), then the USD rule alone. An unreadable value is named only
+  // when nothing else refuses, since only then would trying again help.
+  const action = (what: string, stakeOk: boolean, stakeCode: 'no-stake-comment' | 'no-stake-post', min: bigint): ActionGate => {
+    if (muted) return { ok: false, reason: gate!.detail, code: 'muted' }
+    if (!stakeOk) return { ok: false, reason: `${need(what, min)}${usdStatus === 'low' ? ` ${usdNeed('It also')}` : ''}`, code: stakeCode }
+    if (usdStatus === 'low') return { ok: false, reason: usdNeed(what), code: 'low-holdings' }
+    if (usdStatus === 'unavailable') return { ok: false, reason: unavailable, code: 'valuation-unavailable' }
+    return { ok: true, reason: null, code: null }
+  }
   return {
     canPost: canPost && !muted, canComment: canComment && !muted, gate,
     actions: {
-      comment: commentGate,
-      post: { ok: canPost && !muted, reason: mutedReason ?? (canPost ? null : need('Starting a discussion', MIN_HDX_POST)) },
-      report: sameAsComment('Reporting'),
-      upload: sameAsComment('Adding images'),
+      comment: action('Commenting', stakeComment, 'no-stake-comment', MIN_HDX_COMMENT),
+      post: action('Starting a discussion', stakePost, 'no-stake-post', MIN_HDX_POST),
+      report: action('Reporting', stakeComment, 'no-stake-comment', MIN_HDX_COMMENT),
+      upload: action('Adding images', stakeComment, 'no-stake-comment', MIN_HDX_COMMENT),
     },
-    facts: { hdx: facts.hdx.toString(), identity: facts.identity, voted: facts.voted },
-    thresholds: { commentHdx: Number(MIN_HDX_COMMENT) / 1e12, postHdx: Number(MIN_HDX_POST) / 1e12, autoHideHdx: Number(AUTO_HIDE_HDX) / 1e12 },
+    facts: { hdx: facts.hdx.toString(), identity: facts.identity, voted: facts.voted, usd, usdStatus },
+    thresholds: { commentHdx: Number(MIN_HDX_COMMENT) / 1e12, postHdx: Number(MIN_HDX_POST) / 1e12, autoHideHdx: Number(AUTO_HIDE_HDX) / 1e12, minUsd: minWriteUsd },
     mutedUntil: muted ? new Date(mutedUntilMs!).toISOString() : null, moderator,
     linksUnlimited: facts.hdx >= LINK_FREE_HDX,
   }
+}
+
+/** The refusal for an action the standing does not allow (503 + Retry-After when only the valuation is missing), or null. */
+export function standingRefusal(s: ForumStanding, action: keyof ForumStanding['actions']): ForumWriteError | null {
+  const a = s.actions[action]
+  if (a.ok) return null
+  if (a.code === 'valuation-unavailable') return new ForumWriteError(503, a.reason ?? 'Try again in a minute.', a.code, 30)
+  return new ForumWriteError(403, a.reason ?? s.gate?.detail ?? 'This account cannot write here.', a.code ?? s.gate?.reason ?? 'gated')
 }
 
 // ---- sanctions (user_forum_sanctions, private) ----
@@ -317,8 +411,9 @@ export async function mutedUntil(accountId: string): Promise<number | null> {
 }
 
 export async function standingOf(accountId: string): Promise<ForumStanding> {
-  const [facts, muted] = await Promise.all([gateFacts(accountId), mutedUntil(accountId)])
-  return standingFrom(facts, muted, isForumModerator(accountId))
+  const exempt = isApiAdmin(accountId)
+  const [facts, muted, usd] = await Promise.all([gateFacts(accountId), mutedUntil(accountId), exempt ? null : forumHoldingsUsd(accountId)])
+  return standingFrom(facts, muted, isForumModerator(accountId), exempt ? { exempt: true } : { exempt: false, usd })
 }
 
 // ---- limits ----
@@ -387,6 +482,7 @@ function rememberBody(accountId: string, hash: string): void {
 /** Clears every in-process ledger (tests). */
 export function resetForumWriteForTests(): void {
   limiter.clear(); recentBodies.clear(); gateCache.clear(); mutes.clear(); mutesLoadedAt = 0; lastDiscussionId = 0
+  holdingsCache.clear(); holdingsInFlight.clear()
 }
 
 // ---- validation ----
@@ -538,9 +634,10 @@ function requireReady(): void {
   if (!forumReady()) throw new ForumWriteError(503, 'The forum is still loading — try again in a few seconds.', 'not-ready')
 }
 
-async function requireStanding(ctx: WriteContext, need: 'post' | 'comment'): Promise<ForumStanding> {
+async function requireStanding(ctx: WriteContext, need: keyof ForumStanding['actions']): Promise<ForumStanding> {
   const s = await standingOf(ctx.accountId)
-  if (need === 'post' ? !s.canPost : !s.canComment) throw new ForumWriteError(403, s.gate?.detail ?? 'This account cannot write here.', s.gate?.reason ?? 'gated')
+  const refusal = standingRefusal(s, need)
+  if (refusal) throw refusal
   return s
 }
 
@@ -871,7 +968,7 @@ export async function fileReport(ctx: WriteContext, input: { targetId?: unknown;
   if (typeof input.reason !== 'string' || !(REPORT_REASONS as readonly string[]).includes(input.reason)) throw new ForumWriteError(400, `Pick a reason: ${REPORT_REASONS.join(', ')}.`, 'invalid')
   const noteTooLong = () => new ForumWriteError(422, `The note is limited to ${LIMITS.reportNoteChars} characters.`, 'too-long')
   if (input.note != null && (typeof input.note !== 'string' || rawTooLong(input.note, LIMITS.reportNoteChars))) throw noteTooLong()
-  await requireStanding(ctx, 'comment')
+  await requireStanding(ctx, 'report')
   const targetId = input.targetId
   const id = reportId(ctx.accountId, targetId)
   return limited(takeLimit('report', ctx.accountId, ctx.ip), async () => {

@@ -21,6 +21,20 @@ vi.mock('../src/services/proxyMultisigService.ts', () => ({
   multisigCompositionFor: (ids: string[]) => { const s = mockProxies.multisigs.get(ids[0]); return s ? { signatories: s } : null },
 }))
 
+// Every forum write also needs holdings worth more than FORUM_MIN_WRITE_USD, read by
+// the Data API mint gate's valuation (apiTokenMintGate.ts). Each account's value — or
+// the failure — is set per test; anyone not listed holds $50.
+const holdings = vi.hoisted(() => ({ usd: new Map<string, number | Error>(), calls: [] as string[] }))
+vi.mock('../src/services/apiTokenMintGate.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/services/apiTokenMintGate.ts')>(),
+  mintHoldingsUsd: async (accountId: string) => {
+    holdings.calls.push(accountId)
+    const v = holdings.usd.get(accountId) ?? 50
+    if (v instanceof Error) throw v
+    return v
+  },
+}))
+
 const { initUserAuthService, issueSession, resetUserAuthForTests } = await import('../src/services/userAuthService.ts')
 const { fakeClient: userFakeClient } = await import('./helpers/userFakes.ts')
 const { initUserApiTokenService } = await import('../src/services/userApiTokenService.ts')
@@ -50,6 +64,8 @@ type Row = Record<string, unknown>
 const DAY_S = 86_400
 /** First seen on chain (unix seconds) per account; absent = never seen. */
 let firstSeen: Record<string, number> = {}
+/** Accounts that voted on some referendum. */
+let voters = new Set<string>()
 
 function forumFake(balances: Record<string, bigint>) {
   const posts = new Map<string, Row>(), comments = new Map<string, Row>(), revisions = new Map<string, Row>()
@@ -61,7 +77,7 @@ function forumFake(balances: Record<string, bigint>) {
       json: async () => {
         const p = query_params ?? {}
         if (query.includes('account_asset_latest_balances')) return balances[String(p.a)] != null ? [{ bal: String(balances[String(p.a)]) }] : []
-        if (query.includes('governance_vote_calls_by_voter')) return []
+        if (query.includes('governance_vote_calls_by_voter')) return voters.has(String(p.a)) ? [{ v: 1 }] : []
         if (query.includes('account_activity_v3')) return firstSeen[String(p.a)] ? [{ t: firstSeen[String(p.a)] }] : []
         if (query.includes('FROM price_data.forum_posts FINAL WHERE post_id')) return [...posts.values()].filter(r => r.post_id === p.id)
         if (query.includes('FROM price_data.forum_posts FINAL')) return [...posts.values()]
@@ -111,6 +127,9 @@ beforeAll(async () => { await cryptoWaitReady() })
 beforeEach(() => {
   fake = forumFake({ [ALICE]: 500n * HDX, [BOB]: 5n * HDX, [MOD]: 5000n * HDX, [`0x${'51'.repeat(32)}`]: 10n * HDX, [CAROL]: 200n * HDX, [DAVE]: 300n * HDX })
   firstSeen = {}
+  voters = new Set()
+  holdings.usd.clear()
+  holdings.calls.length = 0
   mockProxies.delegates = [{ accountId: `0x${'51'.repeat(32)}`, proxyType: 'Governance', delay: 0 }, { accountId: `0x${'52'.repeat(32)}`, proxyType: 'Transfer', delay: 0 }]
   mockProxies.isPure = null
   store.setForumSnapshotForTest({ generation: 'g0' })
@@ -119,7 +138,7 @@ beforeEach(() => {
   write.resetForumWriteForTests()
   initForumMedia(fake.client)
 })
-afterEach(() => { store.setForumSnapshotForTest(null); delete process.env.FORUM_MODERATOR_ACCOUNT_IDS })
+afterEach(() => { store.setForumSnapshotForTest(null); delete process.env.FORUM_MODERATOR_ACCOUNT_IDS; delete process.env.FORUM_MIN_WRITE_USD })
 
 describe('text rules', () => {
   it('strips bidi and zero-width characters from titles', () => {
@@ -520,6 +539,135 @@ describe('moderation', () => {
   })
 })
 
+describe('holdings gate (more than FORUM_MIN_WRITE_USD, on top of the stake rules)', () => {
+  const VOTER = `0x${'e5'.repeat(32)}`
+  const IDENTIFIED = `0x${'e6'.repeat(32)}`
+  // Any bytes: the gate is read before the image is, so a refusal here never reaches decoding.
+  const NOT_AN_IMAGE = new Uint8Array(Buffer.from('plain text, not an image'))
+  const fresh = (usd: number | Error, ...accounts: string[]) => {
+    for (const a of accounts) holdings.usd.set(a, usd)
+    write.resetForumWriteForTests() // drops the cached values and the rate-limit windows
+  }
+
+  it('refuses a comment, a discussion, a report and an upload at $1 or less, and allows them above $1', async () => {
+    const { comment } = await write.createComment(ctx(BOB), { threadKey: 'opengov:3', body: 'target' })
+    for (const usd of [0, 0.5, 1]) {
+      fresh(usd, ALICE)
+      const low = { status: 403, code: 'low-holdings' }
+      await expect(write.createComment(ctx(ALICE), { threadKey: 'opengov:3', body: `c ${usd}` })).rejects.toMatchObject(low)
+      await expect(write.createDiscussion(ctx(ALICE), { title: `t ${usd}`, body: 'b' })).rejects.toMatchObject(low)
+      await expect(write.fileReport(ctx(ALICE), { targetId: comment.commentId, reason: 'spam' })).rejects.toMatchObject(low)
+      await expect(media.uploadImage(ctx(ALICE), NOT_AN_IMAGE)).rejects.toMatchObject(low)
+    }
+    fresh(1.01, ALICE)
+    await expect(write.createComment(ctx(ALICE), { threadKey: 'opengov:3', body: 'above' })).resolves.toBeTruthy()
+    await expect(write.createDiscussion(ctx(ALICE), { title: 'above', body: 'b' })).resolves.toBeTruthy()
+    await expect(write.fileReport(ctx(ALICE), { targetId: comment.commentId, reason: 'spam' })).resolves.toMatchObject({ ok: true })
+    // Past the gate, the upload fails on its bytes instead.
+    await expect(media.uploadImage(ctx(ALICE), NOT_AN_IMAGE)).rejects.toMatchObject({ status: 415 })
+  })
+
+  it('also gates edits and a proposer\'s Updates', async () => {
+    const { comment } = await write.createComment(ctx(ALICE), { threadKey: 'opengov:3', body: 'mine' })
+    fresh(0.2, ALICE, PROPOSER_PROXY)
+    await expect(write.editComment(ctx(ALICE), comment.commentId, { body: 'edited' })).rejects.toMatchObject({ status: 403, code: 'low-holdings' })
+    await expect(write.addUpdate(ctx(PROPOSER_PROXY), 'opengov:7', { body: 'Milestone' })).rejects.toMatchObject({ status: 403, code: 'low-holdings' })
+  })
+
+  it('a vote or a verified identity opens the stake rule but not the holdings rule', async () => {
+    voters = new Set([VOTER])
+    const idRow = { chain: 'polkadot-people', account_id: IDENTIFIED, display: 'Ident', verified: 1, email: '', web: '', twitter: '', priority: 0 }
+    identities.initIdentityService({ query: async () => ({ json: async () => [idRow] }) } as unknown as ClickHouseClient)
+    await identities.loadIdentities()
+    try {
+      fresh(0, VOTER, IDENTIFIED)
+      for (const who of [VOTER, IDENTIFIED]) {
+        await expect(write.createComment(ctx(who), { threadKey: 'opengov:3', body: 'x' })).rejects.toMatchObject({ status: 403, code: 'low-holdings' })
+        await expect(write.createDiscussion(ctx(who), { title: 't', body: 'b' })).rejects.toMatchObject({ status: 403, code: 'low-holdings' })
+      }
+      fresh(2, VOTER, IDENTIFIED)
+      for (const who of [VOTER, IDENTIFIED]) await expect(write.createDiscussion(ctx(who), { title: `t ${who.slice(2, 4)}`, body: 'b' })).resolves.toBeTruthy()
+    } finally {
+      identities.initIdentityService({ query: async () => ({ json: async () => [] }) } as unknown as ClickHouseClient)
+      await identities.loadIdentities()
+    }
+  })
+
+  it('never replaces the stake rules: $1,000 with too little HDX is still refused', async () => {
+    fresh(1000, BOB, POOR)
+    await expect(write.createDiscussion(ctx(BOB), { title: 't', body: 'b' })).rejects.toMatchObject({ status: 403, code: 'no-stake-post' })
+    await expect(write.createComment(ctx(POOR), { threadKey: 'opengov:3', body: 'b' })).rejects.toMatchObject({ status: 403, code: 'no-stake-comment' })
+  })
+
+  it('fails closed: a value that cannot be read refuses the write as retryable', async () => {
+    const { MintValuationUnavailable } = await import('../src/services/apiTokenMintGate.ts')
+    fresh(new MintValuationUnavailable('prices are stale'), ALICE)
+    await expect(write.createComment(ctx(ALICE), { threadKey: 'opengov:3', body: 'x' })).rejects.toMatchObject({ status: 503, code: 'valuation-unavailable', retryAfterSec: 30 })
+    await expect(media.uploadImage(ctx(ALICE), NOT_AN_IMAGE)).rejects.toMatchObject({ status: 503, code: 'valuation-unavailable' })
+    fresh(new Error('clickhouse down'), ALICE)
+    await expect(write.createDiscussion(ctx(ALICE), { title: 't', body: 'b' })).rejects.toMatchObject({ status: 503, code: 'valuation-unavailable' })
+    // When the stake rule refuses anyway, that is the answer — trying again would not help.
+    fresh(new Error('clickhouse down'), POOR)
+    await expect(write.createComment(ctx(POOR), { threadKey: 'opengov:3', body: 'x' })).rejects.toMatchObject({ status: 403, code: 'no-stake-comment' })
+  })
+
+  it('exempts ADMIN_ACCOUNT_IDS accounts without valuing them; a forum-only moderator is not exempt', async () => {
+    const prev = process.env.ADMIN_ACCOUNT_IDS
+    process.env.ADMIN_ACCOUNT_IDS = ALICE
+    process.env.FORUM_MODERATOR_ACCOUNT_IDS = MOD
+    initUserApiTokenService(fake.client)
+    try {
+      fresh(0, ALICE, MOD)
+      await expect(write.createDiscussion(ctx(ALICE), { title: 'admin', body: 'b' })).resolves.toBeTruthy()
+      const s = await write.standingOf(ALICE)
+      expect(s.facts).toMatchObject({ usd: null, usdStatus: 'exempt' })
+      expect(holdings.calls).not.toContain(ALICE)
+      await expect(write.createComment(ctx(MOD), { threadKey: 'opengov:3', body: 'x' })).rejects.toMatchObject({ code: 'low-holdings' })
+    } finally {
+      if (prev == null) delete process.env.ADMIN_ACCOUNT_IDS; else process.env.ADMIN_ACCOUNT_IDS = prev
+      initUserApiTokenService(fake.client)
+    }
+  })
+
+  it('values an account once per minute, and concurrent reads share one valuation', async () => {
+    fresh(5, ALICE)
+    await Promise.all([write.standingOf(ALICE), write.standingOf(ALICE), write.standingOf(ALICE)])
+    await write.standingOf(ALICE)
+    expect(holdings.calls.filter(a => a === ALICE)).toHaveLength(1)
+  })
+
+  it('says why in the standing, with the value and the threshold', async () => {
+    fresh(0.379, ALICE)
+    const s = await write.standingOf(ALICE)
+    expect(s).toMatchObject({ canComment: false, canPost: false, gate: { reason: 'low-holdings' }, facts: { usd: 0.379, usdStatus: 'low' }, thresholds: { minUsd: 1 } })
+    expect(s.gate!.detail).toMatch(/more than \$1 in holdings.*holds \$0\.37\./)
+    for (const a of ['comment', 'post', 'report', 'upload'] as const) expect(s.actions[a]).toMatchObject({ ok: false, code: 'low-holdings', reason: expect.stringMatching(/more than \$1 in holdings/) })
+    // Both rules failing: the stake reason names the holdings rule too.
+    fresh(0, POOR)
+    const poor = await write.standingOf(POOR)
+    expect(poor.gate).toMatchObject({ reason: 'no-stake-comment', detail: expect.stringMatching(/It also needs more than \$1 in holdings/) })
+    expect(write.usdWords(-12.345)).toBe('-$12.35')
+    expect(write.usdWords(0.999)).toBe('$0.99')
+    expect(write.usdWords(12345.6)).toBe('$12,345')
+  })
+
+  it('takes its threshold from FORUM_MIN_WRITE_USD, and a malformed value stops the start', async () => {
+    process.env.FORUM_MIN_WRITE_USD = '2.5'
+    write.initForumWrite(fake.client)
+    fresh(2.5, ALICE)
+    await expect(write.createComment(ctx(ALICE), { threadKey: 'opengov:3', body: 'x' })).rejects.toMatchObject({ code: 'low-holdings', message: expect.stringMatching(/more than \$2\.5 in holdings/) })
+    fresh(2.51, ALICE)
+    await expect(write.createComment(ctx(ALICE), { threadKey: 'opengov:3', body: 'x' })).resolves.toBeTruthy()
+    for (const bad of ['-1', 'one', '1e3', '$1']) {
+      process.env.FORUM_MIN_WRITE_USD = bad
+      expect(() => write.initForumWrite(fake.client)).toThrow(/FORUM_MIN_WRITE_USD/)
+    }
+    delete process.env.FORUM_MIN_WRITE_USD
+    write.initForumWrite(fake.client)
+    expect(write.forumMinWriteUsd()).toBe(1)
+  })
+})
+
 describe('routes', () => {
   let app: FastifyInstance
   let bob: string, mod: string
@@ -593,6 +741,23 @@ describe('routes', () => {
     expect(res.statusCode).toBe(200)
     expect([...fake.sanctions.values()].map(r => r.account_id)).toEqual([bound])
     expect(await write.mutedUntil(bound)).not.toBeNull()
+  })
+
+  it('reports the holdings gate with the value and the threshold, and refuses a write it cannot value as retryable', async () => {
+    holdings.usd.set(BOB, 0.4)
+    const me = await app.inject({ method: 'GET', url: '/user/forum/me', headers: { authorization: `Bearer ${bob}` } })
+    expect(me.json()).toMatchObject({
+      canComment: false, canPost: false, gate: { reason: 'low-holdings' },
+      facts: { usd: 0.4, usdStatus: 'low' }, thresholds: { minUsd: 1 },
+      actions: { comment: { ok: false, code: 'low-holdings' } },
+    })
+    expect(me.json().actions.comment.reason).toMatch(/holds \$0\.40\./)
+    holdings.usd.set(BOB, new Error('down'))
+    write.resetForumWriteForTests()
+    const res = await app.inject({ method: 'POST', url: '/user/forum/comments', headers: { authorization: `Bearer ${bob}` }, payload: { threadKey: 'opengov:3', body: 'x' } })
+    expect(res.statusCode).toBe(503)
+    expect(res.headers['retry-after']).toBe('30')
+    expect(res.json()).toMatchObject({ reason: 'valuation-unavailable' })
   })
 
   it('a refusal says why and how long to wait', async () => {

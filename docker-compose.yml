@@ -798,11 +798,13 @@ services:
       - DATA_API_MIN_MINT_USD=${DATA_API_MIN_MINT_USD:-}
       # Governance forum writes (routes/forum.ts): moderators are ADMIN_ACCOUNT_IDS
       # plus these (0x AccountId32 hex, comma-separated); the stake an account needs
-      # to comment and to start a discussion (HDX); and the forum's IPFS node RPC,
-      # where uploads are pinned (ipfs-internal only).
+      # to comment and to start a discussion (HDX); the USD value every writer
+      # must hold more than on top of that (empty: 1; admins exempt); and the
+      # forum's IPFS node RPC, where uploads are pinned (ipfs-internal only).
       - FORUM_MODERATOR_ACCOUNT_IDS=${FORUM_MODERATOR_ACCOUNT_IDS:-}
       - FORUM_MIN_HDX_COMMENT=${FORUM_MIN_HDX_COMMENT:-1}
       - FORUM_MIN_HDX_POST=${FORUM_MIN_HDX_POST:-100}
+      - FORUM_MIN_WRITE_USD=${FORUM_MIN_WRITE_USD:-}
       - IPFS_API_URL=http://hydration-neckwork-ipfs:5001
       # Wormhole NTT backing check. Optional origin-chain RPC map (JSON keyed by
       # Wormhole chain id) for reading the custody that backs the bridged supply;
