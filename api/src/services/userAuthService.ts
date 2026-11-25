@@ -131,10 +131,20 @@ const pendingChallenges = new Map<string, PendingChallenge>()
 const pendingByClient = new Map<string, string[]>()
 
 // ---- sessions: raw token only ever exists client-side; the map and the table
-// hold its sha256. 90-day sliding expiry, persisted at most hourly. Each
+// hold its sha256. 90-day sliding expiry, persisted at most hourly, and never
+// past 365 days from creation however active the session stays. Each
 // session doubles as a "device" on the devices list: label/createdVia say what
 // logged in and how ('wallet' signature or a scanned 'qr' handoff), so the
-// owner can recognize and revoke it. ----
+// owner can recognize and revoke it.
+//
+// A revocation is final. The table is a ReplacingMergeTree keyed on the token
+// hash, so a live row written after the revocation row would bring the session
+// back at the next load. Three things prevent that: a revoking session writes
+// no further expiry refreshes and waits for one already in flight before its
+// revocation row is written (so that row is the newest); the revocation is
+// persisted BEFORE the session leaves memory, and a failed write fails the
+// request instead of reporting a sign-out that a restart would undo; and the
+// load skips any token hash that has a revocation row at all. ----
 interface Session {
   accountId: string
   expiresAtMs: number
@@ -143,9 +153,13 @@ interface Session {
   createdVia: string
   createdAtMs: number
   lastSeenMs: number
+  revoked?: boolean
+  persisting?: Promise<void>
 }
 const SESSION_TTL_MS = 90 * 24 * 3600_000
+export const SESSION_MAX_LIFETIME_MS = 365 * 24 * 3600_000
 const SESSION_PERSIST_EVERY_MS = 3600_000
+const slidExpiry = (s: Session, now: number) => Math.min(now + SESSION_TTL_MS, s.createdAtMs + SESSION_MAX_LIFETIME_MS)
 const sessionsByHash = new Map<string, Session>()
 
 let client: ClickHouseClient
@@ -264,7 +278,9 @@ export async function loadUserSessions(): Promise<void> {
   const res = await client.query({
     query: `SELECT token_hash, account_id, expires_at, label, created_via, created_at, last_seen
             FROM price_data.user_sessions FINAL
-            WHERE deleted = 0 AND expires_at > now()`,
+            WHERE deleted = 0 AND expires_at > now()
+              AND created_at > now() - INTERVAL ${SESSION_MAX_LIFETIME_MS / 86_400_000} DAY
+              AND token_hash NOT IN (SELECT token_hash FROM price_data.user_sessions WHERE deleted = 1)`,
     format: 'JSONEachRow',
   })
   sessionsByHash.clear()
@@ -274,12 +290,13 @@ export async function loadUserSessions(): Promise<void> {
     // ClickHouse DateTime comes back as 'YYYY-MM-DD HH:MM:SS' (UTC); the WHERE
     // clause already excludes expired rows server-side, but re-check locally
     // too so a clock-skewed or stubbed source can never resurrect a dead session.
-    const expiresAtMs = ms(r.expires_at)
+    const createdAtMs = ms(r.created_at) || now
+    const expiresAtMs = Math.min(ms(r.expires_at), createdAtMs + SESSION_MAX_LIFETIME_MS)
     if (expiresAtMs > now) {
       sessionsByHash.set(r.token_hash, {
         accountId: r.account_id, expiresAtMs, lastPersistedMs: now,
         label: r.label ?? '', createdVia: r.created_via || 'wallet',
-        createdAtMs: ms(r.created_at) || now, lastSeenMs: ms(r.last_seen) || now,
+        createdAtMs, lastSeenMs: ms(r.last_seen) || now,
       })
     }
   }
@@ -316,25 +333,40 @@ export async function issueSession(accountId: string, meta?: { label?: string; v
 export function sessionAccount(token: string): string | null {
   const hash = sha256(token)
   const s = sessionsByHash.get(hash)
-  if (!s) return null
+  if (!s || s.revoked) return null
   const now = Date.now()
   if (s.expiresAtMs < now) { sessionsByHash.delete(hash); return null }
-  // Sliding expiry: refresh the window, persist at most hourly (fire-and-forget:
-  // an unpersisted slide only costs an earlier re-login after a restart).
-  s.expiresAtMs = now + SESSION_TTL_MS
+  // Sliding expiry: refresh the window (capped by the absolute lifetime),
+  // persist at most hourly (fire-and-forget: an unpersisted slide only costs an
+  // earlier re-login after a restart). The write is remembered so a revocation
+  // can wait for it.
+  s.expiresAtMs = slidExpiry(s, now)
   s.lastSeenMs = now
   if (now - s.lastPersistedMs > SESSION_PERSIST_EVERY_MS) {
     s.lastPersistedMs = now
-    void persistSession(hash, s).catch(() => {})
+    s.persisting = persistSession(hash, s).catch(() => {})
   }
   return s.accountId
+}
+
+// Throws when the revocation could not be persisted; the session then stays
+// usable, exactly as the table would bring it back after a restart.
+async function revokeStoredSession(hash: string, s: Session): Promise<void> {
+  s.revoked = true
+  await s.persisting
+  try {
+    await persistSession(hash, s, 1)
+  } catch (err) {
+    s.revoked = false
+    throw err
+  }
+  sessionsByHash.delete(hash)
 }
 
 export async function revokeSession(token: string): Promise<void> {
   const hash = sha256(token)
   const s = sessionsByHash.get(hash)
-  sessionsByHash.delete(hash)
-  if (s) await persistSession(hash, s, 1)
+  if (s) await revokeStoredSession(hash, s)
 }
 
 // The devices list: every live session of this account, newest activity first.
@@ -347,7 +379,7 @@ export function listSessions(accountId: string, currentToken: string): SessionIn
   const now = Date.now()
   const out: SessionInfo[] = []
   for (const [hash, s] of sessionsByHash) {
-    if (s.accountId !== accountId || s.expiresAtMs < now) continue
+    if (s.accountId !== accountId || s.revoked || s.expiresAtMs < now) continue
     out.push({
       id: hash, label: s.label, createdVia: s.createdVia,
       createdAt: chTimestampMs(s.createdAtMs), lastSeen: chTimestampMs(s.lastSeenMs),
@@ -362,8 +394,7 @@ export function listSessions(accountId: string, currentToken: string): SessionIn
 export async function revokeSessionByHash(accountId: string, hash: string): Promise<boolean> {
   const s = sessionsByHash.get(hash)
   if (!s || s.accountId !== accountId) return false
-  sessionsByHash.delete(hash)
-  await persistSession(hash, s, 1)
+  await revokeStoredSession(hash, s)
   return true
 }
 

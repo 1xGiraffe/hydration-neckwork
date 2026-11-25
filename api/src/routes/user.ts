@@ -240,15 +240,24 @@ export async function userRoutes(fastify: FastifyInstance) {
     return { sessions: listSessions(accountId, (req.headers.authorization as string).slice(7)) }
   })
 
+  // A revocation that could not be persisted is reported as a failure: the
+  // session is still valid, and saying otherwise would be undone by a restart.
   fastify.delete('/user/sessions/:id', async (req, reply) => {
     const accountId = sessionUser(req)
-    const revoked = await revokeSessionByHash(accountId, (req.params as { id: string }).id)
+    let revoked: boolean
+    try { revoked = await revokeSessionByHash(accountId, (req.params as { id: string }).id) } catch (err) {
+      req.log.error({ errClass: (err as Error)?.name }, 'session revocation failed')
+      return reply.status(503).send({ error: 'Couldn’t sign that device out — try again' })
+    }
     if (!revoked) return reply.status(404).send({ error: 'Unknown session' })
     return { ok: true }
   })
 
-  fastify.post('/user/auth/logout', async (req) => {
-    await revokeSession((req.headers.authorization as string).slice(7))
+  fastify.post('/user/auth/logout', async (req, reply) => {
+    try { await revokeSession((req.headers.authorization as string).slice(7)) } catch (err) {
+      req.log.error({ errClass: (err as Error)?.name }, 'session revocation failed')
+      return reply.status(503).send({ error: 'Couldn’t sign out — try again' })
+    }
     return { ok: true }
   })
 
