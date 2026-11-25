@@ -110,9 +110,12 @@ log "PAIR_PRICE_SOURCE resolves to $PPS_API on api and api-public"
 
 # ── 2. check ─────────────────────────────────────────────────────────────────
 if [[ "${1:-}" != "--skip-check" ]]; then
-  log "npm --prefix api run check"
+  # Two test workers unless the caller says otherwise: the host shares its cores with
+  # the database and other live services, and a suite on every core under that load
+  # times out in hooks (a red check from contention, not from the code).
+  log "npm --prefix api run check (VITEST_MAX_WORKERS=${VITEST_MAX_WORKERS:-2})"
   CHECK_LOG=$(mktemp)
-  npm --prefix api run check >"$CHECK_LOG" 2>&1 || { tail -40 "$CHECK_LOG"; log "FAIL: api check is red"; exit 1; }
+  VITEST_MAX_WORKERS="${VITEST_MAX_WORKERS:-2}" npm --prefix api run check >"$CHECK_LOG" 2>&1 || { tail -40 "$CHECK_LOG"; log "FAIL: api check is red"; exit 1; }
 fi
 # Known-vulnerable production dependencies (ops/audit-gate.mjs): a high/critical
 # advisory not acknowledged — with an expiry — in ops/audit-allowlist.json stops the
