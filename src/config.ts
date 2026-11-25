@@ -74,13 +74,11 @@ export const config: Config = {
   // Identity sources beyond Hydration, in falling display priority. The People
   // chains are where Polkadot and Kusama identities actually live — both relay
   // chains migrated theirs in 2024 and no Asset Hub ever carried the pallet.
-  // Testnet names are free to mint, so they rank last and only fill gaps.
+  // No testnet: its names are free to mint, and the api never shows one.
   // Set IDENTITY_CHAINS to an empty string to use Hydration alone.
   IDENTITY_CHAINS: process.env.IDENTITY_CHAINS ?? [
     'polkadot-people=https://polkadot-people-rpc.polkadot.io',
     'kusama-people=https://kusama-people-rpc.polkadot.io',
-    'westend-people=https://westend-people-rpc.polkadot.io',
-    'paseo-people=https://people-paseo.rotko.net',
   ].join(','),
 
   // ClickHouse connection

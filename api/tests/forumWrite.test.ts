@@ -32,6 +32,7 @@ const { forumRoutes } = await import('../src/routes/forum.ts')
 const { stripCorsFromPrivate } = await import('../src/routes/corsPolicy.ts')
 const media = await import('../src/services/forumMedia.ts')
 const { mentionsIn, linkCount, cleanTitle } = await import('../src/services/forumText.ts')
+const identities = await import('../src/services/identityService.ts')
 
 const ALICE = `0x${'a1'.repeat(32)}`
 const PROPOSER_PROXY = `0x${'51'.repeat(32)}`
@@ -421,6 +422,29 @@ describe('moderation', () => {
     expect(await write.autoHideEligible(DAVE)).toBe(true)
     firstSeen[DAVE] = Math.floor(Date.now() / 1000) // re-read: now too new
     expect(await write.autoHideEligible(DAVE)).toBe(false)
+  })
+
+  it('a verified identity counts toward an automatic hide; a testnet or sub-identity does not; a mute always wins', async () => {
+    const idRow = (chain: string, account: string, display: string, verified: number) => ({ chain, account_id: account, display, verified, email: '', web: '', twitter: '', priority: 0 })
+    identities.initIdentityService({ query: async () => ({ json: async () => [
+      idRow('polkadot-people', CAROL, 'Carol', 1),
+      idRow('westend-people', DAVE, 'Dave', 1),
+      idRow('polkadot-people', POOR, 'Carol/Sub', 1),
+    ] }) } as unknown as ClickHouseClient)
+    await identities.loadIdentities()
+    try {
+      // New accounts with no HDX history: only the identity could make them count.
+      firstSeen = {}
+      expect(await write.autoHideEligible(CAROL)).toBe(true)
+      expect(await write.autoHideEligible(DAVE)).toBe(false)
+      expect(await write.autoHideEligible(POOR)).toBe(false)
+      expect((await write.standingOf(POOR)).canComment).toBe(false)
+      await write.setMute(MOD, CAROL, Date.now() + 86_400_000, 'cool off')
+      expect(await write.autoHideEligible(CAROL)).toBe(false)
+    } finally {
+      identities.initIdentityService({ query: async () => ({ json: async () => [] }) } as unknown as ClickHouseClient)
+      await identities.loadIdentities()
+    }
   })
 
   it('never auto-hides a referendum description or a proposer Update — reports only queue', async () => {

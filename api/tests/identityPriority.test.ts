@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  hasVerifiedIdentity,
   identityForAccount,
   initIdentityService,
   loadIdentities,
@@ -13,8 +14,8 @@ import {
 // the explorer, and which one must not depend on the order ClickHouse returned.
 const id = (n: number) => '0x' + n.toString(16).padStart(64, '0')
 
-const row = (chain: string, priority: number, accountId: string, display: string, verified = 0) => ({
-  chain, priority, account_id: accountId, display, verified, email: '', web: '', twitter: '',
+const row = (chain: string, priority: number, accountId: string, display: string, verified = 0, email = '') => ({
+  chain, priority, account_id: accountId, display, verified, email, web: '', twitter: '',
 })
 
 const clientWith = (rows: ReturnType<typeof row>[]) => ({
@@ -54,14 +55,19 @@ describe('cross-chain identity priority', () => {
     expect(identityForAccount(id(1))?.display).toBe('Polkadot Name')
   })
 
-  it('ranks a testnet name last', async () => {
+  it('never shows a testnet name, even where it is the only one', async () => {
     initIdentityService(clientWith([
       row('paseo-people', 4, id(2), 'Spoofed'),
       row('kusama-people', 2, id(2), 'Real'),
+      row('westend-people', 3, id(6), 'Free name', 1),
+      row('rococo', 1, id(7), 'Old testnet'),
     ]))
     await loadIdentities()
 
     expect(identityForAccount(id(2))?.display).toBe('Real')
+    expect(identityForAccount(id(6))).toBeNull()
+    expect(identityForAccount(id(7))).toBeNull()
+    expect(searchIdentitiesByDisplay('Free name', 5)).toEqual([])
   })
 
   it('breaks a priority tie on the chain key rather than row order', async () => {
@@ -92,5 +98,42 @@ describe('cross-chain identity priority', () => {
 
     expect(searchIdentitiesByDisplay('Polkadot Name', 5)).toEqual([])
     expect(searchIdentitiesByDisplay('Hydration Name', 5)).toHaveLength(1)
+  })
+})
+
+describe('verified identity (the forum\'s standing)', () => {
+  afterEach(() => {
+    stopIdentityRefresh()
+    vi.restoreAllMocks()
+  })
+
+  it('counts an own registration a registrar judged, on Hydration or a Polkadot/Kusama People chain', async () => {
+    initIdentityService(clientWith([
+      row('hydration', 0, id(10), 'Judged here', 1),
+      row('polkadot-people', 1, id(11), 'Judged on Polkadot', 1, 'a@example.org'),
+      // An unverified name wins the display; a verified one on another chain still counts.
+      row('hydration', 0, id(12), 'Unjudged here'),
+      row('kusama-people', 2, id(12), 'Judged on Kusama', 1),
+    ]))
+    await loadIdentities()
+
+    for (const n of [10, 11, 12]) expect(hasVerifiedIdentity(id(n))).toBe(true)
+    expect(identityForAccount(id(12))?.display).toBe('Unjudged here')
+  })
+
+  it('does not count an unjudged name, a testnet, another chain, a username or a sub-identity', async () => {
+    initIdentityService(clientWith([
+      row('hydration', 0, id(20), 'Unjudged'),
+      row('westend-people', 3, id(21), 'Testnet judged', 1, 'a@example.org'),
+      row('paseo-people', 4, id(22), 'Testnet judged', 1),
+      row('some-parachain', 5, id(23), 'Elsewhere judged', 1),
+      row('polkadot-people', 1, id(24), 'alice.dot'),
+      // A sub inherits its parent's judgement: "Parent/Sub", no contacts of its own.
+      row('polkadot-people', 1, id(25), 'Parent/Sub', 1),
+    ]))
+    await loadIdentities()
+
+    for (const n of [20, 21, 22, 23, 24, 25]) expect(hasVerifiedIdentity(id(n)), String(n)).toBe(false)
+    expect(hasVerifiedIdentity('')).toBe(false)
   })
 })

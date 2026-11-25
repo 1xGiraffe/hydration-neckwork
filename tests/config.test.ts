@@ -9,6 +9,7 @@ const ENV_KEYS = [
   'SNAPSHOT_INTERVAL_MINUTES',
   'RPC_HEAD_POLL_MS',
   'GRAPH_MIN_PATH_LIQUIDITY_USD',
+  'IDENTITY_CHAINS',
 ] as const
 const originalEnv = new Map(ENV_KEYS.map(key => [key, process.env[key]]))
 
@@ -68,5 +69,14 @@ describe('indexer numeric configuration', () => {
 
     expect(config.RPC_URL).toBe('https://hydration-rpc.neckwork.net')
     expect(config.CLICKHOUSE_URL).toBe('http://localhost:18123')
+  })
+})
+
+describe('identity sources', () => {
+  it('adds only the Polkadot and Kusama People chains to Hydration by default, never a testnet', async () => {
+    delete process.env.IDENTITY_CHAINS
+    const { config } = await import('../src/config.ts')
+
+    expect(config.IDENTITY_CHAINS.split(',').map(entry => entry.split('=')[0])).toEqual(['polkadot-people', 'kusama-people'])
   })
 })

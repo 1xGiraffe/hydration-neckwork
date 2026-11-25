@@ -1,7 +1,8 @@
 import { referendumDeposits } from './governanceDeposits.ts'
 import { createHash, randomBytes } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
-import { accountRef, resolveDisplayAccountId } from './explorerService.ts'
+import { resolveDisplayAccountId } from './explorerService.ts'
+import { hasVerifiedIdentity } from './identityService.ts'
 import { getReferendum } from './governanceService.ts'
 import { multisigCompositionFor, proxyInfoFor } from './proxyMultisigService.ts'
 import { isApiAdmin } from './userApiTokenService.ts'
@@ -25,7 +26,7 @@ import { SlidingLimiter, limitMessage, type LimitAction } from './forumLimits.ts
 //   identity). An item is its author's: the account that wrote it here, or the
 //   imported author when that is the same account (claiming needs no extra step). An
 //   on-chain subject's description belongs to its proposer's authority (§ below).
-// - GATES: posting needs some stake in the chain (HDX, an identity or a vote), a
+// - GATES: posting needs some stake in the chain (HDX, a verified identity or a vote), a
 //   muted account cannot write, and every action has rate limits (forumLimits.ts).
 // - TEXT: lengths, link and mention caps and the duplicate rule (forumText.ts). Text
 //   is stored exactly as cleaned — never as trusted HTML; the explorer's one renderer
@@ -53,7 +54,7 @@ const DUPLICATE_WINDOW_MS = 24 * 3_600_000
 const GATE_TTL_MS = 5 * 60_000
 /** Distinct eligible reporters (autoHideEligible) that hide an item until a moderator decides. */
 export const AUTO_HIDE_REPORTS = 3
-/** A reporter without an on-chain identity counts toward an automatic hide only with this much HDX… */
+/** A reporter without a verified identity counts toward an automatic hide only with this much HDX… */
 export const AUTO_HIDE_HDX = envHdx('FORUM_MIN_HDX_POST', 100)
 /** …and an account first seen on chain at least this many days ago. */
 export const AUTO_HIDE_MIN_AGE_DAYS = 30
@@ -213,9 +214,10 @@ export interface GateFacts { hdx: bigint; identity: boolean; voted: boolean; fir
 const gateCache = new Map<string, { at: number; facts: GateFacts }>()
 
 /**
- * What the posting gate reads about an account: its HDX, an on-chain identity, any
- * vote ever, and when it was first seen on chain (its earliest indexed activity).
- * Cached briefly for the gate; `fresh` re-reads (a report's eligibility always does).
+ * What the posting gate reads about an account: its HDX, a verified on-chain identity
+ * (identityService.hasVerifiedIdentity), any vote ever, and when it was first seen on
+ * chain (its earliest indexed activity). Cached briefly for the gate; `fresh`
+ * re-reads (a report's eligibility always does).
  */
 export async function gateFacts(accountId: string, fresh = false): Promise<GateFacts> {
   const hit = gateCache.get(accountId)
@@ -236,7 +238,7 @@ export async function gateFacts(accountId: string, fresh = false): Promise<GateF
     }).then(r => r.json<{ t: number | string }>()),
   ])
   const t = Number(first[0]?.t ?? 0)
-  const facts: GateFacts = { hdx: BigInt(bal[0]?.bal ?? '0'), identity: !!accountRef(accountId).identity, voted: votes.length > 0, firstSeenMs: t > 0 ? t * 1000 : null }
+  const facts: GateFacts = { hdx: BigInt(bal[0]?.bal ?? '0'), identity: hasVerifiedIdentity(resolveDisplayAccountId(accountId)), voted: votes.length > 0, firstSeenMs: t > 0 ? t * 1000 : null }
   if (gateCache.size > 20_000) gateCache.clear()
   gateCache.set(accountId, { at: Date.now(), facts })
   return facts
@@ -268,11 +270,11 @@ export function standingFrom(facts: GateFacts, mutedUntilMs: number | null, mode
   const muted = mutedUntilMs != null && mutedUntilMs > Date.now()
   const gate: ForumStanding['gate'] = muted
     ? { reason: 'muted', detail: `A moderator has paused writing for this account until ${new Date(mutedUntilMs!).toUTCString()}.` }
-    : !canComment ? { reason: 'no-stake-comment', detail: `To comment, an account needs at least ${hdxWords(MIN_HDX_COMMENT)} HDX, an on-chain identity, or a vote on any referendum.` }
-      : !canPost ? { reason: 'no-stake-post', detail: `To start a discussion, an account needs at least ${hdxWords(MIN_HDX_POST)} HDX, an on-chain identity, or a vote on any referendum. You can still comment.` }
+    : !canComment ? { reason: 'no-stake-comment', detail: `To comment, an account needs at least ${hdxWords(MIN_HDX_COMMENT)} HDX, a verified on-chain identity, or a vote on any referendum.` }
+      : !canPost ? { reason: 'no-stake-post', detail: `To start a discussion, an account needs at least ${hdxWords(MIN_HDX_POST)} HDX, a verified on-chain identity, or a vote on any referendum. You can still comment.` }
         : null
   const held = `This account holds ${hdxWords(facts.hdx - facts.hdx % (HDX / 1000n))} HDX`
-  const need = (what: string, min: bigint) => `${what} needs at least ${hdxWords(min)} HDX, an on-chain identity, or a vote on any referendum. ${held} — add HDX, set an identity, or vote, then try again.`
+  const need = (what: string, min: bigint) => `${what} needs at least ${hdxWords(min)} HDX, a verified on-chain identity, or a vote on any referendum. ${held} — add HDX, have a registrar verify an identity, or vote, then try again.`
   const mutedReason = muted ? gate!.detail : null
   const commentGate: ActionGate = { ok: canComment && !muted, reason: mutedReason ?? (canComment ? null : need('Commenting', MIN_HDX_COMMENT)) }
   const sameAsComment = (what: string): ActionGate => ({ ok: commentGate.ok, reason: mutedReason ?? (canComment ? null : need(what, MIN_HDX_COMMENT)) })
@@ -846,11 +848,12 @@ function visibleTarget(targetId: string): { author: string; kind: string; subjec
 //
 // Anyone who may comment can report; a report always reaches the moderators' queue.
 // Hiding an item WITHOUT a moderator takes more: AUTO_HIDE_REPORTS distinct reporters
-// who each, read fresh at that moment (never from the gate's cache), hold an on-chain
-// identity, or at least AUTO_HIDE_HDX and an account first seen on chain at least
-// AUTO_HIDE_MIN_AGE_DAYS ago. And it never applies to a referendum's description or
-// its proposer's Updates (those only queue), nor to an item a moderator has already
-// looked at (restored it, or dismissed a report on it): later reports only queue.
+// who each, read fresh at that moment (never from the gate's cache), are not muted
+// and hold a verified on-chain identity, or at least AUTO_HIDE_HDX and an account
+// first seen on chain at least AUTO_HIDE_MIN_AGE_DAYS ago. And it never applies to a
+// referendum's description or its proposer's Updates (those only queue), nor to an
+// item a moderator has already looked at (restored it, or dismissed a report on it):
+// later reports only queue.
 
 const reportId = (reporter: string, target: string) => createHash('sha256').update(`${reporter}\u0000${target}`).digest('hex').slice(0, 32)
 
@@ -885,10 +888,11 @@ export async function fileReport(ctx: WriteContext, input: { targetId?: unknown;
 
 /** Whether a reporter's report counts toward an automatic hide — read fresh, never from the gate's cache. */
 export async function autoHideEligible(accountId: string): Promise<boolean> {
+  if (await mutedUntil(accountId)) return false
   const facts = await gateFacts(accountId, true)
   if (facts.identity) return true
   const ageDays = facts.firstSeenMs ? (Date.now() - facts.firstSeenMs) / 86_400_000 : 0
-  return facts.hdx >= AUTO_HIDE_HDX && ageDays >= AUTO_HIDE_MIN_AGE_DAYS && !(await mutedUntil(accountId))
+  return facts.hdx >= AUTO_HIDE_HDX && ageDays >= AUTO_HIDE_MIN_AGE_DAYS
 }
 
 async function reportRows(targetId: string): Promise<Array<{ r: string; status: string }>> {

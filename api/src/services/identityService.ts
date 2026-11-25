@@ -11,10 +11,25 @@ import type { ClickHouseClient } from '../db/client.ts'
 // several chains. The snapshot stamps each row with its chain's display priority
 // (0 = Hydration) and the lowest one wins here, collapsing the table to a single
 // name per account. Nothing downstream learns which chain that name came from.
+//
+// A testnet's names are free to mint, so a row from a testnet chain is never shown,
+// whatever the configuration once snapshotted.
 export interface AccountIdentity { display: string; verified: boolean; email: string; web: string; twitter: string }
+
+/** Identity chain keys naming a Polkadot test network (Westend, Paseo, Rococo, Wococo). */
+export function isTestnetIdentityChain(chain: string): boolean {
+  return /(^|-)(westend|paseo|rococo|wococo)(-|$)/.test(chain)
+}
+
+/**
+ * The chains whose registrar judgements count as standing (the forum's gates):
+ * Hydration's own Identity pallet and the Polkadot and Kusama People chains.
+ */
+export const STANDING_IDENTITY_CHAINS: ReadonlySet<string> = new Set(['hydration', 'polkadot-people', 'kusama-people'])
 
 let client: ClickHouseClient
 const byAccount = new Map<string, AccountIdentity>()
+const verifiedAccounts = new Set<string>()
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 let loadInflight: Promise<void> | null = null
 
@@ -33,11 +48,14 @@ async function loadIdentitiesUncached(): Promise<void> {
   // compared against the one already kept.
   const winner = new Map<string, { priority: number; chain: string }>()
   byAccount.clear()
+  verifiedAccounts.clear()
   for (const r of rows) {
     if (!r.account_id) continue
     const accountId = r.account_id.toLowerCase()
     const priority = Number(r.priority ?? 0)
     const chain = r.chain ?? ''
+    if (isTestnetIdentityChain(chain)) continue
+    if (r.verified === 1 && STANDING_IDENTITY_CHAINS.has(chain) && ownRegistration(r)) verifiedAccounts.add(accountId)
     // Chain key breaks a priority tie, so the resolved name never depends on the
     // order ClickHouse returned the rows in.
     const kept = winner.get(accountId)
@@ -45,6 +63,15 @@ async function loadIdentitiesUncached(): Promise<void> {
     winner.set(accountId, { priority, chain })
     byAccount.set(accountId, { display: r.display, verified: r.verified === 1, email: r.email ?? '', web: r.web ?? '', twitter: r.twitter ?? '' })
   }
+}
+
+// A row is the account's own registration, a sub-identity named "Parent/Sub" that
+// inherits its parent's judgement, or a bare username (never verified). Only the
+// account's own registration carries contact fields, and a sub's display always
+// holds a '/', so a row with contacts or without a '/' is the account's own; a
+// verified row with neither is treated as a sub and does not count.
+function ownRegistration(r: { display: string; email: string; web: string; twitter: string }): boolean {
+  return !r.display.includes('/') || !!(r.email || r.web || r.twitter)
 }
 
 export function loadIdentities(): Promise<void> {
@@ -72,6 +99,16 @@ export function stopIdentityRefresh(): void {
 export function identityForAccount(accountId: string): AccountIdentity | null {
   if (!accountId) return null
   return byAccount.get(accountId.toLowerCase()) ?? null
+}
+
+/**
+ * Whether the account holds its OWN registration with a registrar's Reasonable or
+ * KnownGood judgement on Hydration or a Polkadot/Kusama People chain — not a
+ * sub-identity, a username or a testnet name, which cost little to obtain. Any one
+ * such chain counts, whichever chain's name the explorer displays.
+ */
+export function hasVerifiedIdentity(accountId: string): boolean {
+  return !!accountId && verifiedAccounts.has(accountId.toLowerCase())
 }
 
 // Search the in-memory identity map by display name (case-insensitive substring).
