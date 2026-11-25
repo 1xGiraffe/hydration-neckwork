@@ -19,6 +19,10 @@ The containerized stack requires Docker with Compose. Local development addition
 ```bash
 git clone https://github.com/1xGiraffe/hydration-neckwork.git
 cd hydration-neckwork
+# ClickHouse has no default password; Compose refuses to start without one.
+echo "CLICKHOUSE_PASSWORD=$(openssl rand -hex 24)" >> .env
+# Per-client tokens for the forum's IPFS RPC (without them it listens on loopback only).
+ops/ipfs-tokens.sh
 docker compose up --build -d
 ```
 
@@ -51,8 +55,8 @@ Useful status commands:
 ```bash
 docker compose ps
 docker logs -f hydration-neckwork-ingestion-supervisor
-docker exec -it hydration-neckwork-clickhouse clickhouse-client \
-  --database=price_data --password "${CLICKHOUSE_PASSWORD:-dev}"
+# clickhouse-client reads the password from the container's CLICKHOUSE_PASSWORD
+docker exec -it hydration-neckwork-clickhouse clickhouse-client --database=price_data
 ```
 
 ## Architecture
@@ -95,7 +99,7 @@ Docker Compose provides working defaults. Override them in an untracked `.env` f
 | `IDENTITY_CHAINS` | Polkadot/Kusama People chains | Extra identity sources, `key=url[@block]` and highest display priority first; empty for Hydration only |
 | `SQD_GATEWAY` | Hydration SQD archive | Historical block source |
 | `CLICKHOUSE_HOST` | `http://localhost:18123` outside Compose | ClickHouse HTTP endpoint |
-| `CLICKHOUSE_PASSWORD` | empty outside Compose; `dev` in Compose | ClickHouse password |
+| `CLICKHOUSE_PASSWORD` | empty outside Compose; required in Compose (no default) | ClickHouse password |
 | `CLICKHOUSE_VOLUME_NAME` | `hydration-neckwork-clickhouse-data` | Docker volume containing ClickHouse data |
 | `RAW_WORKERS` | `6` | Concurrent raw historical workers |
 | `RANGE_SIZE` | `1000` | Blocks per raw historical range |

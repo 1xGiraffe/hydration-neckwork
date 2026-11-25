@@ -11,7 +11,7 @@ port `19000`:
 
 ```bash
 docker exec -it hydration-neckwork-clickhouse \
-  clickhouse-client --database=price_data --password "${CLICKHOUSE_PASSWORD:-dev}"
+  clickhouse-client --database=price_data   # password from the container's CLICKHOUSE_PASSWORD
 ```
 
 For a non-Compose deployment, pass the host, native port, database, and any

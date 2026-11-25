@@ -552,6 +552,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 1g
     memswap_limit: 1g
+    pids_limit: 512
     networks:
       - ipfs-internal
       - ipfs-egress
