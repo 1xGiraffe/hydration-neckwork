@@ -1,0 +1,26 @@
+<clickhouse>
+    <!--
+      Login audit: system.session_log records every LoginSuccess, LoginFailure
+      and Logout with the user name, client address, interface (HTTP / TCP) and
+      the failure reason. Without it a failed login leaves only an
+      AUTHENTICATION_FAILED line in the server log, with no way to query who
+      tried and from where. The stock config.xml ships it commented out.
+
+      Volume: every HTTP query is its own login and logout, so this is two rows
+      per HTTP query, about 9.5M rows/day at 4.75M HTTP queries a day.
+      Measured at ~18.5 bytes/row on disk, so roughly 0.2 to 0.4 GiB/day and
+      a few GiB at the 14-day TTL below; the TTL keeps it from growing without
+      bound, as the stock system logs do without one (see logging.xml).
+
+      NOT hot-reloadable: system logs are created at server start, so SYSTEM
+      RELOAD CONFIG does not create system.session_log. It takes effect on the
+      next ClickHouse restart.
+    -->
+    <session_log>
+        <database>system</database>
+        <table>session_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </session_log>
+</clickhouse>
