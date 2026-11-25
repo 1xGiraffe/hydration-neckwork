@@ -58,13 +58,14 @@ ipfs config Datastore.StorageMax 2GB
 ipfs config --json Datastore.StorageGCWatermark 80
 ipfs config Datastore.GCPeriod 1h
 
-# Never dial or announce private, LAN or docker addresses (the server profile's
-# filters): this host's LAN and its docker bridges are no peer's business, and a
-# public node must not probe them. mDNS (LAN discovery) is off for the same reason.
-NONPUBLIC='["/ip4/10.0.0.0/ipcidr/8","/ip4/100.64.0.0/ipcidr/10","/ip4/169.254.0.0/ipcidr/16","/ip4/172.16.0.0/ipcidr/12","/ip4/192.0.0.0/ipcidr/24","/ip4/192.0.2.0/ipcidr/24","/ip4/192.168.0.0/ipcidr/16","/ip4/198.18.0.0/ipcidr/15","/ip4/198.51.100.0/ipcidr/24","/ip4/203.0.113.0/ipcidr/24","/ip4/240.0.0.0/ipcidr/4","/ip6/100::/ipcidr/64","/ip6/2001:2::/ipcidr/48","/ip6/2001:db8::/ipcidr/32","/ip6/fc00::/ipcidr/7","/ip6/fe80::/ipcidr/10"]'
+# Never dial or announce private, LAN, loopback or docker addresses, nor the IPv6
+# blocks that tunnel to an arbitrary IPv4 address (NAT64, 6to4) — the server profile's
+# filters plus loopback, 0.0.0.0/8 and those tunnels: this host's LAN, its loopback and
+# its docker bridges are no peer's business, and a public node must not probe them.
+# mDNS (LAN discovery) is off for the same reason.
+NONPUBLIC='["/ip4/0.0.0.0/ipcidr/8","/ip4/10.0.0.0/ipcidr/8","/ip4/100.64.0.0/ipcidr/10","/ip4/127.0.0.0/ipcidr/8","/ip4/169.254.0.0/ipcidr/16","/ip4/172.16.0.0/ipcidr/12","/ip4/192.0.0.0/ipcidr/24","/ip4/192.0.2.0/ipcidr/24","/ip4/192.168.0.0/ipcidr/16","/ip4/198.18.0.0/ipcidr/15","/ip4/198.51.100.0/ipcidr/24","/ip4/203.0.113.0/ipcidr/24","/ip4/240.0.0.0/ipcidr/4","/ip6/::1/ipcidr/128","/ip6/64:ff9b::/ipcidr/96","/ip6/100::/ipcidr/64","/ip6/2001:2::/ipcidr/48","/ip6/2001:db8::/ipcidr/32","/ip6/2002::/ipcidr/16","/ip6/fc00::/ipcidr/7","/ip6/fe80::/ipcidr/10"]'
 ipfs config --json Swarm.AddrFilters "$NONPUBLIC"
-# Loopback is never announced either (it is not filtered: nothing dials it).
-ipfs config --json Addresses.NoAnnounce "$(printf '%s' "$NONPUBLIC" | sed 's#\]$#,"/ip4/127.0.0.0/ipcidr/8","/ip6/::1/ipcidr/128"]#')"
+ipfs config --json Addresses.NoAnnounce "$NONPUBLIC"
 ipfs config --json Discovery.MDNS.Enabled false
 
 # Never serve others: no relay service, no AutoNAT service for other peers.
