@@ -30,10 +30,11 @@ export function redactLoggedUrl(url: string): string {
 // Fastify's own request serializer (lib/logger-pino.js), with the URL redacted.
 export const requestLogSerializers = {
   req(req: FastifyRequest) {
+    const version = req.headers?.['accept-version']
     return {
       method: req.method,
       url: redactLoggedUrl(req.url),
-      version: req.headers?.['accept-version'],
+      version: Array.isArray(version) ? version[0] : version,
       host: req.host,
       remoteAddress: req.ip,
       remotePort: req.socket?.remotePort,
