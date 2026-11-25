@@ -29,14 +29,23 @@ let client: ClickHouseClient
 let adminAccounts: Set<string> = new Set()
 let defaults = { perMinute: 30, perDay: 20_000 }
 
+// Fail-closed like the Data API's own parse (api/src/data/config.ts): a
+// malformed entry stops the start instead of being dropped, so a typo can never
+// quietly leave an operator without the admin surface or with the wrong set.
+export function parseAdminAccountIds(value: string | undefined): Set<string> {
+  const out = new Set<string>()
+  for (const entry of (value ?? '').split(',')) {
+    const trimmed = entry.trim().toLowerCase()
+    if (!trimmed) continue
+    if (!/^0x[0-9a-f]{64}$/.test(trimmed)) throw new Error(`ADMIN_ACCOUNT_IDS entries must be 0x-prefixed 32-byte hex public keys, received ${JSON.stringify(entry)}`)
+    out.add(trimmed)
+  }
+  return out
+}
+
 export function initUserApiTokenService(c: ClickHouseClient): void {
   client = c
-  adminAccounts = new Set(
-    (process.env.ADMIN_ACCOUNT_IDS ?? '')
-      .split(',')
-      .map(entry => entry.trim().toLowerCase())
-      .filter(entry => /^0x[0-9a-f]{64}$/.test(entry)),
-  )
+  adminAccounts = parseAdminAccountIds(process.env.ADMIN_ACCOUNT_IDS)
   defaults = {
     perMinute: parseCount(process.env.DATA_API_DEFAULT_PER_MINUTE, 30),
     perDay: parseCount(process.env.DATA_API_DEFAULT_PER_DAY, 20_000),
@@ -104,7 +113,19 @@ export interface CreatedApiToken extends ApiTokenInfo {
   token: string
 }
 
-export async function createApiToken(accountId: string, label: string): Promise<CreatedApiToken> {
+// Mints for one account run one at a time: the cap is a read followed by an
+// insert, and two parallel mints would both read the last free slot.
+const mintQueues = new Map<string, Promise<unknown>>()
+
+export function createApiToken(accountId: string, label: string): Promise<CreatedApiToken> {
+  const previous = mintQueues.get(accountId) ?? Promise.resolve()
+  const run = previous.catch(() => {}).then(() => mintApiToken(accountId, label))
+  mintQueues.set(accountId, run)
+  void run.catch(() => {}).finally(() => { if (mintQueues.get(accountId) === run) mintQueues.delete(accountId) })
+  return run
+}
+
+async function mintApiToken(accountId: string, label: string): Promise<CreatedApiToken> {
   const trimmed = label.trim()
   if (trimmed.length > MAX_LABEL_LEN) throw new UserDataError(422, `Label must be at most ${MAX_LABEL_LEN} characters`)
   const existing = await activeTokenRows(accountId)

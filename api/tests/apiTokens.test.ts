@@ -1,10 +1,19 @@
-import { describe, it, expect, beforeEach, beforeAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, beforeAll, afterEach, vi } from 'vitest'
 import Fastify, { type FastifyInstance } from 'fastify'
+
+// Minting reads the forum's posting gate; the facts it reads are set per test.
+const gate = vi.hoisted(() => ({ facts: { hdx: 0n, identity: false, voted: true, firstSeenMs: null as number | null } }))
+vi.mock('../src/services/forumWrite.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/services/forumWrite.ts')>(),
+  gateFacts: vi.fn(async () => gate.facts),
+}))
+
 import { cryptoWaitReady } from '@polkadot/util-crypto'
 import type { ClickHouseClient } from '../src/db/client.ts'
 import { apiTokenRoutes } from '../src/routes/apiTokens.ts'
 import { initUserAuthService, issueSession, resetUserAuthForTests } from '../src/services/userAuthService.ts'
-import { initUserApiTokenService, MAX_ACTIVE_TOKENS } from '../src/services/userApiTokenService.ts'
+import { initUserApiTokenService, MAX_ACTIVE_TOKENS, createApiToken, parseAdminAccountIds } from '../src/services/userApiTokenService.ts'
+import { initExplorerService, loadEvmBindings } from '../src/services/explorerService.ts'
 import { fakeClient as userFakeClient } from './helpers/userFakes.ts'
 
 // The Data API's control plane: token CRUD on the explorer api, and the admin
@@ -76,6 +85,7 @@ beforeEach(async () => {
   resetUserAuthForTests()
   await initUserAuthService(userFakeClient())
   fake = apiTablesFake()
+  gate.facts = { hdx: 0n, identity: false, voted: true, firstSeenMs: null }
   process.env.ADMIN_ACCOUNT_IDS = ADMIN
   initUserApiTokenService(fake.client)
   app = Fastify({ logger: false })
@@ -142,6 +152,32 @@ describe('token CRUD', () => {
     expect((await app.inject('/user/api-tokens')).statusCode).toBe(401)
     expect((await app.inject({ method: 'POST', url: '/user/api-tokens', payload: {} })).statusCode).toBe(401)
   })
+
+  it('mints only for an account with the forum posting stake; admins are exempt', async () => {
+    gate.facts = { hdx: 0n, identity: false, voted: false, firstSeenMs: null }
+    const refused = await app.inject({ method: 'POST', url: '/user/api-tokens', headers: asOwner(), payload: {} })
+    expect(refused.statusCode).toBe(403)
+    expect(refused.json().error).toMatch(/HDX, an on-chain identity, or a vote/)
+    expect(fake.tokens.size).toBe(0)
+    expect((await app.inject({ method: 'POST', url: '/user/api-tokens', headers: asAdmin(), payload: {} })).statusCode).toBe(200)
+    gate.facts = { hdx: 1_000n * 10n ** 12n, identity: false, voted: false, firstSeenMs: null }
+    expect((await app.inject({ method: 'POST', url: '/user/api-tokens', headers: asOwner(), payload: {} })).statusCode).toBe(200)
+  })
+
+  it('never lets parallel mints pass the cap', async () => {
+    const results = await Promise.allSettled(Array.from({ length: MAX_ACTIVE_TOKENS + 5 }, () => createApiToken(OWNER, '')))
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(MAX_ACTIVE_TOKENS)
+    expect([...fake.tokens.values()].filter(row => row.account_id === OWNER && Number(row.deleted) === 0)).toHaveLength(MAX_ACTIVE_TOKENS)
+  })
+})
+
+describe('ADMIN_ACCOUNT_IDS', () => {
+  it('refuses a malformed entry instead of dropping it', () => {
+    expect(parseAdminAccountIds(` ${ADMIN.toUpperCase().replace('0X', '0x')} , ,${OTHER}`)).toEqual(new Set([ADMIN, OTHER]))
+    expect(() => parseAdminAccountIds(`${ADMIN},0x1234`)).toThrow(/ADMIN_ACCOUNT_IDS/)
+    process.env.ADMIN_ACCOUNT_IDS = `${ADMIN},not-an-account`
+    expect(() => initUserApiTokenService(fake.client)).toThrow(/ADMIN_ACCOUNT_IDS/)
+  })
 })
 
 describe('admin surface', () => {
@@ -177,6 +213,19 @@ describe('admin surface', () => {
     expect(fake.limits.get(OWNER)).toMatchObject({ per_minute: 60, per_day: 100000, updated_by: ADMIN, deleted: 0 })
     expect((await app.inject({ method: 'DELETE', url: `/user/admin/api-users/${OWNER}/limits`, headers: asAdmin() })).statusCode).toBe(200)
     expect(fake.limits.get(OWNER)).toMatchObject({ deleted: 1 })
+  })
+
+  it('stores an override under the account a login resolves to', async () => {
+    const h160 = '0x' + '33'.repeat(20)
+    const bound = '0x' + '44'.repeat(32)
+    initExplorerService(userFakeClient({ account_alias_directory: [{ evm: h160, account_id: bound }] }))
+    await loadEvmBindings()
+    expect((await app.inject({ method: 'PUT', url: `/user/admin/api-users/${h160}/limits`, headers: asAdmin(), payload: { perMinute: 60, perDay: 1000 } })).statusCode).toBe(200)
+    expect(fake.limits.get(bound)).toMatchObject({ per_minute: 60, deleted: 0 })
+    expect((await app.inject({ method: 'DELETE', url: `/user/admin/api-users/${h160}/limits`, headers: asAdmin() })).statusCode).toBe(200)
+    expect(fake.limits.get(bound)).toMatchObject({ deleted: 1 })
+    initExplorerService(userFakeClient())
+    await loadEvmBindings()
   })
 
   it('lets an admin revoke anyone’s token', async () => {

@@ -7,8 +7,9 @@ import {
   MAX_ACTIVE_TOKENS, MAX_LABEL_LEN, adminApiUsers, adminClearLimits, adminSetLimits, apiLimitDefaults,
   createApiToken, isApiAdmin, listApiTokens, revokeApiToken,
 } from '../services/userApiTokenService.ts'
-import { accountRef } from '../services/explorerService.ts'
+import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
+import { gateFacts, standingFrom } from '../services/forumWrite.ts'
 
 // Control plane for the Data API (hydration-data host): token CRUD for the
 // logged-in account, and the admin surface (per-account limits, usage
@@ -35,6 +36,14 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): string | null {
   return accountId
 }
 
+// The account a limit override is stored under, resolved exactly as login
+// resolves the session's account: tokens are minted under that id, so an
+// override keyed by any other form of the same account would never apply.
+function limitsAccount(req: FastifyRequest): string | null {
+  const normalized = normalizeAddress((req.params as { accountId: string }).accountId)
+  return normalized ? resolveDisplayAccountId(normalized.accountId) : null
+}
+
 export async function apiTokenRoutes(fastify: FastifyInstance) {
   // Scoped to this plugin's encapsulation context, like the user routes.
   await fastify.register(rateLimit, { max: 60, timeWindow: '1 minute' })
@@ -50,10 +59,25 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
 
   // The per-route brake sits above MAX_ACTIVE_TOKENS so the cap's own 422 is
   // reachable within one window; minting is still bounded.
+  //
+  // Every account gets its own Data API budget, so minting needs the same
+  // stake in the chain as starting a forum discussion (HDX, an on-chain
+  // identity or a vote, read by the forum's own gate) — otherwise fresh
+  // accounts would multiply the budget for free. A forum mute does not apply
+  // here. Admins are exempt.
   fastify.post('/user/api-tokens', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const accountId = sessionUser(req)
     const body = createBody.safeParse(req.body ?? {})
     if (!body.success) return reply.status(400).send({ error: 'Invalid token payload' })
+    if (!isApiAdmin(accountId)) {
+      const standing = standingFrom(await gateFacts(accountId), null, false)
+      if (!standing.canPost) {
+        return reply.status(403).send({
+          error: `Creating an API token needs at least ${standing.thresholds.postHdx} HDX, an on-chain identity, or a vote on any referendum.`,
+          reason: 'no-stake',
+        })
+      }
+    }
     // The response carries the raw token — the only time it ever leaves the
     // service. The UI shows it once with a copy button.
     return withUserErrors(reply, () => createApiToken(accountId, body.data.label ?? ''))
@@ -80,12 +104,12 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   fastify.put('/user/admin/api-users/:accountId/limits', async (req, reply) => {
     const admin = requireAdmin(req, reply)
     if (!admin) return
-    const normalized = normalizeAddress((req.params as { accountId: string }).accountId)
-    if (!normalized) return reply.status(400).send({ error: 'Invalid account' })
+    const target = limitsAccount(req)
+    if (!target) return reply.status(400).send({ error: 'Invalid account' })
     const body = limitsBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid limits payload' })
     return withUserErrors(reply, async () => {
-      await adminSetLimits(admin, normalized.accountId, body.data.perMinute, body.data.perDay, body.data.note ?? '')
+      await adminSetLimits(admin, target, body.data.perMinute, body.data.perDay, body.data.note ?? '')
       return { ok: true }
     })
   })
@@ -93,9 +117,9 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   fastify.delete('/user/admin/api-users/:accountId/limits', async (req, reply) => {
     const admin = requireAdmin(req, reply)
     if (!admin) return
-    const normalized = normalizeAddress((req.params as { accountId: string }).accountId)
-    if (!normalized) return reply.status(400).send({ error: 'Invalid account' })
-    return withUserErrors(reply, async () => { await adminClearLimits(admin, normalized.accountId); return { ok: true } })
+    const target = limitsAccount(req)
+    if (!target) return reply.status(400).send({ error: 'Invalid account' })
+    return withUserErrors(reply, async () => { await adminClearLimits(admin, target); return { ok: true } })
   })
 
   fastify.delete('/user/admin/api-tokens/:tokenHash', async (req, reply) => {
