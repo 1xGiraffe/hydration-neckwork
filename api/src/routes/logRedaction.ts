@@ -12,7 +12,7 @@ import type { FastifyRequest } from 'fastify'
 // Every other URL is logged as requested.
 
 const REDACTED = '[redacted]'
-const WALLET_QUERY_PATHS = new Set(['/explorer/account-refs'])
+const WALLET_QUERY_PATHS = new Set(['/explorer/account-refs', '/explorer/governance/needs-vote'])
 const LINK_SEGMENT = /\/link(?=\/|$)/
 
 export function redactLoggedUrl(url: string): string {

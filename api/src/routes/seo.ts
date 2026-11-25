@@ -816,7 +816,7 @@ export function pageMeta(path: string): PageMeta {
     }
   }
 
-  if (head === 'security' && a && SECURITY_SECTIONS[a]) {
+  if (head === 'security' && a && Object.hasOwn(SECURITY_SECTIONS, a)) {
     return {
       title: `${SECURITY_SECTIONS[a]} · Security`,
       description: `${SECURITY_SECTIONS[a]} safety controls on Hydration: current limits, what they are measured against and when they last moved.`,

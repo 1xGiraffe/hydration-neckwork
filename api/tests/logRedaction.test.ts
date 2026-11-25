@@ -10,6 +10,7 @@ describe('redactLoggedUrl', () => {
   it('drops the wallet list of an account-refs lookup', () => {
     expect(redactLoggedUrl(`/explorer/account-refs?addresses=${WALLET_A},${WALLET_B}`)).toBe('/explorer/account-refs?[redacted]')
     expect(redactLoggedUrl('/explorer/account-refs')).toBe('/explorer/account-refs')
+    expect(redactLoggedUrl(`/explorer/governance/needs-vote?accounts=${WALLET_A},${WALLET_B}`)).toBe('/explorer/governance/needs-vote?[redacted]')
   })
 
   it('drops whatever follows a /link segment, in the path or the query', () => {

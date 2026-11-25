@@ -71,7 +71,10 @@ async function fetchUpstream(url: string): Promise<ProxyResult> {
     redirect: 'error',
     signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   })
-  if (res.status >= 300 && res.status < 400) throw new Error(`upstream responded ${res.status}`)
+  if (res.status >= 300 && res.status < 400) {
+    await res.body?.cancel().catch(() => undefined)
+    throw new Error(`upstream responded ${res.status}`)
+  }
   const result: ProxyResult = {
     status: res.status,
     contentType: passthroughContentType(res.headers.get('content-type')),
