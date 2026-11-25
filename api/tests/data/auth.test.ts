@@ -115,6 +115,23 @@ describe('authentication', () => {
     // A different address is unaffected.
     expect((await app.inject({ url: '/v1/blocks', headers: { 'x-forwarded-for': '203.0.113.8' } })).statusCode).toBe(401)
   })
+
+  it('brakes unknown tokens before they are looked up, but never a token already known live', async () => {
+    const client = fakeDataClient(query => (query.includes('-- data:blocks:feed') ? [] : undefined))
+    app = await freshDataApp(client)
+    const ip = { 'x-forwarded-for': '203.0.113.9' }
+    // The live token resolves once and from then on skips the brake.
+    expect((await app.inject({ url: '/v1/blocks', headers: { ...AUTH, ...ip } })).statusCode).toBe(200)
+    for (let i = 0; i < 59; i++) {
+      await app.inject({ url: '/v1/blocks', headers: { authorization: `Bearer hdd_${i.toString(16).padStart(64, '0')}`, ...ip } })
+    }
+    const readsBefore = client.seen.filter(s => s.query.includes('FROM price_data.user_api_tokens')).length
+    const braked = await app.inject({ url: '/v1/blocks', headers: { authorization: `Bearer hdd_${'cd'.repeat(32)}`, ...ip } })
+    expect(braked.statusCode).toBe(429)
+    // Refused without a token read.
+    expect(client.seen.filter(s => s.query.includes('FROM price_data.user_api_tokens')).length).toBe(readsBefore)
+    expect((await app.inject({ url: '/v1/blocks', headers: { ...AUTH, ...ip } })).statusCode).toBe(200)
+  })
 })
 
 describe('rate limiting', () => {

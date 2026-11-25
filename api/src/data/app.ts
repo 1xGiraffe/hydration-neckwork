@@ -10,7 +10,7 @@ import { registerCacheControl } from './cacheControl.ts'
 import { errorEnvelope } from './schemas/common.ts'
 import { dataConfig } from './config.ts'
 import {
-  checkRateLimit, initDataAuth, isTokenShaped, recordUsage, resolveToken, unauthenticatedIpAllowed,
+  checkRateLimit, initDataAuth, isTokenShaped, recordUsage, resolveToken, tokenLookupIsCheap, unauthenticatedIpAllowed,
 } from './services/auth.ts'
 import { renderLlmsTxt } from './services/llmsTxt.ts'
 import { statusRoutes } from './routes/status.ts'
@@ -106,13 +106,15 @@ async function authenticate(req: FastifyRequest, reply: FastifyReply): Promise<v
 
   const header = req.headers.authorization
   const raw = header?.startsWith('Bearer ') ? header.slice(7).trim() : null
+  // The brake runs before the lookup for every token not already known live,
+  // so an unknown token is refused here without reaching ClickHouse.
+  if (!(raw && tokenLookupIsCheap(raw)) && !unauthenticatedIpAllowed(req.ip)) {
+    await reply.code(429).header('retry-after', '60')
+      .send(errorEnvelope('rate_limited', 'too many unauthenticated requests from this address', { retryAfterSeconds: 60 }))
+    return
+  }
   const accountId = raw && isTokenShaped(raw) ? await resolveToken(raw) : null
   if (!accountId) {
-    if (!unauthenticatedIpAllowed(req.ip)) {
-      await reply.code(429).header('retry-after', '60')
-        .send(errorEnvelope('rate_limited', 'too many unauthenticated requests from this address', { retryAfterSeconds: 60 }))
-      return
-    }
     const message = raw
       ? (isTokenShaped(raw) ? 'unknown or revoked API token' : 'malformed API token: expected hdd_ followed by 64 hex characters')
       : 'missing API token: send it as `Authorization: Bearer hdd_…`'

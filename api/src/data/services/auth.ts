@@ -127,6 +127,17 @@ export async function resolveToken(rawToken: string): Promise<string | null> {
   return lookup
 }
 
+// Whether resolving this token costs no ClickHouse read beyond what is already
+// happening: it resolved to a live token before (a stale entry is re-read at
+// most once per TTL_POS_MS), or a lookup for it is in flight. Every other
+// token passes the unauthenticated per-IP brake BEFORE it is looked up, so
+// random token-shaped strings cannot turn into one point read each.
+export function tokenLookupIsCheap(rawToken: string): boolean {
+  if (!isTokenShaped(rawToken)) return false
+  const hash = sha256(rawToken)
+  return !!tokenCache.get(hash)?.accountId || tokenLookupInflight.has(hash)
+}
+
 function pruneTokenCache(): void {
   if (tokenCache.size < TOKEN_CACHE_MAX) return
   const now = Date.now()
