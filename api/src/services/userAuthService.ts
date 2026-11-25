@@ -77,6 +77,18 @@ export function evmRecoverAddress(message: string, signature: string): string | 
 // thing a signature over the bytes does. Both the wrapped and unwrapped forms
 // are offered because the wrapping is the extension's, not the device's, and a
 // signer that hashes what IT was handed may have been handed either.
+//
+// What it does weaken is what the person SEES. A signature over the digest is
+// accepted from any signer, not only a hardware one, and a digest is 32 opaque
+// bytes: a page that requests a challenge for someone's address can ask their
+// wallet to sign that digest directly (signRaw of a 32-byte hex payload, which
+// wallets show as hex, or a device asked to sign a raw hash), and the person
+// approves a blob that never names this domain, the purpose or the expiry —
+// yet the signature logs that page in as them. The readable statement protects
+// only people whose wallet showed it; the digest path relies on them refusing
+// to sign hex they cannot read. The challenge is still single-use, bound to
+// one address and expires, so a captured signature is good for one login
+// within NONCE_TTL_MS.
 const HARDWARE_DIGEST_OVER_BYTES = 256
 
 function loginPayloads(message: string): Uint8Array[] {
