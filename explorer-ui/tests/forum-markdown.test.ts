@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isLocalNetworkHref, markdownToHtml, type RefContext } from '../src/markdown/render'
+import { isDeviceLinkHref, isLocalNetworkHref, markdownToHtml, type RefContext } from '../src/markdown/render'
 
 // The markdown stage of the forum renderer (src/markdown/render.ts), which runs
 // before DOMPurify and the link/image policy. Raw HTML in markdown must come out
@@ -77,5 +77,24 @@ describe('isLocalNetworkHref: links that could only probe the reader\'s own netw
 
   it('is false for what is not an http(s) URL', () => {
     for (const href of ['/account/abc', '#x', 'mailto:a@b.c', 'javascript:alert(1)', 'not a url']) expect(isLocalNetworkHref(href), href).toBe(false)
+  })
+})
+
+describe('isDeviceLinkHref: links that would sign the reader in to someone else\'s account', () => {
+  const ORIGIN = 'https://explorer.example'
+  const CODE = 'ab'.repeat(32)
+
+  it('flags the device-link page on this site, however it is spelled', () => {
+    for (const href of [
+      `/link-device#${CODE}`, '/link-device', '/link-device/', `${ORIGIN}/link-device#${CODE}`, `${ORIGIN}/link-device?x=1#${CODE}`,
+      '/link%2Ddevice', '/link%2ddevice#x', '//explorer.example/link-device', '/./link-device', '/x/../link-device', '/link-device/extra',
+    ]) expect(isDeviceLinkHref(href, ORIGIN), href).toBe(true)
+  })
+
+  it('leaves every other page and other sites alone', () => {
+    for (const href of [
+      '/account/abc', '/link-devices', '/Link-Device', '/discussions/link-device', `https://other.example/link-device#${CODE}`,
+      '#link-device', 'https://hydration.net', 'not a url %',
+    ]) expect(isDeviceLinkHref(href, ORIGIN), href).toBe(false)
   })
 })

@@ -142,3 +142,21 @@ test('links and images that point into the reader\'s own network render as inert
   expect(html).toContain('<a>router</a>')
   expect(html).toContain('<a href="https://hydration.net" target="_blank" rel="noopener noreferrer nofollow ugc" class="md-ext">site</a>')
 })
+
+test('a link to the device-link page renders as inert text, however it is written', async ({ page }) => {
+  await page.goto('/')
+  const code = 'ab'.repeat(32)
+  const html = await page.evaluate(async (code) => {
+    const mod = await import('/src/markdown/render.ts')
+    return mod.renderForumBodyToString({
+      format: 'markdown',
+      body: `[claim your reward](/link-device#${code}) [b](${location.origin}/link-device#${code}) [c](/link%2Ddevice#${code}) [d](/account/abc)`,
+      media: {},
+    })
+  }, code)
+  expect(html).not.toContain(code)
+  expect(html).toContain('<a>claim your reward</a>')
+  expect(html).toContain('<a>b</a>')
+  expect(html).toContain('<a>c</a>')
+  expect(html).toContain('<a href="/account/abc" data-internal="1">d</a>')
+})

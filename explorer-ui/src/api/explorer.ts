@@ -458,11 +458,13 @@ export const userApi = {
   challenge: (address: string) => authedJson<LoginChallengeResponse>('POST', '/user/auth/challenge', { address }),
   verify: (address: string, nonce: string, signature: string) => authedJson<LoginResponse>('POST', '/user/auth/verify', { address, nonce, signature }),
   logout: () => authedJson<{ ok: true }>('POST', '/user/auth/logout'),
-  // QR device-link handoff (see deviceLink.ts). All three live under
+  // QR device-link handoff (see deviceLink.ts). All four live under
   // /user/auth/ so authedJson's 401 carve-out applies: a rejected code never
   // clears a session this device already holds.
   createDeviceLink: () => authedJson<DeviceLinkResponse>('POST', '/user/auth/device-link'),
   deviceLinkStatus: (linkId: string, signal?: AbortSignal) => authedJson<{ status: DeviceLinkStatus }>('GET', `/user/auth/device-link/${seg(linkId, SEGMENT.uuid)}`, undefined, signal),
+  // Which account a code signs into, read before the claim and without consuming it.
+  previewDeviceLink: (code: string) => authedJson<{ account: AccountRef }>('POST', '/user/auth/device-link/preview', { code }),
   claimDeviceLink: (code: string) => authedJson<LoginResponse>('POST', '/user/auth/device-link/claim', { code }),
   sessions: (signal?: AbortSignal) => authedJson<{ sessions: DeviceSession[] }>('GET', '/user/sessions', undefined, signal),
   revokeSession: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/sessions/${seg(id)}`),

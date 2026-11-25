@@ -2664,6 +2664,12 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 .link-device-card { max-width: 480px; padding: 24px; display: flex; flex-direction: column; gap: 14px; align-items: flex-start; }
 .link-device-card p { margin: 0; color: var(--text-medium); }
 .link-device-warn { padding: 10px 12px; border-radius: 10px; background: var(--amber-soft); color: var(--amber-text); font-size: 13px; }
+/* The account the code signs into, named before the button: the one thing the
+   reader must check, so it is the card's most prominent element. */
+.link-device-target { align-self: stretch; display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); }
+.link-device-target-label { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.link-device-target-name { font-size: 16px; }
+.link-device-target-addr { font-size: 13px; color: var(--text-high); }
 /* Two-segment sliding switch (visibility private/public) — the indicator pill
    translates by segment index, preis-ui's interval-selector mechanic. */
 .seg-switch {

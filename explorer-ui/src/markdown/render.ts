@@ -1,6 +1,7 @@
 import markdownIt, { type MarkdownIt, type StateCore, type Token } from 'markdown-it'
 import DOMPurify from 'dompurify'
 import { isLocalNetworkHref } from './localNetwork'
+import { DEVICE_LINK_PATH } from '../deviceLink'
 
 // The ONE renderer for user-authored forum text (posts, comments, revisions,
 // previews). Every byte of it is hostile: Subsquare's imported set holds live XSS
@@ -20,7 +21,8 @@ import { isLocalNetworkHref } from './localNetwork'
 //      - a link keeps only an http(s) or same-origin path target (a link to the
 //        replaced forum's host becomes the same path here); an external one
 //        opens in a new tab with rel="noopener noreferrer nofollow ugc"; any other
-//        scheme loses its href and reads as text;
+//        scheme loses its href and reads as text, and so does a link to this site's
+//        device-link page (it would sign the reader in to the code's account);
 //      - a paragraph that is only a typed run of dashes becomes an <hr>;
 //      - headings move one level down (h1 → h2 … h5 → h6), as the page's own title
 //        is its one h1;
@@ -207,6 +209,21 @@ export function sameOriginPath(href: string, origin = window.location.origin): s
   } catch { return null }
 }
 
+/**
+ * A link to this site's device-link page, in any spelling the router accepts. That
+ * page signs the reader's browser into the account whose code rides in the link's
+ * fragment, so a link to it written by someone else is never followed from forum
+ * text: it renders as inert text.
+ */
+export function isDeviceLinkHref(href: string, origin = window.location.origin): boolean {
+  let url: URL
+  try { url = new URL(href, origin) } catch { return false }
+  if (url.origin !== origin) return false
+  const first = url.pathname.split('/').filter(Boolean)[0]
+  if (first === undefined) return false
+  try { return `/${decodeURIComponent(first)}` === DEVICE_LINK_PATH } catch { return false }
+}
+
 /** A paragraph that is only a run of dashes (or underscores, equals signs, asterisks): a divider its author typed. */
 const TYPED_RULE_RE = /^[\s\u00a0]*(?:[-\u2013\u2014_=*][\s\u00a0]*){3,}$/
 
@@ -272,7 +289,9 @@ function enforcePolicy(root: DocumentFragment, media: Map<string, string>): void
     const keepClass = a.className === 'md-img-link' ? 'md-img-link' : ''
     for (const attr of Array.from(a.attributes)) a.removeAttribute(attr.name)
     if (title) a.setAttribute('title', title)
-    if (isExternalHttp(href) && !isLocalNetworkHref(href)) {
+    if (isDeviceLinkHref(href)) {
+      // A device-link (login handoff) URL: inert text, like the cases below the chain.
+    } else if (isExternalHttp(href) && !isLocalNetworkHref(href)) {
       a.setAttribute('href', href)
       a.setAttribute('target', '_blank')
       a.setAttribute('rel', EXTERNAL_REL)
@@ -287,8 +306,9 @@ function enforcePolicy(root: DocumentFragment, media: Map<string, string>): void
         if (/^\/account\/[^/?#]+$/.test(path) && (a.textContent ?? '').trimStart().startsWith('@')) a.className = 'md-mention'
       }
     }
-    // Any other scheme, or an address in the reader's own network (isLocalNetworkHref):
-    // no href, so it is inert text in an <a> with no target.
+    // Any other scheme, an address in the reader's own network (isLocalNetworkHref) or
+    // the device-link page (isDeviceLinkHref): no href, so it is inert text in an <a>
+    // with no target.
   }
 }
 
