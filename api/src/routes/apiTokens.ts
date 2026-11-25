@@ -5,11 +5,11 @@ import { sessionUser } from '../services/userAuthService.ts'
 import { privateUserHooks, withUserErrors } from './user.ts'
 import {
   MAX_ACTIVE_TOKENS, MAX_LABEL_LEN, adminApiUsers, adminClearLimits, adminSetLimits, apiLimitDefaults,
-  createApiToken, isApiAdmin, listApiTokens, revokeApiToken,
+  apiTokenMinMintUsd, createApiToken, isApiAdmin, listApiTokens, revokeApiToken,
 } from '../services/userApiTokenService.ts'
 import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
-import { gateFacts, standingFrom } from '../services/forumWrite.ts'
+import { mintHoldingsUsd } from '../services/apiTokenMintGate.ts'
 
 // Control plane for the Data API (hydration-data host): token CRUD for the
 // logged-in account, and the admin surface (per-account limits, usage
@@ -60,21 +60,33 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   // The per-route brake sits above MAX_ACTIVE_TOKENS so the cap's own 422 is
   // reachable within one window; minting is still bounded.
   //
-  // Every account gets its own Data API budget, so minting needs the same
-  // stake in the chain as starting a forum discussion (HDX, an on-chain
-  // identity or a vote, read by the forum's own gate) — otherwise fresh
-  // accounts would multiply the budget for free. A forum mute does not apply
-  // here. Admins are exempt.
+  // Every account gets its own Data API budget, so minting needs the account
+  // to hold more than DATA_API_MIN_MINT_USD in total (services/apiTokenMintGate.ts:
+  // the explorer's account value, any asset, net of money-market debt) —
+  // otherwise fresh accounts would multiply the budget for free. Identity,
+  // votes and the forum's own gates do not count. Checked here, at mint time
+  // only; a minted token is never re-checked on use. Admins are exempt. A value
+  // that cannot be read refuses the mint (503, retryable), never allows it.
   fastify.post('/user/api-tokens', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const accountId = sessionUser(req)
     const body = createBody.safeParse(req.body ?? {})
     if (!body.success) return reply.status(400).send({ error: 'Invalid token payload' })
     if (!isApiAdmin(accountId)) {
-      const standing = standingFrom(await gateFacts(accountId), null, false)
-      if (!standing.canPost) {
+      const minUsd = apiTokenMinMintUsd()
+      let valueUsd: number
+      try {
+        valueUsd = await mintHoldingsUsd(accountId)
+      } catch (err) {
+        req.log.warn({ errClass: (err as Error)?.name ?? typeof err }, 'api token mint: account value unavailable')
+        return reply.status(503).header('Retry-After', '30').send({
+          error: 'Your account value could not be checked right now, so no token was created. Please try again in a minute.',
+          reason: 'valuation-unavailable',
+        })
+      }
+      if (!(valueUsd > minUsd)) {
         return reply.status(403).send({
-          error: `Creating an API token needs at least ${standing.thresholds.postHdx} HDX, an on-chain identity, or a vote on any referendum.`,
-          reason: 'no-stake',
+          error: `Creating an API token needs an account holding more than $${minUsd} in total, counting every asset at current prices.`,
+          reason: 'insufficient-balance',
         })
       }
     }

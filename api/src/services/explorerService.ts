@@ -2113,6 +2113,26 @@ export async function withAccountValuePrices<T>(fn: (state: PriceState) => Promi
   const state = await accountValuePriceState()
   return accountPriceScope.run(state, () => fn(state))
 }
+/**
+ * When the block the account-value prices are read at was produced (unix
+ * seconds), or null while no price generation is loaded. ensurePriceState keeps
+ * serving its last state when ClickHouse fails, so a caller that must not act
+ * on old prices (the Data API token mint gate) compares this with the clock.
+ * A primary-key point read of one block.
+ */
+export async function accountValuePriceHeadTime(): Promise<number | null> {
+  const state = await accountValuePriceState()
+  if (!state.map.size || !state.head) return null
+  return cached(`explorer:price-head-time:${state.head}`, 60_000, async () => {
+    const res = await client.query({
+      query: `SELECT toUnixTimestamp(block_timestamp) AS ts FROM price_data.blocks WHERE block_height = {head:UInt32} LIMIT 1`,
+      query_params: { head: state.head },
+      format: 'JSONEachRow',
+    })
+    const ts = Number((await res.json<{ ts: number | string }>())[0]?.ts ?? 0)
+    return ts > 0 ? ts : null
+  })
+}
 // The shared valuation leaf (assetValue.ts) under the name this file's ~30 call
 // sites and iceService already use. PriceInfo satisfies its structural
 // AssetPrice, so there is one arithmetic and one $0-vs-unknown rule, not two.

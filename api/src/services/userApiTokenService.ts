@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { UserDataError } from './userProfileService.ts'
 import { chTimestampMs } from './clickhouseTime.ts'
+import { DEFAULT_MIN_MINT_USD, parseMinMintUsd } from './apiTokenMintGate.ts'
 
 // Control plane for the Data API's tokens (concept: the Data API concept doc
 // § 3): minting, listing and revoking live HERE, on the explorer api, where the
@@ -28,6 +29,7 @@ function parseCount(value: string | undefined, fallback: number): number {
 let client: ClickHouseClient
 let adminAccounts: Set<string> = new Set()
 let defaults = { perMinute: 30, perDay: 20_000 }
+let minMintUsd = DEFAULT_MIN_MINT_USD
 
 // Fail-closed like the Data API's own parse (api/src/data/config.ts): a
 // malformed entry stops the start instead of being dropped, so a typo can never
@@ -50,6 +52,12 @@ export function initUserApiTokenService(c: ClickHouseClient): void {
     perMinute: parseCount(process.env.DATA_API_DEFAULT_PER_MINUTE, 30),
     perDay: parseCount(process.env.DATA_API_DEFAULT_PER_DAY, 20_000),
   }
+  minMintUsd = parseMinMintUsd(process.env.DATA_API_MIN_MINT_USD)
+}
+
+/** The USD value an account must hold MORE than to mint a token (apiTokenMintGate.ts). */
+export function apiTokenMinMintUsd(): number {
+  return minMintUsd
 }
 
 export function isApiAdmin(accountId: string): boolean {

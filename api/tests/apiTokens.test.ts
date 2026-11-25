@@ -1,8 +1,20 @@
 import { describe, it, expect, beforeEach, beforeAll, afterEach, vi } from 'vitest'
 import Fastify, { type FastifyInstance } from 'fastify'
 
-// Minting reads the forum's posting gate; the facts it reads are set per test.
-const gate = vi.hoisted(() => ({ facts: { hdx: 0n, identity: false, voted: true, firstSeenMs: null as number | null } }))
+// Minting reads the account's USD value (apiTokenMintGate.ts); the value — or
+// the failure — it returns is set per test. The forum's gate facts are mocked
+// too, only to prove identity, votes and HDX standing no longer open the gate.
+const gate = vi.hoisted(() => ({
+  valueUsd: 50 as number | Error,
+  facts: { hdx: 0n, identity: false, voted: false, firstSeenMs: null as number | null },
+}))
+vi.mock('../src/services/apiTokenMintGate.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/services/apiTokenMintGate.ts')>(),
+  mintHoldingsUsd: vi.fn(async () => {
+    if (gate.valueUsd instanceof Error) throw gate.valueUsd
+    return gate.valueUsd
+  }),
+}))
 vi.mock('../src/services/forumWrite.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/services/forumWrite.ts')>(),
   gateFacts: vi.fn(async () => gate.facts),
@@ -15,6 +27,7 @@ import { initUserAuthService, issueSession, resetUserAuthForTests } from '../src
 import { initUserApiTokenService, MAX_ACTIVE_TOKENS, createApiToken, parseAdminAccountIds } from '../src/services/userApiTokenService.ts'
 import { initExplorerService, loadEvmBindings } from '../src/services/explorerService.ts'
 import { fakeClient as userFakeClient } from './helpers/userFakes.ts'
+import { MintValuationUnavailable, mintHoldingsUsd, netAccountValueUsd, parseMinMintUsd } from '../src/services/apiTokenMintGate.ts'
 
 // The Data API's control plane: token CRUD on the explorer api, and the admin
 // surface. The fake below reproduces ReplacingMergeTree upsert semantics for
@@ -85,7 +98,9 @@ beforeEach(async () => {
   resetUserAuthForTests()
   await initUserAuthService(userFakeClient())
   fake = apiTablesFake()
-  gate.facts = { hdx: 0n, identity: false, voted: true, firstSeenMs: null }
+  gate.valueUsd = 50
+  gate.facts = { hdx: 0n, identity: false, voted: false, firstSeenMs: null }
+  vi.mocked(mintHoldingsUsd).mockClear()
   process.env.ADMIN_ACCOUNT_IDS = ADMIN
   initUserApiTokenService(fake.client)
   app = Fastify({ logger: false })
@@ -96,6 +111,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   delete process.env.ADMIN_ACCOUNT_IDS
+  delete process.env.DATA_API_MIN_MINT_USD
   await app.close()
 })
 
@@ -153,21 +169,94 @@ describe('token CRUD', () => {
     expect((await app.inject({ method: 'POST', url: '/user/api-tokens', payload: {} })).statusCode).toBe(401)
   })
 
-  it('mints only for an account with the forum posting stake; admins are exempt', async () => {
-    gate.facts = { hdx: 0n, identity: false, voted: false, firstSeenMs: null }
-    const refused = await app.inject({ method: 'POST', url: '/user/api-tokens', headers: asOwner(), payload: {} })
-    expect(refused.statusCode).toBe(403)
-    expect(refused.json().error).toMatch(/HDX, an on-chain identity, or a vote/)
+  const mint = (headers = asOwner()) => app.inject({ method: 'POST', url: '/user/api-tokens', headers, payload: {} })
+
+  it('mints for an account holding more than the minimum USD value', async () => {
+    gate.valueUsd = 1.01
+    expect((await mint()).statusCode).toBe(200)
+    expect(vi.mocked(mintHoldingsUsd)).toHaveBeenCalledWith(OWNER)
+    expect(fake.tokens.size).toBe(1)
+  })
+
+  it('refuses an account at or below the minimum, with its own reason code', async () => {
+    for (const value of [1, 0.99, 0, -5]) {
+      gate.valueUsd = value
+      const refused = await mint()
+      expect(refused.statusCode).toBe(403)
+      expect(refused.json()).toEqual({
+        error: 'Creating an API token needs an account holding more than $1 in total, counting every asset at current prices.',
+        reason: 'insufficient-balance',
+      })
+    }
     expect(fake.tokens.size).toBe(0)
-    expect((await app.inject({ method: 'POST', url: '/user/api-tokens', headers: asAdmin(), payload: {} })).statusCode).toBe(200)
-    gate.facts = { hdx: 1_000n * 10n ** 12n, identity: false, voted: false, firstSeenMs: null }
-    expect((await app.inject({ method: 'POST', url: '/user/api-tokens', headers: asOwner(), payload: {} })).statusCode).toBe(200)
+  })
+
+  it('no longer counts an identity, a vote or HDX standing without value', async () => {
+    gate.valueUsd = 0
+    gate.facts = { hdx: 1_000n * 10n ** 12n, identity: true, voted: true, firstSeenMs: 0 }
+    const refused = await mint()
+    expect(refused.statusCode).toBe(403)
+    expect(refused.json().reason).toBe('insufficient-balance')
+    expect(fake.tokens.size).toBe(0)
+  })
+
+  it('exempts admins without reading their value', async () => {
+    gate.valueUsd = 0
+    expect((await mint(asAdmin())).statusCode).toBe(200)
+    gate.valueUsd = new MintValuationUnavailable('prices are stale')
+    expect((await mint(asAdmin())).statusCode).toBe(200)
+    expect(vi.mocked(mintHoldingsUsd)).not.toHaveBeenCalled()
+  })
+
+  it('refuses, retryably, when the value cannot be computed', async () => {
+    for (const failure of [new MintValuationUnavailable('prices are stale'), new Error('clickhouse down')]) {
+      gate.valueUsd = failure
+      const refused = await mint()
+      expect(refused.statusCode).toBe(503)
+      expect(refused.headers['retry-after']).toBe('30')
+      expect(refused.json().reason).toBe('valuation-unavailable')
+      // Nothing internal leaks into the answer.
+      expect(JSON.stringify(refused.json())).not.toMatch(/clickhouse|stale/)
+    }
+    expect(fake.tokens.size).toBe(0)
+  })
+
+  it('reads the minimum from DATA_API_MIN_MINT_USD', async () => {
+    process.env.DATA_API_MIN_MINT_USD = '25'
+    initUserApiTokenService(fake.client)
+    gate.valueUsd = 25
+    const refused = await mint()
+    expect(refused.statusCode).toBe(403)
+    expect(refused.json().error).toMatch(/more than \$25 in total/)
+    gate.valueUsd = 25.5
+    expect((await mint()).statusCode).toBe(200)
   })
 
   it('never lets parallel mints pass the cap', async () => {
     const results = await Promise.allSettled(Array.from({ length: MAX_ACTIVE_TOKENS + 5 }, () => createApiToken(OWNER, '')))
     expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(MAX_ACTIVE_TOKENS)
     expect([...fake.tokens.values()].filter(row => row.account_id === OWNER && Number(row.deleted) === 0)).toHaveLength(MAX_ACTIVE_TOKENS)
+  })
+})
+
+describe('mint gate valuation', () => {
+  it('parses DATA_API_MIN_MINT_USD fail-closed', () => {
+    expect(parseMinMintUsd(undefined)).toBe(1)
+    expect(parseMinMintUsd(' ')).toBe(1)
+    expect(parseMinMintUsd('2.5')).toBe(2.5)
+    expect(parseMinMintUsd('0')).toBe(0)
+    for (const bad of ['-1', 'one', '1e3', 'NaN', 'Infinity', '$1']) expect(() => parseMinMintUsd(bad)).toThrow(/DATA_API_MIN_MINT_USD/)
+    process.env.DATA_API_MIN_MINT_USD = 'abc'
+    expect(() => initUserApiTokenService(fake.client)).toThrow(/DATA_API_MIN_MINT_USD/)
+  })
+
+  it('nets money-market debt out of the gross value, as the account page does, except a custody position', () => {
+    const market = (debtUsd: number, custody = false) => ({ totalDebtBase: String(Math.round(debtUsd * 1e8)), ...(custody ? { custody } : {}) })
+    const detail = (portfolioUsd: number, markets: ReturnType<typeof market>[]) =>
+      ({ portfolioUsd, moneyMarket: markets }) as unknown as Parameters<typeof netAccountValueUsd>[0]
+    expect(netAccountValueUsd(detail(3, []))).toBe(3)
+    expect(netAccountValueUsd(detail(1000, [market(600), market(399.5)]))).toBeCloseTo(0.5, 8)
+    expect(netAccountValueUsd(detail(10, [market(50, true)]))).toBe(10)
   })
 })
 

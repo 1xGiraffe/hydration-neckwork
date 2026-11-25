@@ -112,6 +112,7 @@ Docker Compose provides working defaults. Override them in an untracked `.env` f
 | `PUBLIC_API_MASTER` | `true` | `master` flag in the public API's `/rest/service/metadata` probe |
 | `ADMIN_ACCOUNT_IDS` | empty | Accounts that reach the Data API's admin surface and are exempt from its rate limits |
 | `DATA_API_DEFAULT_PER_MINUTE` / `_PER_DAY` | service defaults | Default per-account Data API rate limits; per-account overrides live in `user_api_limits` |
+| `DATA_API_MIN_MINT_USD` | `1` | USD value an account must hold more than (all assets at current prices, net of money-market debt) to mint a Data API token; admins are exempt |
 | `MCP_ACCESS_KEYS` | empty | Comma-separated bearer keys for `POST /mcp`. Empty means open, which is the default posture: every tool reads public chain data only |
 
 See [`docker-compose.yml`](docker-compose.yml) for service-specific tuning variables. Keep credentials in `.env`, never in tracked files. Vite URL changes require rebuilding the corresponding UI image.

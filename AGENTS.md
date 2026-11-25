@@ -314,8 +314,15 @@ API it is a **versioned frozen contract**; concept: the Data API concept doc (no
 - The control plane lives on the explorer api (`api/src/routes/apiTokens.ts` +
   `services/userApiTokenService.ts`): token CRUD under `/user/api-tokens`
   (session-gated) and the admin surface under `/user/admin/*` (allowlist-gated,
-  404-invisible to non-admins). Minting needs the forum's posting stake
-  (`gateFacts`/`standingFrom`, a mute ignored; admins exempt) and is serialized per
+  404-invisible to non-admins). Minting needs the account to hold more than
+  `DATA_API_MIN_MINT_USD` (default $1) in total, net of money-market debt —
+  the explorer account page's value, read by `mintHoldingsUsd`
+  (`services/apiTokenMintGate.ts`; an unpriced asset counts $0; an identity, a
+  vote or the forum's gates count for nothing; admins exempt). It is checked at
+  mint time only, never when a token is used, and fails closed: a value that
+  cannot be read (a ClickHouse error, no price generation, prices older than 30
+  minutes) answers 503 `valuation-unavailable`, a value at or below the minimum
+  403 `insufficient-balance`. Minting is serialized per
   account; admin limit overrides are keyed by `resolveDisplayAccountId`, as login keys
   the session. A malformed `ADMIN_ACCOUNT_IDS` entry stops both the explorer api and
   api-data from starting. `api-data` only ever reads
