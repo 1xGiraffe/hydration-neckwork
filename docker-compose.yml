@@ -15,9 +15,9 @@ x-service: &service
       max-file: "3"
 
 # Containment for the api image's services (AGENTS.md, Dependencies and supply
-# chain): if a dependency were ever compromised, it runs as the image's non-root
-# `node` user with no Linux capabilities, cannot gain any (no-new-privileges), and
-# cannot rewrite the code it runs or plant files — the root filesystem is read-only;
+# chain): if a dependency were ever compromised, it runs as a non-root user with no
+# Linux capabilities, cannot gain any (no-new-privileges), and cannot rewrite the
+# code it runs or plant files — the root filesystem is read-only;
 # only /tmp (tsx's compile cache) is writable, in memory. Nothing in these processes
 # writes elsewhere (verified 2026-11-01).
 # Runs as UID 10001, reserved for these containers: an ID no host account is expected to
@@ -448,7 +448,8 @@ services:
   # SMART_CONTRACT_VERIFIER__* variable PANICS at startup rather than warning.
   smart-contract-verifier:
     <<: [*service, *hardened]
-    image: ghcr.io/blockscout/smart-contract-verifier:v1.10.6
+    # Pinned by version AND digest, like every image (AGENTS.md, Dependencies and supply chain).
+    image: ghcr.io/blockscout/smart-contract-verifier:v1.10.6@sha256:c9e4e022ba2b1cc24fe70e581d835e873c6c374545b3a0fd209e16ff03f93d78
     container_name: hydration-neckwork-smart-contract-verifier
     # It runs solc on source code anyone can submit: a pathological input must cost
     # at most this container's share. solc's peak on a large viaIR project is a few

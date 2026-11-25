@@ -279,6 +279,11 @@ log "new image $NEW_ID (tagged $IMAGE:$REV_TAG)"
 # module code runs; past it the process either keeps running, or the
 # entrypoint's own start() calls process.exit because ClickHouse is unreachable.
 # Both count as linked. A rejected import() or an uncaught throw is a failure.
+# The container runs with production's containment (docker-compose.yml's x-hardened:
+# UID 10001, read-only root, tmpfs /tmp, no capabilities, no-new-privileges), so a
+# module that needs to write outside /tmp or to run as another user fails here, not
+# in the rollout.
+SMOKE_HARDENING=(--user 10001:10001 --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true)
 SMOKE_JS='
 const realExit = process.exit.bind(process);
 process.exit = (code) => { console.log("SMOKE_EXIT_CALLED", code); realExit(0); };
@@ -289,7 +294,7 @@ import(process.env.SMOKE_ENTRY).then(
   (e) => { console.log("SMOKE_FAIL import", e && (e.code || e.name), e && e.message); realExit(2); });
 '
 for entry in "${ENTRYPOINTS[@]}"; do
-  out=$(timeout 60 docker run --rm --network none -e SMOKE_ENTRY="/app/$entry" \
+  out=$(timeout 60 docker run --rm --network none "${SMOKE_HARDENING[@]}" -e SMOKE_ENTRY="/app/$entry" \
         --entrypoint node "$NEW_ID" --import tsx -e "$SMOKE_JS" 2>&1) && rc=0 || rc=$?
   if [[ $rc -ne 0 ]] || grep -q 'SMOKE_FAIL\|ERR_MODULE_NOT_FOUND' <<<"$out" \
      || ! grep -q 'SMOKE_ALIVE\|SMOKE_EVALUATED\|SMOKE_EXIT_CALLED' <<<"$out"; then

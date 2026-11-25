@@ -7,7 +7,11 @@
 // cannot run (registry unreachable, bad JSON): DEPLOY_SKIP_AUDIT=1 is the explicit,
 // logged way past an outage.
 //
-//   node ops/audit-gate.mjs api
+//   node ops/audit-gate.mjs api           ops/deploy-api.sh runs it before the build
+//   node ops/audit-gate.mjs .             before building the indexer image (the root
+//                                         Dockerfile: raw and price pipelines, snapshot
+//                                         services, the governance sync and fetcher)
+//   node ops/audit-gate.mjs explorer-ui   before shipping a UI (likewise preis-ui)
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
