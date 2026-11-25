@@ -58,8 +58,49 @@ export function isNotReady(error: unknown): boolean {
   return error instanceof ApiError && error.status === 503 && error.body.reason === 'not-ready'
 }
 
+// ── Path segments ────────────────────────────────────────────────────────
+// Every value written into an api path goes through seg(): encoded as ONE segment,
+// and refused — an ApiError 400, before any request is made — when it is a `.` or
+// `..` segment (the browser's URL parser resolves those against the path) or holds
+// anything outside its id's shape. Ids come from the address bar, the router decodes
+// them, and nginx decodes `%2F` and resolves `..` before choosing a location: a
+// value like `x/../../sessions` must never address a different endpoint, least of
+// all with the reader's session attached.
+export const SEGMENT = {
+  /** Any api id: addresses, hashes, tag/list/forum ids, slugs. No slash, backslash, `%` or whitespace. */
+  id: /^[A-Za-z0-9_:@.#~+-]{1,200}$/,
+  uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  /** A moderation report id. */
+  hex32: /^[0-9a-f]{32}$/,
+  /** An oracle feed id: the one id holding a slash (a DIA key, `dia:<contract>:DOT/USD`), sent encoded as one segment. */
+  oracleFeed: /^(?!.*\\)[!-~]{1,200}$/,
+} as const
+
+function isDotSegment(s: string): boolean {
+  return s === '.' || s === '..'
+}
+
+export function seg(value: string, shape: RegExp = SEGMENT.id): string {
+  if (!shape.test(value) || value.split('/').some(isDotSegment)) throw new ApiError(400, 'Invalid id in the request path')
+  return encodeURIComponent(value)
+}
+
+// The same refusal over a finished path, for whatever reaches getJson/authedJson:
+// no segment may decode to `.`/`..`, and a credentialed request's segments may not
+// decode to anything holding a slash or backslash (nginx refuses those on /api/user/).
+function checkedPath(path: string, credentialed: boolean): string {
+  const segments = path.split('?')[0].split('/')
+  const bad = segments.some(raw => {
+    let s: string
+    try { s = decodeURIComponent(raw) } catch { return true }
+    return isDotSegment(s) || (credentialed && /[/\\]/.test(s))
+  })
+  if (bad) throw new ApiError(400, 'Invalid id in the request path')
+  return path
+}
+
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`/api${path}`, { signal })
+  const response = await fetch(`/api${checkedPath(path, false)}`, { signal })
   if (!response.ok) {
     const body = await response.json().catch(() => null) as ApiErrorBody | null
     throw new ApiError(response.status, body?.message || body?.error || `${response.status} ${response.statusText}`, body ?? {})
@@ -76,7 +117,7 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 // clears its own session unconditionally in its caller regardless of this.
 async function authedJson<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const token = getSession()?.token
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`/api${checkedPath(path, true)}`, {
     method, signal,
     headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -99,8 +140,8 @@ async function authedJson<T>(method: string, path: string, body?: unknown, signa
 export const PUBLIC_LIST_TAG = ''
 const listTagPath = (listId: string, tagId: string, suffix = ''): string =>
   listId === PUBLIC_LIST_TAG
-    ? `/explorer/list-tag/${encodeURIComponent(tagId)}${suffix}`
-    : `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}${suffix}`
+    ? `/explorer/list-tag/${seg(tagId)}${suffix}`
+    : `/user/list-tag/${seg(listId)}/${seg(tagId)}${suffix}`
 
 type QueryValue = string | number | boolean | null | undefined
 
@@ -155,24 +196,24 @@ export const api = {
   blockActivity: (height: number, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/block/${height}/activity`, signal),
   extrinsics: (limit = 25, signedOnly = false, from?: string, to?: string, offset = 0, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
     getJson<ExtrinsicSummary[]>(withQuery('/explorer/extrinsics', { limit, offset, signedOnly, from, to, ...filters, h: liveHeadTag() || undefined }), signal),
-  extrinsic: (hash: string, signal?: AbortSignal) => getJson<ExtrinsicDetail>(`/explorer/extrinsic/${hash}`, signal),
+  extrinsic: (hash: string, signal?: AbortSignal) => getJson<ExtrinsicDetail>(`/explorer/extrinsic/${seg(hash)}`, signal),
   extrinsicAt: (height: number, index: number, signal?: AbortSignal) => getJson<ExtrinsicDetail>(`/explorer/extrinsic-at/${height}/${index}`, signal),
-  extrinsicActivity: (hash: string, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic/${hash}/activity`, signal),
+  extrinsicActivity: (hash: string, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic/${seg(hash)}/activity`, signal),
   extrinsicAtActivity: (height: number, index: number, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/extrinsic-at/${height}/${index}/activity`, signal),
   extrinsicEncoded: (height: number, index: number, signal?: AbortSignal) =>
     getJson<{ encoded: string }>(`/explorer/extrinsic-at/${height}/${index}/encoded`, signal),
   // Gas for one EVM transaction, from the chain's own receipt (nothing indexes it).
   // 404 when the node cannot answer — the extrinsic page then omits the gas rows.
-  evmReceipt: (txHash: string, signal?: AbortSignal) => getJson<EvmReceipt>(`/explorer/evm-tx/${txHash}/receipt`, signal),
+  evmReceipt: (txHash: string, signal?: AbortSignal) => getJson<EvmReceipt>(`/explorer/evm-tx/${seg(txHash)}/receipt`, signal),
   // The head renderer preloads this read, the post and the thread's first page with
   // exactly these URLs (api/src/routes/seo.ts, pagePreloads): change both together.
   referendum: (pallet: 'opengov' | 'democracy', index: number, signal?: AbortSignal, limit?: number) =>
-    getJson<ReferendumDetail>(withQuery(`/explorer/referendum/${pallet}/${index}`, limit == null ? {} : { limit }), signal),
+    getJson<ReferendumDetail>(withQuery(`/explorer/referendum/${seg(pallet)}/${index}`, limit == null ? {} : { limit }), signal),
   dcaSchedule: (scheduleId: number, offset = 0, limit = 25, signal?: AbortSignal) => getJson<DcaScheduleDetail>(withQuery(`/explorer/dca/${scheduleId}`, { offset, limit }), signal),
   dcaScheduleAt: (height: number, index: number, kind: 'event' | 'extrinsic', signal?: AbortSignal) => getJson<{ scheduleId: number }>(withQuery(`/explorer/dca-at/${height}/${index}`, { kind }), signal),
   dcaExecution: (height: number, index: number, signal?: AbortSignal) => getJson<DcaExecutionDetail>(`/explorer/dca/exec/${height}/${index}`, signal),
   // The id is the u128 as a decimal string and travels as text end to end.
-  intentOrder: (intentId: string, offset = 0, limit = 25, signal?: AbortSignal) => getJson<IntentOrderDetail>(withQuery(`/explorer/intent/${intentId}`, { offset, limit }), signal),
+  intentOrder: (intentId: string, offset = 0, limit = 25, signal?: AbortSignal) => getJson<IntentOrderDetail>(withQuery(`/explorer/intent/${seg(intentId)}`, { offset, limit }), signal),
   // One pair's candles (quote per base), ending with the bucket in progress.
   pairChart: (base: number, quote: number, interval: string, count: number, signal?: AbortSignal) =>
     getJson<PairChart>(withQuery('/explorer/pair-chart', { base, quote, interval, count, pg: priceHeadTag() || undefined }), signal),
@@ -193,20 +234,20 @@ export const api = {
   asset: (assetId: number, signal?: AbortSignal) => getJson<AssetDetail>(withQuery(`/explorer/asset/${assetId}`, { pg: priceHeadTag() || undefined }), signal),
   assetDcas: (assetId: number, signal?: AbortSignal) => getJson<AssetDcas>(`/explorer/asset/${assetId}/dcas`, signal),
   assetLimitOrders: (assetId: number, signal?: AbortSignal) => getJson<AssetLimitOrderBook>(`/explorer/asset/${assetId}/limit-orders`, signal),
-  xcDestination: (slug: string, signal?: AbortSignal) => getJson<XcDestinationDetail>(`/explorer/xc-destination/${encodeURIComponent(slug)}`, signal),
+  xcDestination: (slug: string, signal?: AbortSignal) => getJson<XcDestinationDetail>(`/explorer/xc-destination/${seg(slug)}`, signal),
   assetLiquidity: (assetId: number, signal?: AbortSignal) => getJson<AssetLiquidity>(`/explorer/asset/${assetId}/liquidity`, signal),
   poolDetail: (poolId: number, signal?: AbortSignal) => getJson<PoolDetail>(`/explorer/pool/${poolId}`, signal),
   // A concentrated-liquidity pool by its contract, and its own activity (swaps in it,
   // positions and vault acts on it).
-  v3Pool: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolDetail>(`/explorer/pool/v3/${address}`, signal),
-  v3PoolActivity: (address: string, limit = 25, signal?: AbortSignal) => getJson<ActivityRow[]>(withQuery(`/explorer/pool/v3/${address}/activity`, { limit }), signal),
+  v3Pool: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolDetail>(`/explorer/pool/v3/${seg(address)}`, signal),
+  v3PoolActivity: (address: string, limit = 25, signal?: AbortSignal) => getJson<ActivityRow[]>(withQuery(`/explorer/pool/v3/${seg(address)}/activity`, { limit }), signal),
   // The pool's series: whole life at a ladder grain, or a fromTs/toTs window refined
   // down to the swaps (same parameters as the other windowed pool histories).
-  v3PoolHistory: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolHistory>(`/explorer/pool/v3/${address}/history`, signal),
-  v3PoolLiquidity: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolLiquidity>(`/explorer/pool/v3/${address}/liquidity`, signal),
-  v3PoolLps: (address: string, offset = 0, limit = 10, signal?: AbortSignal) => getJson<UniswapV3PoolLpsResponse>(withQuery(`/explorer/pool/v3/${address}/lps`, { offset, limit }), signal),
+  v3PoolHistory: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolHistory>(`/explorer/pool/v3/${seg(address)}/history`, signal),
+  v3PoolLiquidity: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolLiquidity>(`/explorer/pool/v3/${seg(address)}/liquidity`, signal),
+  v3PoolLps: (address: string, offset = 0, limit = 10, signal?: AbortSignal) => getJson<UniswapV3PoolLpsResponse>(withQuery(`/explorer/pool/v3/${seg(address)}/lps`, { offset, limit }), signal),
   v3PoolHistoryWindow: (address: string, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
-    getJson<UniswapV3PoolHistory>(withQuery(`/explorer/pool/v3/${address}/history`, { fromTs, toTs, points }), signal),
+    getJson<UniswapV3PoolHistory>(withQuery(`/explorer/pool/v3/${seg(address)}/history`, { fromTs, toTs, points }), signal),
   omnipool: (signal?: AbortSignal) => getJson<OmnipoolDetail>('/explorer/omnipool', signal),
   // Chart-zoom refinement for the pool histories: the same models rebuilt on the
   // finest ladder grain that fits `points` (never below an hour) instead of the
@@ -234,61 +275,61 @@ export const api = {
   omnipoolLps: (assetId: number, offset = 0, limit = 10, signal?: AbortSignal) =>
     getJson<OmnipoolAssetLpsResponse>(withQuery(`/explorer/omnipool/${assetId}/lps`, { offset, limit }), signal),
   holders: (assetId: number, offset = 0, limit = 100, signal?: AbortSignal) => getJson<HoldersResponse>(withQuery(`/explorer/holders/${assetId}`, { offset, limit, pg: priceHeadTag() || undefined }), signal),
-  address: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(withQuery(`/explorer/address/${encodeURIComponent(address)}`, { pg: priceHeadTag() || undefined }), signal),
+  address: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(withQuery(`/explorer/address/${seg(address)}`, { pg: priceHeadTag() || undefined }), signal),
   // Lightweight variant for the hover card: the API skips LP/DCA/proxy/multisig so
   // the preview loads fast (the card only shows name, value, holdings, volumes).
-  addressSummary: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(withQuery(`/explorer/address/${encodeURIComponent(address)}`, { summary: '1' }), signal),
-  addressHistory: (address: string, signal?: AbortSignal) => getJson<AccountHistoryResponse>(`/explorer/address/${encodeURIComponent(address)}/history`, signal),
+  addressSummary: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(withQuery(`/explorer/address/${seg(address)}`, { summary: '1' }), signal),
+  addressHistory: (address: string, signal?: AbortSignal) => getJson<AccountHistoryResponse>(`/explorer/address/${seg(address)}/history`, signal),
   // Value-chart variant: `series=1` leaves out the per-asset balance history, 98-99%
   // of the full payload and read only by the Balances treemap.
-  addressHistorySeries: (address: string, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/address/${encodeURIComponent(address)}/history`, { series: '1' }), signal),
-  closeAccounts: (address: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/address/${encodeURIComponent(address)}/close-accounts`, signal),
-  tagCloseAccounts: (tagId: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/tag/${encodeURIComponent(tagId)}/close-accounts`, signal),
+  addressHistorySeries: (address: string, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/address/${seg(address)}/history`, { series: '1' }), signal),
+  closeAccounts: (address: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/address/${seg(address)}/close-accounts`, signal),
+  tagCloseAccounts: (tagId: string, signal?: AbortSignal) => getJson<CloseAccountsResponse>(`/explorer/tag/${seg(tagId)}/close-accounts`, signal),
   accountActivity: (address: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
-    getJson<ActivityRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/activity`, { type, offset, limit, action, from, to, ...filters }), signal),
+    getJson<ActivityRow[]>(withQuery(`/explorer/address/${seg(address)}/activity`, { type, offset, limit, action, from, to, ...filters }), signal),
   accountExtrinsics: (address: string, offset = 0, limit = 25, from?: string, to?: string, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
-    getJson<ExtrinsicSummary[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/extrinsics`, { offset, limit, from, to, ...filters }), signal),
+    getJson<ExtrinsicSummary[]>(withQuery(`/explorer/address/${seg(address)}/extrinsics`, { offset, limit, from, to, ...filters }), signal),
   accountEvents: (address: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
-    getJson<EventRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/events`, { offset, limit, from, to, ...filters }), signal),
+    getJson<EventRow[]>(withQuery(`/explorer/address/${seg(address)}/events`, { offset, limit, from, to, ...filters }), signal),
   // Governance votes cast by the account (OpenGov + Democracy + collectives).
   accountVotes: (address: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
-    getJson<VoteRow[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/votes`, { offset, limit, from, to }), signal),
+    getJson<VoteRow[]>(withQuery(`/explorer/address/${seg(address)}/votes`, { offset, limit, from, to }), signal),
   // Where the protocol revenue this account generated came from (stream × asset).
   accountRevenueBreakdown: (address: string, signal?: AbortSignal) =>
-    getJson<RevenueBreakdown>(`/explorer/address/${encodeURIComponent(address)}/revenue-breakdown`, signal),
-  accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/address/${encodeURIComponent(address)}/counts`, signal),
+    getJson<RevenueBreakdown>(`/explorer/address/${seg(address)}/revenue-breakdown`, signal),
+  accountActivityCounts: (address: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/address/${seg(address)}/counts`, signal),
   // How many rows one list holds under exactly the filters it is showing. `total` is
   // exact for the rows it covers; `complete: false` = the list runs deeper than the
   // pages that total can number. `total: null` = no countable prefix at all.
   accountListCount: (address: string, query: ListCountQuery, signal?: AbortSignal) =>
-    getJson<ListCount>(withQuery(`/explorer/address/${encodeURIComponent(address)}/list-count`, { ...query }), signal),
+    getJson<ListCount>(withQuery(`/explorer/address/${seg(address)}/list-count`, { ...query }), signal),
   // Largest value-changing events (big transfers/swaps/liquidations) for the
   // value-history chart's markers; defaults to the account's full indexed range.
   accountValueEvents: (address: string, from?: string, to?: string, signal?: AbortSignal) =>
-    getJson<ValueEvent[]>(withQuery(`/explorer/address/${encodeURIComponent(address)}/value-events`, { from, to }), signal),
+    getJson<ValueEvent[]>(withQuery(`/explorer/address/${seg(address)}/value-events`, { from, to }), signal),
   tagValueEvents: (tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
-    getJson<ValueEvent[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/value-events`, { from, to }), signal),
-  tag: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(`/explorer/tag/${encodeURIComponent(tagId)}`, signal),
+    getJson<ValueEvent[]>(withQuery(`/explorer/tag/${seg(tagId)}/value-events`, { from, to }), signal),
+  tag: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(`/explorer/tag/${seg(tagId)}`, signal),
   // Which PUBLIC list a shared tag link belongs to — the tag page's provenance
   // line, and the probe that tells a public list tag apart from an unknown id
   // for a viewer with no tag map of their own (anonymous, or simply not
   // subscribed). 404 means neither: not public, or not a tag at all.
   publicListTagList: (tagId: string, signal?: AbortSignal) =>
-    getJson<ListSummaryRef>(`/explorer/list-tag/${encodeURIComponent(tagId)}/list`, signal),
+    getJson<ListSummaryRef>(`/explorer/list-tag/${seg(tagId)}/list`, signal),
   // The tag's members as directory rows — the same shape /explorer/accounts
   // returns, so a tag page renders the directory table rather than its own list.
   tagMembers: (tagId: string, signal?: AbortSignal) =>
-    getJson<AccountsPage>(`/explorer/tag/${encodeURIComponent(tagId)}/members`, signal),
+    getJson<AccountsPage>(`/explorer/tag/${seg(tagId)}/members`, signal),
   // Lightweight variant for the hover card (skips the heavy portfolio-history walk).
-  tagSummary: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}`, { summary: '1' }), signal),
+  tagSummary: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(withQuery(`/explorer/tag/${seg(tagId)}`, { summary: '1' }), signal),
   tagActivity: (tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
-    getJson<ActivityRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), signal),
+    getJson<ActivityRow[]>(withQuery(`/explorer/tag/${seg(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), signal),
   tagExtrinsics: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
-    getJson<ExtrinsicSummary[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/extrinsics`, { offset, limit, from, to, ...filters }), signal),
+    getJson<ExtrinsicSummary[]>(withQuery(`/explorer/tag/${seg(tagId)}/extrinsics`, { offset, limit, from, to, ...filters }), signal),
   tagEvents: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
-    getJson<EventRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), signal),
+    getJson<EventRow[]>(withQuery(`/explorer/tag/${seg(tagId)}/events`, { offset, limit, from, to, ...filters }), signal),
   tagVotes: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
-    getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
+    getJson<VoteRow[]>(withQuery(`/explorer/tag/${seg(tagId)}/votes`, { offset, limit, from, to }), signal),
   governance: (signal?: AbortSignal) => getJson<GovernanceOverview>('/explorer/governance', signal),
   governanceReferenda: (pallet: 'opengov' | 'democracy', status?: string, offset = 0, limit = 25, signal?: AbortSignal) =>
     getJson<GovernanceReferendaPage>(withQuery('/explorer/governance/referenda', { pallet, status, offset, limit }), signal),
@@ -298,17 +339,17 @@ export const api = {
     getJson<TreasuryTipsPage>(withQuery('/explorer/governance/tips', { offset, limit }), signal),
   // What this account / tag EARNED (User Revenue), per stream / pot / asset.
   accountUserRevenue: (address: string, range: RevenueRange, signal?: AbortSignal) =>
-    getJson<UserRevenueBreakdown>(withQuery(`/explorer/address/${encodeURIComponent(address)}/user-revenue`, { range }), signal),
+    getJson<UserRevenueBreakdown>(withQuery(`/explorer/address/${seg(address)}/user-revenue`, { range }), signal),
   tagUserRevenue: (tagId: string, range: RevenueRange, signal?: AbortSignal) =>
-    getJson<UserRevenueBreakdown>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/user-revenue`, { range }), signal),
+    getJson<UserRevenueBreakdown>(withQuery(`/explorer/tag/${seg(tagId)}/user-revenue`, { range }), signal),
   tagRevenueBreakdown: (tagId: string, signal?: AbortSignal) =>
-    getJson<RevenueBreakdown>(`/explorer/tag/${encodeURIComponent(tagId)}/revenue-breakdown`, signal),
+    getJson<RevenueBreakdown>(`/explorer/tag/${seg(tagId)}/revenue-breakdown`, signal),
   // Grouped mode of the votes tab: one row per referendum, members combined.
   tagVotesByReferendum: (tagId: string, offset = 0, limit = 25, signal?: AbortSignal) =>
-    getJson<VotesByReferendumPage>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes-by-referendum`, { offset, limit }), signal),
-  tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/tag/${encodeURIComponent(tagId)}/counts`, signal),
+    getJson<VotesByReferendumPage>(withQuery(`/explorer/tag/${seg(tagId)}/votes-by-referendum`, { offset, limit }), signal),
+  tagActivityCounts: (tagId: string, signal?: AbortSignal) => getJson<TabCounts>(`/explorer/tag/${seg(tagId)}/counts`, signal),
   tagListCount: (tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
-    getJson<ListCount>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/list-count`, { ...query }), signal),
+    getJson<ListCount>(withQuery(`/explorer/tag/${seg(tagId)}/list-count`, { ...query }), signal),
   search: (query: string, signal?: AbortSignal) => getJson<SearchResult[]>(withQuery('/explorer/search', { q: query }), signal),
   assets: (signal?: AbortSignal) => getJson<AssetListItem[]>(withQuery('/explorer/assets', { pg: priceHeadTag() || undefined }), signal),
   // Token-filter variant: the same ordered directory without prices, totals or
@@ -334,8 +375,8 @@ export const api = {
   // history windows are named in exact block space (the base series carries its
   // end-of-bucket block heights).
   assetPrices: (assetId: number, from: number, to: number, points: number, signal?: AbortSignal) => getJson<AssetPriceWindow>(withQuery(`/explorer/asset/${assetId}/prices`, { fromTs: from, toTs: to, points }), signal),
-  addressHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/address/${encodeURIComponent(address)}/history`, { fromBlock, toBlock }), signal),
-  tagHistoryWindow: (tagId: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/history`, { fromBlock, toBlock }), signal),
+  addressHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/address/${seg(address)}/history`, { fromBlock, toBlock }), signal),
+  tagHistoryWindow: (tagId: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/tag/${seg(tagId)}/history`, { fromBlock, toBlock }), signal),
   // Trading volume on the value chart's grid; the window (zoom) form takes the same block
   // range. A list tag reads its own surface (authed, or the public one — see listTagPath).
   volumeHistory: (scope: VolumeScope, window?: { fromBlock: number; toBlock: number }, signal?: AbortSignal) =>
@@ -351,7 +392,7 @@ export const api = {
   openIntents: (signal?: AbortSignal) => getJson<IceOpenIntents>('/explorer/intents/open', signal),
   juicer: (signal?: AbortSignal) => getJson<JuicerDashboard>('/explorer/juicer', signal),
   bil: (signal?: AbortSignal) => getJson<BilDashboard>('/explorer/bil', signal),
-  bonds: (family: string, signal?: AbortSignal) => getJson<BondDashboard>(`/explorer/bonds/${encodeURIComponent(family)}`, signal),
+  bonds: (family: string, signal?: AbortSignal) => getJson<BondDashboard>(`/explorer/bonds/${seg(family)}`, signal),
   security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
   // The Technical Committee alone; an api without the slim route answers 404, and
   // the dashboard carries the same view.
@@ -366,22 +407,22 @@ export const api = {
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),
   contracts: (offset = 0, limit = 50, sort: ContractSort = 'created', signal?: AbortSignal) => getJson<ContractsPage>(withQuery('/explorer/contracts', { offset, limit, sort }), signal),
   // Lazy verified-contract artifacts (Code/Read sub-tabs); 404 when unverified.
-  contractAbi: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload>(`/explorer/contract/${encodeURIComponent(address)}/abi`, signal),
+  contractAbi: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload>(`/explorer/contract/${seg(address)}/abi`, signal),
   /** The verified ABI, or null for an unverified contract (200 either way, so no failed request is logged). */
-  contractAbiIfAny: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload | null>(`/explorer/contract/${encodeURIComponent(address)}/abi?optional=1`, signal),
-  contractSources: (address: string, signal?: AbortSignal) => getJson<ContractSourcesPayload>(`/explorer/contract/${encodeURIComponent(address)}/sources`, signal),
+  contractAbiIfAny: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload | null>(`/explorer/contract/${seg(address)}/abi?optional=1`, signal),
+  contractSources: (address: string, signal?: AbortSignal) => getJson<ContractSourcesPayload>(`/explorer/contract/${seg(address)}/sources`, signal),
   compilerVersions: (signal?: AbortSignal) => getJson<{ versions: string[] }>('/explorer/contract/compiler-versions', signal),
   // Contract-tab activity: the contract's own transactions and events with
   // page-bounded verified-ABI decoding (method chips, named log params).
   contractTransactions: (address: string, offset = 0, limit = 25, signal?: AbortSignal) =>
-    getJson<ContractTransactionsPage>(withQuery(`/explorer/contract/${encodeURIComponent(address)}/transactions`, { offset, limit }), signal),
+    getJson<ContractTransactionsPage>(withQuery(`/explorer/contract/${seg(address)}/transactions`, { offset, limit }), signal),
   contractEvents: (address: string, offset = 0, limit = 25, signal?: AbortSignal) =>
-    getJson<ContractEventsPage>(withQuery(`/explorer/contract/${encodeURIComponent(address)}/events`, { offset, limit }), signal),
+    getJson<ContractEventsPage>(withQuery(`/explorer/contract/${seg(address)}/events`, { offset, limit }), signal),
   // Sourcify V2 verification (the same surface `forge verify-contract` uses).
   // The api mounts these under /v2 — nginx/vite strip the /api prefix — and a
   // failed submit answers with {customCode, message}, which ApiError surfaces.
   verifySubmit: async (address: string, body: { stdJsonInput: unknown; compilerVersion: string; contractIdentifier: string }): Promise<{ verificationId: string }> => {
-    const response = await fetch(`/api/v2/verify/222222/${encodeURIComponent(address)}`, {
+    const response = await fetch(`/api/v2/verify/222222/${seg(address)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -392,9 +433,9 @@ export const api = {
     }
     return response.json() as Promise<{ verificationId: string }>
   },
-  verifyPoll: (verificationId: string, signal?: AbortSignal) => getJson<VerificationJob>(`/v2/verify/${encodeURIComponent(verificationId)}`, signal),
+  verifyPoll: (verificationId: string, signal?: AbortSignal) => getJson<VerificationJob>(`/v2/verify/${seg(verificationId)}`, signal),
   // The daily histogram can mirror the activity page's tab + filters.
-  daily: (scope: string, params?: { type?: string; action?: string; token?: string; market?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${scope}`, { ...params }), signal),
+  daily: (scope: string, params?: { type?: string; action?: string; token?: string; market?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${seg(scope)}`, { ...params }), signal),
   directoryActivityCounts: (keys: string[], signal?: AbortSignal) => getJson<DirectoryActivityCounts>(withQuery('/explorer/accounts/activity-counts', { keys: keys.join(',') }), signal),
   accountsDaily: (signal?: AbortSignal) => getJson<{ date: string; active: number; new: number }[]>('/explorer/accounts-daily', signal),
   tags: (signal?: AbortSignal) => getJson<Tag[]>('/explorer/tags', signal),
@@ -405,12 +446,12 @@ export const api = {
   // unparseable entry, canonical Polkadot/H160 display form + identity/profile.
   accountRefs: (addresses: string[], signal?: AbortSignal) =>
     getJson<(AccountRef | null)[]>(withQuery('/explorer/account-refs', { addresses: addresses.join(',') }), signal),
-  list: (id: string, signal?: AbortSignal) => getJson<ListDetailResponse>(`/explorer/list/${encodeURIComponent(id)}`, signal),
-  addressLists: (address: string, signal?: AbortSignal) => getJson<ListSummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/lists`, signal),
+  list: (id: string, signal?: AbortSignal) => getJson<ListDetailResponse>(`/explorer/list/${seg(id)}`, signal),
+  addressLists: (address: string, signal?: AbortSignal) => getJson<ListSummaryRef[]>(`/explorer/address/${seg(address)}/lists`, signal),
   // Public lists that TAG this address as a member — distinct from
   // addressLists above (lists the address itself OWNS). Same summary shape,
   // never tag names/other members (see the route's own comment).
-  addressTaggedIn: (address: string, signal?: AbortSignal) => getJson<ListSummaryRef[]>(`/explorer/address/${encodeURIComponent(address)}/tagged-in`, signal),
+  addressTaggedIn: (address: string, signal?: AbortSignal) => getJson<ListSummaryRef[]>(`/explorer/address/${seg(address)}/tagged-in`, signal),
 }
 
 export const userApi = {
@@ -421,39 +462,39 @@ export const userApi = {
   // /user/auth/ so authedJson's 401 carve-out applies: a rejected code never
   // clears a session this device already holds.
   createDeviceLink: () => authedJson<DeviceLinkResponse>('POST', '/user/auth/device-link'),
-  deviceLinkStatus: (linkId: string, signal?: AbortSignal) => authedJson<{ status: DeviceLinkStatus }>('GET', `/user/auth/device-link/${encodeURIComponent(linkId)}`, undefined, signal),
+  deviceLinkStatus: (linkId: string, signal?: AbortSignal) => authedJson<{ status: DeviceLinkStatus }>('GET', `/user/auth/device-link/${seg(linkId, SEGMENT.uuid)}`, undefined, signal),
   claimDeviceLink: (code: string) => authedJson<LoginResponse>('POST', '/user/auth/device-link/claim', { code }),
   sessions: (signal?: AbortSignal) => authedJson<{ sessions: DeviceSession[] }>('GET', '/user/sessions', undefined, signal),
-  revokeSession: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/sessions/${encodeURIComponent(id)}`),
+  revokeSession: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/sessions/${seg(id)}`),
   // Data API tokens (the hydration-data host authenticates with these; CRUD
   // lives here where the wallet session is). The create response is the ONLY
   // place the raw secret ever appears.
   apiTokens: (signal?: AbortSignal) => authedJson<ApiTokensResponse>('GET', '/user/api-tokens', undefined, signal),
   createApiToken: (label: string) => authedJson<CreatedApiToken>('POST', '/user/api-tokens', { label }),
-  revokeApiToken: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/api-tokens/${encodeURIComponent(id)}`),
+  revokeApiToken: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/api-tokens/${seg(id)}`),
   // Admin (allowlist-gated server-side; 404 for everyone else).
   apiUsers: (signal?: AbortSignal) => authedJson<ApiUsersResponse>('GET', '/user/admin/api-users', undefined, signal),
   setApiUserLimits: (accountId: string, body: { perMinute: number; perDay: number; note?: string }) =>
-    authedJson<{ ok: true }>('PUT', `/user/admin/api-users/${encodeURIComponent(accountId)}/limits`, body),
-  clearApiUserLimits: (accountId: string) => authedJson<{ ok: true }>('DELETE', `/user/admin/api-users/${encodeURIComponent(accountId)}/limits`),
-  adminRevokeApiToken: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/admin/api-tokens/${encodeURIComponent(id)}`),
+    authedJson<{ ok: true }>('PUT', `/user/admin/api-users/${seg(accountId)}/limits`, body),
+  clearApiUserLimits: (accountId: string) => authedJson<{ ok: true }>('DELETE', `/user/admin/api-users/${seg(accountId)}/limits`),
+  adminRevokeApiToken: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/admin/api-tokens/${seg(id)}`),
   me: (signal?: AbortSignal) => authedJson<MeResponse>('GET', '/user/me', undefined, signal),
   tagMap: (signal?: AbortSignal) => authedJson<TagMapResponse>('GET', '/user/tag-map', undefined, signal),
   setProfileName: (name: string) => authedJson<ProfileRef>('PUT', '/user/profile', { name }),
   setAvatar: (data: string) => authedJson<ProfileRef>('PUT', '/user/profile/avatar', { data }),
   clearAvatar: () => authedJson<ProfileRef>('DELETE', '/user/profile/avatar'),
-  list: (id: string, signal?: AbortSignal) => authedJson<ListDetailResponse>('GET', `/user/lists/${encodeURIComponent(id)}`, undefined, signal),
+  list: (id: string, signal?: AbortSignal) => authedJson<ListDetailResponse>('GET', `/user/lists/${seg(id)}`, undefined, signal),
   createList: (body: { name: string; note?: string; visibility: 'private' | 'public' }) => authedJson<ListDetailResponse>('POST', '/user/lists', body),
-  updateList: (id: string, body: { name?: string; note?: string; visibility?: 'private' | 'public' }) => authedJson<ListDetailResponse>('PATCH', `/user/lists/${encodeURIComponent(id)}`, body),
-  deleteList: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${encodeURIComponent(id)}`),
-  createTag: (id: string, body: { name: string; color?: string; icon?: string; note?: string }) => authedJson<ListTagDetail>('POST', `/user/lists/${encodeURIComponent(id)}/tags`, body),
-  updateTag: (id: string, tagId: string, body: { name?: string; color?: string; icon?: string; note?: string }) => authedJson<ListTagDetail>('PATCH', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`, body),
-  deleteTag: (id: string, tagId: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`),
-  setTagMembers: (id: string, tagId: string, body: { add?: string[]; remove?: string[] }) => authedJson<ListTagDetail>('PUT', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/members`, body),
+  updateList: (id: string, body: { name?: string; note?: string; visibility?: 'private' | 'public' }) => authedJson<ListDetailResponse>('PATCH', `/user/lists/${seg(id)}`, body),
+  deleteList: (id: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${seg(id)}`),
+  createTag: (id: string, body: { name: string; color?: string; icon?: string; note?: string }) => authedJson<ListTagDetail>('POST', `/user/lists/${seg(id)}/tags`, body),
+  updateTag: (id: string, tagId: string, body: { name?: string; color?: string; icon?: string; note?: string }) => authedJson<ListTagDetail>('PATCH', `/user/lists/${seg(id)}/tags/${seg(tagId)}`, body),
+  deleteTag: (id: string, tagId: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${seg(id)}/tags/${seg(tagId)}`),
+  setTagMembers: (id: string, tagId: string, body: { add?: string[]; remove?: string[] }) => authedJson<ListTagDetail>('PUT', `/user/lists/${seg(id)}/tags/${seg(tagId)}/members`, body),
   // Drag/keyboard reorder: `accountIds` must be a permutation of the tag's
   // current members — the server 400s otherwise (see setMemberOrder).
   setMemberOrder: (id: string, tagId: string, accountIds: string[]) =>
-    authedJson<ListTagDetail>('PUT', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/member-order`, { accountIds }),
+    authedJson<ListTagDetail>('PUT', `/user/lists/${seg(id)}/tags/${seg(tagId)}/member-order`, { accountIds }),
   // A list tag's own aggregate view (combined balances/history/activity of all
   // its members) — same TagDetail shape the system /tag/:id page uses. Reaches
   // the authed surface or the public one depending on listId (see
@@ -475,9 +516,9 @@ export const userApi = {
   // default steps the pager by one number and fills the page from the other,
   // which repeats rows and hides the › arrow for signed-in readers alone.
   accountActivity: (address: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
-    authedJson<ActivityRow[]>('GET', withQuery(`/user/address/${encodeURIComponent(address)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
+    authedJson<ActivityRow[]>('GET', withQuery(`/user/address/${seg(address)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
   tagActivity: (tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
-    authedJson<ActivityRow[]>('GET', withQuery(`/user/tag/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
+    authedJson<ActivityRow[]>('GET', withQuery(`/user/tag/${seg(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
   listTagMembers: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<AccountsPage>('GET', listTagPath(listId, tagId, '/members'), undefined, signal),
   listTagSummary: (listId: string, tagId: string, signal?: AbortSignal) =>
@@ -504,12 +545,12 @@ export const userApi = {
     authedJson<ListCount>('GET', withQuery(listTagPath(listId, tagId, '/list-count'), { ...query }), undefined, signal),
   listTagValueEvents: (listId: string, tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
     authedJson<ValueEvent[]>('GET', withQuery(listTagPath(listId, tagId, '/value-events'), { from, to }), undefined, signal),
-  invite: (id: string, address: string) => authedJson<{ ok: true }>('POST', `/user/lists/${encodeURIComponent(id)}/invites`, { address }),
-  revokeInvite: (id: string, address: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${encodeURIComponent(id)}/invites/${encodeURIComponent(address)}`),
+  invite: (id: string, address: string) => authedJson<{ ok: true }>('POST', `/user/lists/${seg(id)}/invites`, { address }),
+  revokeInvite: (id: string, address: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${seg(id)}/invites/${seg(address)}`),
   invites: (signal?: AbortSignal) => authedJson<ListSummaryRef[]>('GET', '/user/invites', undefined, signal),
-  respondInvite: (listId: string, accept: boolean) => authedJson<{ ok: true }>('POST', `/user/invites/${encodeURIComponent(listId)}/${accept ? 'accept' : 'decline'}`),
+  respondInvite: (listId: string, accept: boolean) => authedJson<{ ok: true }>('POST', `/user/invites/${seg(listId)}/${accept ? 'accept' : 'decline'}`),
   subscribe: (listId: string) => authedJson<{ ok: true }>('POST', '/user/subscriptions', { listId }),
-  unsubscribe: (listId: string) => authedJson<{ ok: true }>('DELETE', `/user/subscriptions/${encodeURIComponent(listId)}`),
+  unsubscribe: (listId: string) => authedJson<{ ok: true }>('DELETE', `/user/subscriptions/${seg(listId)}`),
   setOrder: (listIds: string[]) => authedJson<{ order: string[] }>('PUT', '/user/list-order', { listIds }),
   // Same shape as api.accounts, folded under the caller's own tags too — see
   // useAccounts (useExplorerData.ts) for when this is used instead of the
@@ -534,19 +575,19 @@ export const userApi = {
   createTelegramLink: () =>
     authedJson<NotificationTelegramLink>('POST', '/user/notifications/channels/telegram/link'),
   telegramLinkStatus: (linkId: string, signal?: AbortSignal) =>
-    authedJson<{ status: NotificationLinkStatus }>('GET', `/user/notifications/channels/telegram/link/${encodeURIComponent(linkId)}`, undefined, signal),
+    authedJson<{ status: NotificationLinkStatus }>('GET', `/user/notifications/channels/telegram/link/${seg(linkId, SEGMENT.uuid)}`, undefined, signal),
   deleteNotificationChannel: (id: string) =>
-    authedJson<{ ok: true }>('DELETE', `/user/notifications/channels/${encodeURIComponent(id)}`),
+    authedJson<{ ok: true }>('DELETE', `/user/notifications/channels/${seg(id)}`),
   // Dispatches a real message through the real renderer, so a green reply means
   // the whole path works — not merely that the channel row exists.
   testNotificationChannel: (id: string) =>
-    authedJson<{ ok: true }>('POST', `/user/notifications/channels/${encodeURIComponent(id)}/test`),
+    authedJson<{ ok: true }>('POST', `/user/notifications/channels/${seg(id)}/test`),
   createNotificationRule: (body: NotificationRuleInput) =>
     authedJson<NotificationRule>('POST', '/user/notifications/rules', body),
   updateNotificationRule: (id: string, body: NotificationRulePatch) =>
-    authedJson<NotificationRule>('PATCH', `/user/notifications/rules/${encodeURIComponent(id)}`, body),
+    authedJson<NotificationRule>('PATCH', `/user/notifications/rules/${seg(id)}`, body),
   deleteNotificationRule: (id: string) =>
-    authedJson<{ ok: true }>('DELETE', `/user/notifications/rules/${encodeURIComponent(id)}`),
+    authedJson<{ ok: true }>('DELETE', `/user/notifications/rules/${seg(id)}`),
   notificationInbox: (limit = 50, offset = 0, signal?: AbortSignal) =>
     authedJson<NotificationInboxPage>('GET', withQuery('/user/notifications/inbox', { limit, offset }), undefined, signal),
   // No `ids` marks everything read — the inbox's own "you have seen these" call.
@@ -562,8 +603,8 @@ export const userApi = {
 // One read per scope: an account, a system tag, or a list tag (authed for an
 // owner/subscriber, anonymous for a public list's tag — see listTagPath).
 function scopedJson<T>(scope: PositionScope, suffix: string, query: Record<string, QueryValue> = {}, signal?: AbortSignal): Promise<T> {
-  if (scope.kind === 'account') return getJson<T>(withQuery(`/explorer/address/${encodeURIComponent(scope.address)}${suffix}`, query), signal)
-  if (scope.kind === 'tag') return getJson<T>(withQuery(`/explorer/tag/${encodeURIComponent(scope.tagId)}${suffix}`, query), signal)
+  if (scope.kind === 'account') return getJson<T>(withQuery(`/explorer/address/${seg(scope.address)}${suffix}`, query), signal)
+  if (scope.kind === 'tag') return getJson<T>(withQuery(`/explorer/tag/${seg(scope.tagId)}${suffix}`, query), signal)
   return authedJson<T>('GET', withQuery(listTagPath(scope.listId, scope.tagId, suffix), query), undefined, signal)
 }
 
@@ -579,17 +620,17 @@ export const positionsApi = {
   // Money-market history is per account only: markets are isolated and a tag's
   // members are never blended, so a tag reads each member's own.
   moneyMarketHistory: (address: string, signal?: AbortSignal) =>
-    getJson<MoneyMarketHistory>(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, signal),
+    getJson<MoneyMarketHistory>(`/explorer/address/${seg(address)}/money-market-history`, signal),
   accountJuicer: (address: string, signal?: AbortSignal) =>
-    getJson<AccountJuicer>(`/explorer/address/${encodeURIComponent(address)}/juicer`, signal),
+    getJson<AccountJuicer>(`/explorer/address/${seg(address)}/juicer`, signal),
   accountBil: (address: string, signal?: AbortSignal) =>
-    getJson<AccountBil>(`/explorer/address/${encodeURIComponent(address)}/bil`, signal),
+    getJson<AccountBil>(`/explorer/address/${seg(address)}/bil`, signal),
   accountBonds: (address: string, signal?: AbortSignal) =>
-    getJson<AccountBonds>(`/explorer/address/${encodeURIComponent(address)}/bonds`, signal),
+    getJson<AccountBonds>(`/explorer/address/${seg(address)}/bonds`, signal),
   moneyMarketEarned: (address: string, signal?: AbortSignal) =>
-    getJson<MoneyMarketEarned>(`/explorer/address/${encodeURIComponent(address)}/money-market-earned`, signal),
+    getJson<MoneyMarketEarned>(`/explorer/address/${seg(address)}/money-market-earned`, signal),
   moneyMarketHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
-    getJson<MoneyMarketHistory>(withQuery(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, { fromBlock, toBlock }), signal),
+    getJson<MoneyMarketHistory>(withQuery(`/explorer/address/${seg(address)}/money-market-history`, { fromBlock, toBlock }), signal),
 }
 
 // Governance and forum reads (api/src/routes/governance.ts). Forum responses carry the
@@ -604,7 +645,7 @@ const gen = () => forumGeneration ?? undefined
 export const govApi = {
   clock: (signal?: AbortSignal) => getJson<GovClock>('/explorer/governance/clock', signal),
   referendumVotes: (pallet: 'opengov' | 'democracy', index: number, opts: { sort: 'power' | 'time'; side: 'all' | 'aye' | 'nay' | 'abstain'; q?: string; offset: number; limit: number }, signal?: AbortSignal) =>
-    getJson<ReferendumVotesPage>(withQuery(`/explorer/referendum/${pallet}/${index}/votes`, { sort: opts.sort, side: opts.side === 'all' ? undefined : opts.side, q: opts.q, offset: opts.offset || undefined, limit: opts.limit }), signal),
+    getJson<ReferendumVotesPage>(withQuery(`/explorer/referendum/${seg(pallet)}/${index}/votes`, { sort: opts.sort, side: opts.side === 'all' ? undefined : opts.side, q: opts.q, offset: opts.offset || undefined, limit: opts.limit }), signal),
   tracks: (signal?: AbortSignal) => getJson<GovernanceTracksResponse>('/explorer/governance/tracks', signal),
   // The conviction table alone; an api without the slim route answers 404, and the
   // full tracks read carries the same table.
@@ -615,10 +656,10 @@ export const govApi = {
         throw e
       }),
   tallyHistory: (pallet: 'opengov' | 'democracy', index: number, signal?: AbortSignal) =>
-    getJson<TallyHistory>(`/explorer/referendum/${pallet}/${index}/tally-history`, signal),
+    getJson<TallyHistory>(`/explorer/referendum/${seg(pallet)}/${index}/tally-history`, signal),
   calendar: (from: string, to: string, signal?: AbortSignal) => getJson<GovernanceCalendar>(withQuery('/explorer/governance/calendar', { from, to }), signal),
-  tagGovernance: (tagId: string, signal?: AbortSignal) => getJson<MembersGovernance>(`/explorer/tag/${encodeURIComponent(tagId)}/governance`, signal),
-  accountGovernance: (address: string, signal?: AbortSignal) => getJson<AccountGovernance>(`/explorer/address/${encodeURIComponent(address)}/governance`, signal),
+  tagGovernance: (tagId: string, signal?: AbortSignal) => getJson<MembersGovernance>(`/explorer/tag/${seg(tagId)}/governance`, signal),
+  accountGovernance: (address: string, signal?: AbortSignal) => getJson<AccountGovernance>(`/explorer/address/${seg(address)}/governance`, signal),
   stats: (signal?: AbortSignal) => getJson<GovernanceStats>('/explorer/governance/stats', signal),
   // POST: a reader's account set never goes into a URL (access logs keep URLs beside
   // the IP). An api without the POST route answers 404/405, and only then is the
@@ -638,34 +679,34 @@ export const govApi = {
   },
   discussions: (opts: { sort?: DiscussionSort; q?: string; kind?: ListedPostKind; cursor?: string | null; limit?: number }, signal?: AbortSignal) =>
     getJson<DiscussionsPage>(withQuery('/explorer/forum/discussions', { sort: opts.sort, q: opts.q, kind: opts.kind === 'discussion' ? undefined : opts.kind, cursor: opts.cursor ?? undefined, limit: opts.limit, g: gen() }), signal),
-  post: (postId: string, signal?: AbortSignal) => getJson<ForumPost>(withQuery(`/explorer/forum/post/${encodeURIComponent(postId)}`, { g: gen() }), signal),
+  post: (postId: string, signal?: AbortSignal) => getJson<ForumPost>(withQuery(`/explorer/forum/post/${seg(postId)}`, { g: gen() }), signal),
   thread: (threadKey: string, opts: { sort?: ThreadSort; filter?: ThreadFilter; cursor?: string | null; limit?: number }, signal?: AbortSignal) =>
-    getJson<ForumThread>(withQuery(`/explorer/forum/thread/${encodeURIComponent(threadKey)}`, { sort: opts.sort, filter: opts.filter ?? undefined, cursor: opts.cursor ?? undefined, limit: opts.limit, g: gen() }), signal),
-  revisions: (targetId: string, signal?: AbortSignal) => getJson<ForumRevisions>(withQuery(`/explorer/forum/revisions/${encodeURIComponent(targetId)}`, { g: gen() }), signal),
+    getJson<ForumThread>(withQuery(`/explorer/forum/thread/${seg(threadKey)}`, { sort: opts.sort, filter: opts.filter ?? undefined, cursor: opts.cursor ?? undefined, limit: opts.limit, g: gen() }), signal),
+  revisions: (targetId: string, signal?: AbortSignal) => getJson<ForumRevisions>(withQuery(`/explorer/forum/revisions/${seg(targetId)}`, { g: gen() }), signal),
   moderationLog: (cursor: string | null, signal?: AbortSignal) =>
     getJson<ModerationLogPage>(withQuery('/explorer/forum/moderation-log', { cursor: cursor ?? undefined, limit: 50, g: gen() }), signal),
   accountForumCount: (address: string, signal?: AbortSignal) =>
-    getJson<AccountForumPage>(withQuery(`/explorer/address/${encodeURIComponent(address)}/forum`, { limit: 1 }), signal),
+    getJson<AccountForumPage>(withQuery(`/explorer/address/${seg(address)}/forum`, { limit: 1 }), signal),
   accountForum: (address: string, cursor?: string | null, signal?: AbortSignal) =>
-    getJson<AccountForumPage>(withQuery(`/explorer/address/${encodeURIComponent(address)}/forum`, { cursor: cursor ?? undefined, limit: 25 }), signal),
+    getJson<AccountForumPage>(withQuery(`/explorer/address/${seg(address)}/forum`, { cursor: cursor ?? undefined, limit: 25 }), signal),
 }
 
 // The forum's writes (api/src/routes/forum.ts): bearer session, never cached. Every
 // write returns the forum generation it produced, which the reads above then carry.
 export const forumApi = {
   me: (signal?: AbortSignal) => authedJson<ForumMe>('GET', '/user/forum/me', undefined, signal),
-  permissions: (postId: string, signal?: AbortSignal) => authedJson<ForumPermissions>('GET', `/user/forum/permissions/${encodeURIComponent(postId)}`, undefined, signal),
+  permissions: (postId: string, signal?: AbortSignal) => authedJson<ForumPermissions>('GET', `/user/forum/permissions/${seg(postId)}`, undefined, signal),
   createDiscussion: (body: { title: string; body: string; labels: string[] }) => authedJson<ForumPostWrite>('POST', '/user/forum/discussions', body),
-  editPost: (postId: string, body: { title?: string; body?: string; tldr?: string; labels?: string[] }) => authedJson<ForumPostWrite>('PATCH', `/user/forum/posts/${encodeURIComponent(postId)}`, body),
-  deletePost: (postId: string) => authedJson<{ ok: true; generation: string }>('DELETE', `/user/forum/posts/${encodeURIComponent(postId)}`),
-  addUpdate: (postId: string, body: string) => authedJson<ForumCommentWrite>('POST', `/user/forum/posts/${encodeURIComponent(postId)}/updates`, { body }),
+  editPost: (postId: string, body: { title?: string; body?: string; tldr?: string; labels?: string[] }) => authedJson<ForumPostWrite>('PATCH', `/user/forum/posts/${seg(postId)}`, body),
+  deletePost: (postId: string) => authedJson<{ ok: true; generation: string }>('DELETE', `/user/forum/posts/${seg(postId)}`),
+  addUpdate: (postId: string, body: string) => authedJson<ForumCommentWrite>('POST', `/user/forum/posts/${seg(postId)}/updates`, { body }),
   createComment: (body: { threadKey: string; parentId?: string | null; body: string }) => authedJson<ForumCommentWrite>('POST', '/user/forum/comments', body),
-  editComment: (id: string, body: string) => authedJson<ForumCommentWrite>('PATCH', `/user/forum/comments/${encodeURIComponent(id)}`, { body }),
-  deleteComment: (id: string) => authedJson<{ ok: true; generation: string }>('DELETE', `/user/forum/comments/${encodeURIComponent(id)}`),
+  editComment: (id: string, body: string) => authedJson<ForumCommentWrite>('PATCH', `/user/forum/comments/${seg(id)}`, { body }),
+  deleteComment: (id: string) => authedJson<{ ok: true; generation: string }>('DELETE', `/user/forum/comments/${seg(id)}`),
   report: (body: { targetId: string; reason: string; note?: string }) => authedJson<{ ok: true; autoHidden: boolean }>('POST', '/user/forum/reports', body),
   queue: (signal?: AbortSignal) => authedJson<ModerationQueue>('GET', '/user/admin/forum/queue', undefined, signal),
   moderate: (body: { targetId: string; action: string; reasonCode: string }) => authedJson<{ ok: true; generation: string }>('POST', '/user/admin/forum/moderate', body),
-  setReport: (reportId: string, status: 'resolved' | 'dismissed') => authedJson<{ ok: true }>('POST', `/user/admin/forum/reports/${reportId}`, { status }),
+  setReport: (reportId: string, status: 'resolved' | 'dismissed') => authedJson<{ ok: true }>('POST', `/user/admin/forum/reports/${seg(reportId, SEGMENT.hex32)}`, { status }),
   mute: (body: { account: string; until: string | null; reason: string }) => authedJson<{ ok: true }>('POST', '/user/admin/forum/sanctions', body),
 }
 

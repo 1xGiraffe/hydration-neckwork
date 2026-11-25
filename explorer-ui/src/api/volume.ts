@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { getJson, withQuery } from './explorer'
+import { getJson, seg, withQuery } from './explorer'
 import type { AccountRef, AssetRef, ChartWindowPayload } from '../types'
 
 // Trading volume (api routes/volume.ts, services/volumeHistory.ts). Three
@@ -84,7 +84,7 @@ export const volumeApi = {
   pool: (poolId: number, signal?: AbortSignal) => getJson<PoolVolume>(`/explorer/pool/${poolId}/volume`, signal),
   poolWindow: (poolId: number, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
     getJson<ChartWindowPayload>(withQuery(`/explorer/pool/${poolId}/volume`, win(fromTs, toTs, points)), signal),
-  v3Pool: (address: string, signal?: AbortSignal) => getJson<PoolVolume>(`/explorer/pool/v3/${address}/volume`, signal),
+  v3Pool: (address: string, signal?: AbortSignal) => getJson<PoolVolume>(`/explorer/pool/v3/${seg(address)}/volume`, signal),
 }
 
 // The models publish about once an hour, so a few minutes of client reuse costs nothing.

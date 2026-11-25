@@ -1,5 +1,5 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
-import { getJson, withQuery } from './explorer'
+import { SEGMENT, getJson, seg, withQuery } from './explorer'
 import { priceHeadTag } from '../live'
 import type { AccountRef, AssetRef } from '../types'
 
@@ -142,7 +142,7 @@ export interface OracleFeedDetail {
 }
 
 // The API's id has a slash in a DIA key ("DOT/USD"); encode it as one segment.
-const feedPath = (feed: string) => `/explorer/oracle/${encodeURIComponent(feed)}`
+const feedPath = (feed: string) => `/explorer/oracle/${seg(feed, SEGMENT.oracleFeed)}`
 
 export const oraclesApi = {
   // `pg` — the pushed price generation: the market-price column follows it.
