@@ -1767,16 +1767,47 @@ export function ParamsTable({ args }: { args: Record<string, unknown> }) {
 }
 
 /* ============ JSON viewer ============ */
+// The values shown here are whatever a call's arguments or a contract's ABI hold,
+// so the view is built from React elements over a tokenized string — never markup.
+// An object key (with its colon) and every bracket are coloured; values, commas and
+// whitespace stay plain text. A string is one token, so a bracket or `":` inside
+// one is never coloured.
+export interface JsonToken { cls: 'key' | 'punc' | null; text: string }
+export function jsonTokens(json: string): JsonToken[] {
+  const out: JsonToken[] = []
+  const plain = (text: string) => {
+    const last = out[out.length - 1]
+    if (last && last.cls === null) last.text += text
+    else out.push({ cls: null, text })
+  }
+  let i = 0
+  while (i < json.length) {
+    const ch = json[i]
+    if (ch === '"') {
+      let j = i + 1
+      while (j < json.length && json[j] !== '"') j += json[j] === '\\' ? 2 : 1
+      const str = json.slice(i, j + 1)
+      if (json[j + 1] === ':') {
+        out.push({ cls: 'key', text: str }, { cls: 'punc', text: ':' })
+        i = j + 2
+      } else {
+        plain(str)
+        i = j + 1
+      }
+    } else if (ch === '{' || ch === '}' || ch === '[' || ch === ']') {
+      out.push({ cls: 'punc', text: ch })
+      i++
+    } else {
+      plain(ch)
+      i++
+    }
+  }
+  return out
+}
 export function JsonView({ value }: { value: unknown }) {
   let json: string
   try { json = JSON.stringify(value, null, 2) } catch { json = String(value) }
-  const html = (json ?? 'null')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"([^"]+)":/g, '<span class="key">"$1"</span><span class="punc">:</span>')
-    .replace(/: "([^"]*)"/g, ': <span class="str">"$1"</span>')
-    .replace(/: (\d[\d.]*)/g, ': <span class="numb">$1</span>')
-    .replace(/[{}[\]]/g, m => `<span class="punc">${m}</span>`)
-  return <div className="json" dangerouslySetInnerHTML={{ __html: html }} />
+  return <div className="json">{jsonTokens(json ?? 'null').map((t, i) => t.cls ? <span key={i} className={t.cls}>{t.text}</span> : t.text)}</div>
 }
 
 /* ============ layout helpers ============ */

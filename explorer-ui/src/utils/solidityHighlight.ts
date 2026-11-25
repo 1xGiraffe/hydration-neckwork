@@ -2,8 +2,8 @@
 //
 // Hand-rolled for the same reason JsonView is: the palette has to be the page's
 // own tokens, and a highlighting library would ship a theme we would then have to
-// override anyway (plus a chunk, for one view). Unlike JsonView this does NOT
-// regex-replace into HTML — a `//` inside a string literal or a quote inside a
+// override anyway (plus a chunk, for one view). Like JsonView it never
+// regex-replaces into HTML — a `//` inside a string literal or a quote inside a
 // comment makes that approach lose text — it is one left-to-right pass emitting
 // tokens the component renders as spans, so the source is reproduced exactly.
 
