@@ -73,6 +73,11 @@ export function archiveUrl(url: string): string | null {
     target = new URL(href)
   } catch { return null }
   if (target.origin !== 'https://web.archive.org' || !target.pathname.startsWith('/web/20000101000000id_/') || target.href !== href) return null
+  // An encoded traversal (`..%2F`) survives normalisation; refuse it in case the archive
+  // decodes before routing.
+  let decoded: string
+  try { decoded = decodeURIComponent(target.pathname) } catch { return null }
+  if (/(^|[/\\])\.\.([/\\]|$)/.test(decoded)) return null
   return target.href
 }
 

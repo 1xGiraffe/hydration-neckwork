@@ -430,10 +430,18 @@ export function imageSourcesIn(body: string): string[] {
   return out
 }
 
+/**
+ * How much of a body the image scan reads. The linear scan keeps per-character lookup
+ * tables (~25 bytes a character), so an unbounded body would cost unbounded memory;
+ * real imported bodies are far shorter, and images past this point are not re-hosted.
+ */
+export const IMAGE_SCAN_MAX_CHARS = 1_000_000
+
 /** Every http(s) image URL an imported body references (markdown images and <img src>). */
 export function imageUrlsIn(body: string): string[] {
   const urls = new Set<string>()
-  for (const u of imageSourcesIn(body)) {
+  const scanned = body.length > IMAGE_SCAN_MAX_CHARS ? body.slice(0, IMAGE_SCAN_MAX_CHARS) : body
+  for (const u of imageSourcesIn(scanned)) {
     if (!u) continue
     const v = u.replace(/&amp;/g, '&').trim()
     if (/^https?:\/\//i.test(v) && v.length <= 2048) urls.add(v)

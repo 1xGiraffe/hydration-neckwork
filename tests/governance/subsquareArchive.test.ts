@@ -118,7 +118,9 @@ describe('the archive fallback', () => {
     expect(archiveUrl('https://attacker.example/%2e%2e/%2e%2e/%2E%2e/save/https://victim.example/')).toBe(`${prefix}https://attacker.example/save/https://victim.example/`)
     expect(archiveUrl('https://attacker.example/a/.%2e/..\\..\\save/x')).toBe(`${prefix}https://attacker.example/save/x`)
     // What would still be resolved against the capture path is refused, never rewritten.
-    for (const url of ['https://../save/https://victim.example/', 'https://%2e%2e/save/x', 'foo:../../../save/https://victim.example/', 'not a url']) {
+    for (const url of ['https://../save/https://victim.example/', 'https://%2e%2e/save/x', 'foo:../../../save/https://victim.example/', 'not a url',
+      // Encoded separators survive normalisation; refused in case the archive decodes before routing.
+      'https://ex.example/..%2F..%2F..%2F..%2Fsave/https://victim.example/', 'https://ex.example/a/..%5C..%5Csave/x', 'https://ex.example/%2e%2e%2fsave']) {
       expect(archiveUrl(url), url).toBeNull()
     }
   })

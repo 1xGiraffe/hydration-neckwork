@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { imageSourcesIn, imageUrlsIn } from '../../src/governance/subsquare/rows.js'
+import { IMAGE_SCAN_MAX_CHARS, imageSourcesIn, imageUrlsIn } from '../../src/governance/subsquare/rows.js'
 
 // The image pass reads every image URL an imported body references. The scan is linear:
 // it must find exactly what the two regexes below find (the reference), and finish in
@@ -46,6 +46,12 @@ const NORMAL_BODIES = [
 ]
 
 describe('image URLs in bodies', () => {
+  it('reads at most IMAGE_SCAN_MAX_CHARS of a body', () => {
+    const pad = 'x'.repeat(IMAGE_SCAN_MAX_CHARS - 40)
+    expect(imageUrlsIn(`${pad}![](https://a.example/in.png)`)).toEqual(['https://a.example/in.png'])
+    expect(imageUrlsIn(`${pad}${'y'.repeat(40)}![](https://a.example/out.png)`)).toEqual([])
+  })
+
   it('finds what the reference regexes find, on ordinary bodies', () => {
     for (const body of NORMAL_BODIES) {
       expect(imageSourcesIn(body), body).toEqual(referenceSources(body))
