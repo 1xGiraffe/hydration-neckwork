@@ -39,7 +39,10 @@ describe('page URLs sent to the head renderer', () => {
     // A variable in proxy_pass's URI is sent exactly as it expands, and $uri is
     // decoded; a rewrite under a bare proxy_pass is escaped again on the way out.
     const body = code(seoPage)
-    expect(body).toMatch(/^rewrite \^ \/seo\/page\$uri break;$/m)
+    expect(body).toMatch(/^rewrite \^ \/seo\/page\$uri\? break;$/m)
+    // `break` ends the rewrite module: the bundle id must be set before it.
+    expect(body.indexOf("include /etc/nginx/bundle_id.conf;")).toBeGreaterThanOrEqual(0)
+    expect(body.indexOf("include /etc/nginx/bundle_id.conf;")).toBeLessThan(body.indexOf("rewrite ^"))
     expect(body).toMatch(/^proxy_pass http:\/\/\$api_upstream;$/m)
     expect(body).not.toMatch(/proxy_pass[^;]*\$uri/)
   })
