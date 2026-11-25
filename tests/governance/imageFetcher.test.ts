@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { fetcherHandler, remoteSafeFetch } from '../../src/governance/subsquare/imageFetcher.js'
@@ -57,6 +57,15 @@ describe('image fetcher', () => {
     expect((await fetch(`${base}/fetch`, { method: 'POST', body: 'x'.repeat(20_000) })).status).toBe(413)
   })
 
+  it('never compresses its answer, whatever the client accepts', async () => {
+    const ok = await start(fetcherHandler(async () => ({ bytes: Buffer.alloc(4096), contentType: 'image/png', finalUrl: '' })))
+    for (const url of ['https://a.example/x', 'http://db:8123/']) {
+      const res = await fetch(`${ok}/fetch`, { method: 'POST', headers: { 'Accept-Encoding': 'gzip, br, deflate' }, body: JSON.stringify({ url }) })
+      expect(res.headers.get('content-encoding')).toBeNull()
+      await res.arrayBuffer()
+    }
+  })
+
   it('reports an unreachable fetcher as a transient `fetcher` failure', async () => {
     const err = await remoteSafeFetch('http://127.0.0.1:9')('https://a.example/x', { timeoutMs: 500 }).then(() => null, e => e)
     expect(err).toBeInstanceOf(SafeFetchError)
@@ -73,5 +82,59 @@ describe('the image pass with an unreachable fetcher', () => {
       archiveThrottle: fn => fn(),
     })
     expect(r).toMatchObject({ kind: 'deferred', reason: 'fetcher-unavailable', url: null, media: null })
+  })
+})
+
+describe('the sync reading a fetcher answer', () => {
+  /** A fake fetcher: answers every request with `status` and `headers`, then writes 64 KiB chunks until the client hangs up. */
+  async function endless(status: number, headers: Record<string, string> = {}) {
+    const state = { acceptEncoding: undefined as string | undefined, sent: 0, closed: false }
+    const base = await start(((req: IncomingMessage, res: ServerResponse) => {
+      state.acceptEncoding = req.headers['accept-encoding']
+      req.resume()
+      res.writeHead(status, headers)
+      const chunk = Buffer.alloc(64 * 1024)
+      const pump = () => {
+        while (!res.destroyed && state.sent < 64 * 1024 * 1024) {
+          state.sent += chunk.length
+          if (!res.write(chunk)) { res.once('drain', pump); return }
+        }
+      }
+      res.on('close', () => { state.closed = true })
+      pump()
+    }))
+    return { base, state }
+  }
+  const settle = () => new Promise(r => setTimeout(r, 50))
+
+  it('asks for an uncompressed answer and refuses a compressed one before reading it', async () => {
+    const f = await endless(200, { 'Content-Encoding': 'gzip' })
+    const err = await remoteSafeFetch(f.base)('https://a.example/x', { maxBytes: 1000, timeoutMs: 5000 }).then(() => null, e => e)
+    expect(err).toBeInstanceOf(SafeFetchError)
+    expect((err as SafeFetchError).reason).toBe('fetcher')
+    expect(f.state.acceptEncoding).toBe('identity')
+  })
+
+  it('caps the image body while it streams', async () => {
+    const f = await endless(200)
+    const err = await remoteSafeFetch(f.base)('https://a.example/x', { maxBytes: 1000, timeoutMs: 5000 }).then(() => null, e => e)
+    expect((err as SafeFetchError).reason).toBe('too-large')
+    await settle()
+    expect(f.state.closed).toBe(true)
+    expect(f.state.sent).toBeLessThan(64 * 1024 * 1024)
+  })
+
+  it('refuses a declared length over the cap before reading', async () => {
+    const base = await start((_req, res) => { res.writeHead(200, { 'Content-Length': '99999999' }); res.write(Buffer.alloc(10)) })
+    const err = await remoteSafeFetch(base)('https://a.example/x', { maxBytes: 1000, timeoutMs: 5000 }).then(() => null, e => e)
+    expect((err as SafeFetchError).reason).toBe('too-large')
+  })
+
+  it('reads at most 1 KiB of a refusal', async () => {
+    const f = await endless(422, { 'Content-Type': 'application/json' })
+    const err = await remoteSafeFetch(f.base)('https://a.example/x', { maxBytes: 1000, timeoutMs: 5000 }).then(() => null, e => e)
+    expect((err as SafeFetchError).reason).toBe('fetch')
+    await settle()
+    expect(f.state.closed).toBe(true)
   })
 })

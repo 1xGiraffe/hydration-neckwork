@@ -12,11 +12,18 @@ import { SAFE_FETCH_MAX_BYTES, SafeFetchError, safeFetch, type SafeFetchOptions,
 // or the guard's refusal reason, back. A URL that slipped past the guard would find
 // nothing internal to reach. Only url and the three bounds cross the wire; everything
 // else (resolver, request hooks) stays this process's own.
+//
+// The sync trusts the fetcher no further than the URLs it fetches: it asks for an
+// uncompressed answer, refuses any Content-Encoding (a compressed body would be
+// inflated before any cap could see it), and reads the body with a running cap —
+// maxBytes for an image, 1 KiB for a refusal. The fetcher never compresses.
 
 export const FETCHER_PORT = 8090
 const MAX_REQUEST_BYTES = 16 * 1024
 const MAX_URL_CHARS = 4096
 const MAX_TIMEOUT_MS = 30_000
+/** A refusal is `{"reason": "…"}`; nothing longer is read. */
+const MAX_REFUSAL_BYTES = 1024
 
 type Fetch = (url: string, options?: SafeFetchOptions) => Promise<SafeFetchResult>
 
@@ -64,10 +71,27 @@ export function fetcherHandler(fetchImpl: Fetch = safeFetch) {
   }
 }
 
+/** A response body, or null once it passes `cap` bytes (the rest is cancelled, never read). */
+async function readCapped(res: Response, cap: number): Promise<Buffer | null> {
+  if (!res.body) return Buffer.alloc(0)
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > cap) { await reader.cancel().catch(() => undefined); return null }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks)
+}
+
 /**
  * The sync's side: a drop-in for safeFetch that runs it in the fetcher. A refusal
  * comes back as the same SafeFetchError reason the local guard would give; a fetcher
- * that cannot be reached is `fetcher` (retried like any transient failure).
+ * that cannot be reached, or answers out of protocol (compressed, cut off), is
+ * `fetcher` (retried like any transient failure).
  */
 export function remoteSafeFetch(baseUrl: string, fetchImpl: typeof fetch = fetch): Fetch {
   const endpoint = baseUrl.replace(/\/+$/, '') + '/fetch'
@@ -76,19 +100,34 @@ export function remoteSafeFetch(baseUrl: string, fetchImpl: typeof fetch = fetch
     let res: Response
     try {
       res = await fetchImpl(endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept-Encoding': 'identity' }, body,
         signal: AbortSignal.timeout((options.timeoutMs ?? 10_000) + 5_000),
       })
     } catch (err) {
       throw new SafeFetchError('fetcher', err instanceof Error ? err.message : String(err))
     }
+    const encoding = (res.headers.get('content-encoding') ?? '').trim().toLowerCase()
+    if (encoding !== '' && encoding !== 'identity') {
+      await res.body?.cancel().catch(() => undefined)
+      throw new SafeFetchError('fetcher', `fetcher sent Content-Encoding ${encoding.slice(0, 40)}`)
+    }
     if (res.status === 422) {
-      const j = await res.json().catch(() => null) as { reason?: unknown } | null
+      let j: { reason?: unknown } | null = null
+      try {
+        const text = await readCapped(res, MAX_REFUSAL_BYTES)
+        j = text ? JSON.parse(text.toString('utf8')) : null
+      } catch { j = null }
       throw new SafeFetchError(typeof j?.reason === 'string' && /^[a-z0-9:-]{1,40}$/.test(j.reason) ? j.reason : 'fetch')
     }
     if (res.status !== 200) { await res.body?.cancel().catch(() => undefined); throw new SafeFetchError('fetcher', `fetcher HTTP ${res.status}`) }
-    const bytes = Buffer.from(await res.arrayBuffer())
-    if (bytes.length > (options.maxBytes ?? SAFE_FETCH_MAX_BYTES)) throw new SafeFetchError('too-large')
+    const maxBytes = options.maxBytes ?? SAFE_FETCH_MAX_BYTES
+    const declared = Number(res.headers.get('content-length') ?? NaN)
+    if (Number.isFinite(declared) && declared > maxBytes) { await res.body?.cancel().catch(() => undefined); throw new SafeFetchError('too-large') }
+    let bytes: Buffer | null
+    try { bytes = await readCapped(res, maxBytes) } catch (err) {
+      throw new SafeFetchError('fetcher', err instanceof Error ? err.message : String(err))
+    }
+    if (!bytes) throw new SafeFetchError('too-large')
     const dec = (h: string | null) => { try { return decodeURIComponent(h ?? '') } catch { return '' } }
     return { bytes, contentType: dec(res.headers.get('x-content-type')), finalUrl: dec(res.headers.get('x-final-url')) || url }
   }
