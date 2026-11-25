@@ -1,0 +1,63 @@
+<clickhouse>
+    <!--
+      What the `default` user may do: everything EXCEPT reach outside the
+      server or stop it.
+
+      Every service (api, api-public, api-data, api-mcp, derivations, the
+      indexers, the backups, schema-bootstrap) and operator access provisioning
+      connect as `default`. Without a grants list an XML user holds ALL, which
+      includes the table functions and engines that read or write outside the database
+      (file, url, s3, remote, mysql, postgresql, jdbc, odbc, hdfs, kafka, ...),
+      BACKUP TO a disk or bucket, and every SYSTEM command (SHUTDOWN, KILL,
+      STOP MERGES, DROP caches). A leaked password or an injected query should
+      not turn into file reads, outbound requests or a stopped server.
+
+      Measured before removing them (a week of system.query_log, 33.7M
+      queries): used_table_functions empty for every query; no query of kind
+      System, Backup or Restore; no BACKUP or SOURCES privilege in
+      used_privileges. The backups export client side
+      (SELECT ... FORMAT Parquet), the schema has no URL/File/Kafka engines and
+      no dictionaries. The only SYSTEM commands anyone runs are by hand:
+      SYSTEM RELOAD CONFIG (the users.d reload procedure in AGENTS.md) and
+      SYSTEM FLUSH LOGS (before reading query_log), so those two stay.
+
+      Kept on purpose: all DDL and DML on every database, KILL QUERY, OPTIMIZE,
+      and access management WITH GRANT OPTION, which access provisioning needs
+      for CREATE USER / ROLE / SETTINGS PROFILE / QUOTA and GRANT/REVOKE.
+
+      How this merges with the entrypoint: the official image rewrites
+      users.d/default-user.xml on every start with <access_management>1. A
+      <grants> list cannot coexist with that flag (the user then fails to load:
+      "Any other access control settings can't be specified with grants"), so
+      it is removed here and access management comes from GRANT ALL instead.
+      This file sorts after default-user.xml, so it is merged on top of it on
+      every start. With a <grants> list the access_management flag no longer
+      gates NAMED COLLECTION ADMIN, so that is revoked explicitly (the
+      access_management flag alone never granted it).
+
+      Sources in 26.x are enforced as READ / WRITE ON <source>; REVOKE SOURCES
+      removes those. SHOW GRANTS still lists the legacy global names (FILE, URL,
+      S3, ...) after the revoke; they no longer authorize anything: file(),
+      url(), s3(), remote(), mysql(), postgresql(), hdfs(), ENGINE = URL and
+      INSERT INTO FUNCTION all answer ACCESS_DENIED "READ ON FILE" / "WRITE ON
+      REMOTE".
+
+      Reloads without a restart: copy into the container's
+      /etc/clickhouse-server/users.d/ and run SYSTEM RELOAD CONFIG; verify on a
+      NEW connection with SHOW GRANTS FOR default. To undo, delete the file from
+      users.d and reload.
+    -->
+    <users>
+        <default>
+            <access_management remove="remove"/>
+            <grants>
+                <query>GRANT ALL ON *.* WITH GRANT OPTION</query>
+                <query>REVOKE SOURCES ON *.*</query>
+                <query>REVOKE BACKUP ON *.*</query>
+                <query>REVOKE NAMED COLLECTION ADMIN ON *</query>
+                <query>REVOKE SYSTEM ON *.*</query>
+                <query>GRANT SYSTEM RELOAD, SYSTEM FLUSH ON *.* WITH GRANT OPTION</query>
+            </grants>
+        </default>
+    </users>
+</clickhouse>
