@@ -39,7 +39,11 @@ export function isLocalNetworkHref(href: string): boolean {
   try { url = new URL(href) } catch { return false }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
   if (url.port !== '') return true
-  const host = url.hostname.toLowerCase().replace(/\.+$/, '')
+  // Trailing dots stripped by a loop: /\.+$/ rescans every run of dots that is not final.
+  let host = url.hostname.toLowerCase()
+  let end = host.length
+  while (end > 0 && host.charCodeAt(end - 1) === 46) end--
+  host = host.slice(0, end)
   if (host === '' || !host.includes('.') && !host.startsWith('[')) return true
   if (host.startsWith('[')) return privateIpv6(host)
   if (privateIpv4(host)) return true

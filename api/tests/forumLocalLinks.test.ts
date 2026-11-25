@@ -13,6 +13,13 @@ describe('the local-network check is one rule in two places', () => {
     expect(api).toBe(ui)
   })
 
+  it('stays linear on a host made of dot runs', () => {
+    const host = 'a' + '.'.repeat(60_000) + 'b'
+    const t0 = performance.now()
+    isLocalNetworkHref(`https://${host}./`)
+    expect(performance.now() - t0).toBeLessThan(200)
+  })
+
   it('flags internal-service style targets and leaves public links alone', () => {
     for (const u of ['http://db:8123/?query=SELECT%201', 'https://10.0.2.1/x.png', 'https://storage:5001/api/v0/version',
       'https://db./x.png', 'http://[::1]/', 'http://169.254.169.254/latest', 'http://nas.local/']) expect(isLocalNetworkHref(u), u).toBe(true)
