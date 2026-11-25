@@ -27,6 +27,7 @@ import { useSession } from '../session'
 import { requestConnect } from '../connectDialog'
 import { useAddressLists, useAddressTaggedIn, useMe } from '../hooks/useUser'
 import { allAssociations, useTagMapVersion } from '../userTags'
+import { UNTRUSTED_REL, untrustedEmailHref, untrustedWebHref, xHandle } from '../utils/untrustedLinks'
 import type { ListSummaryRef } from '../types'
 
 // Radix + the dialog are only needed once the account owner actually opens the
@@ -219,11 +220,20 @@ export function Account({ address }: { address: string }) {
                     ? <span className="badge ok" style={{ marginLeft: 6 }}>Verified</span>
                     : <span className="muted mono" style={{ fontSize: 11, marginLeft: 6 }}>unverified</span>}</>,
                 })
-                if (data.identity?.email) rows.push({ dt: 'Email', dd: <span className="mono"><a href={`mailto:${data.identity.email}`}>{data.identity.email}</a></span> })
-                if (data.identity?.web) rows.push({ dt: 'Website', dd: <span className="mono"><a href={data.identity.web} target="_blank" rel="noopener">{data.identity.web}</a></span> })
+                // Identity fields are whatever the account's owner wrote on chain: each is a
+                // link only when it is a plain address of its kind (untrustedLinks.ts), and
+                // otherwise shown as the text it is.
+                if (data.identity?.email) {
+                  const href = untrustedEmailHref(data.identity.email)
+                  rows.push({ dt: 'Email', dd: <span className="mono">{href ? <a href={href}>{data.identity.email}</a> : data.identity.email}</span> })
+                }
+                if (data.identity?.web) {
+                  const href = untrustedWebHref(data.identity.web)
+                  rows.push({ dt: 'Website', dd: <span className="mono">{href ? <a href={href} target="_blank" rel={UNTRUSTED_REL}>{data.identity.web}</a> : data.identity.web}</span> })
+                }
                 if (data.identity?.twitter) {
-                  const handle = data.identity.twitter.replace(/^@/, '')
-                  rows.push({ dt: 'X', dd: <span className="mono"><a href={`https://x.com/${handle}`} target="_blank" rel="noopener">@{handle}</a></span> })
+                  const handle = xHandle(data.identity.twitter)
+                  rows.push({ dt: 'X', dd: <span className="mono">{handle ? <a href={`https://x.com/${handle}`} target="_blank" rel={UNTRUSTED_REL}>@{handle}</a> : data.identity.twitter}</span> })
                 }
                 // Above the 720px short-form swap the full string is shown, and a 66-char
                 // account id is wider than the value column until ~830px: the cell breaks

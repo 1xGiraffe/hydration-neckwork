@@ -17,6 +17,7 @@ import { SUBJECT_ROUTES, forumPostPath } from '../governanceSubjects'
 import type { ListedPostKind } from '../governanceTypes'
 import type { ActiveReferendumCard, CollectiveMotionRow, GovernanceReferendumRow, TreasuryTipRow } from '../types'
 import { lazyWithReload } from '../lazyWithReload'
+import { UNTRUSTED_REL, untrustedWebHref } from '../utils/untrustedLinks'
 
 // The Stats view's charts are their own chunk: the other tabs never load them.
 const GovStats = lazyWithReload(() => import('../components/gov/GovStats'))
@@ -159,12 +160,14 @@ function TipsTable() {
 }
 
 function TipRow({ t, now }: { t: TreasuryTipRow; now: number }) {
-  const isUrl = t.reason != null && /^https?:\/\/\S+$/.test(t.reason)
+  // A reason is free text its proposer wrote on chain: a link only when the whole of
+  // it is one http(s) URL outside the reader's own network (untrustedLinks.ts).
+  const href = t.reason != null && /^https?:\/\/\S+$/.test(t.reason) ? untrustedWebHref(t.reason) : null
   return (
     <tr>
       <td data-label="Reason" className="gov-title-cell">
         {t.reason == null ? <Dash />
-          : isUrl ? <a href={t.reason} target="_blank" rel="noopener noreferrer nofollow" className="hash">{t.reason.replace(/^https?:\/\//, '')}</a>
+          : href ? <a href={href} target="_blank" rel={UNTRUSTED_REL} className="hash">{t.reason.replace(/^https?:\/\//, '')}</a>
             : t.reason}
       </td>
       <td data-label="Beneficiary">{t.beneficiary ? <AddrPill account={t.beneficiary} noCopy /> : <Dash />}</td>
