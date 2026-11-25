@@ -55,9 +55,25 @@ type Stored = 'pinned-cid' | 'rehosted' | 'archived'
 /** Statuses by which a host says an image is gone on purpose: no archive copy is sought after them. */
 export const TAKEDOWN_STATUSES = new Set(['fetch:http-404', 'fetch:http-410', 'fetch:http-451'])
 
-/** The archive's raw (`id_`, no replay rewriting) earliest capture of a URL; it redirects to the capture itself. */
-export function archiveUrl(url: string): string {
-  return `https://web.archive.org/web/20000101000000id_/${url}`
+const ARCHIVE_CAPTURE = 'https://web.archive.org/web/20000101000000id_/'
+
+/**
+ * The archive's raw (`id_`, no replay rewriting) earliest capture of a URL; it
+ * redirects to the capture itself. Null when the URL cannot be named that way: the
+ * original is normalised first (`new URL().href` resolves `..` and `%2e%2e` segments),
+ * and the result must parse back unchanged under `/web/20000101000000id_/` on
+ * web.archive.org — a dot segment or an opaque path that survived would otherwise
+ * climb out of the capture path into another of the archive's endpoints.
+ */
+export function archiveUrl(url: string): string | null {
+  let target: URL
+  let href: string
+  try {
+    href = ARCHIVE_CAPTURE + new URL(url).href
+    target = new URL(href)
+  } catch { return null }
+  if (target.origin !== 'https://web.archive.org' || !target.pathname.startsWith('/web/20000101000000id_/') || target.href !== href) return null
+  return target.href
 }
 
 /** The archive answers slowly; its fetch gets longer than a direct one. */
@@ -243,10 +259,11 @@ async function fromArchive(
   url: string, cid: string | null, deps: RehostDeps,
   ok: (media: MediaRow, kind: Stored) => RehostResult, failed: (reason: string) => RehostResult,
 ): Promise<RehostResult | null> {
-  if (!deps.archiveThrottle) return null
+  const capture = archiveUrl(url)
+  if (!deps.archiveThrottle || !capture) return null
   let bytes: Uint8Array
   try {
-    bytes = (await deps.archiveThrottle(() => (deps.fetch ?? safeFetch)(archiveUrl(url), { ...deps.fetchOptions, timeoutMs: ARCHIVE_TIMEOUT_MS }))).bytes
+    bytes = (await deps.archiveThrottle(() => (deps.fetch ?? safeFetch)(capture, { ...deps.fetchOptions, timeoutMs: ARCHIVE_TIMEOUT_MS }))).bytes
   } catch { return null }
   const now = ts(deps.now())
   const row = (c: string, b: Uint8Array, img: { mime: string; width: number; height: number }, origin: string): MediaRow => ({

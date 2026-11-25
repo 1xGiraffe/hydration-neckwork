@@ -3,7 +3,7 @@ import type { IncomingMessage } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 import { archiveUrl, rehostImage, spacedQueue } from '../../src/governance/subsquare/images.js'
 import type { KuboClient } from '../../src/governance/subsquare/kubo.js'
-import type { ResolvedTarget } from '../../src/governance/subsquare/safeFetch.js'
+import { SafeFetchError, type ResolvedTarget } from '../../src/governance/subsquare/safeFetch.js'
 import { parseItem, parsePollVotes } from '../../src/governance/subsquare/parse.js'
 import { bannerUrl } from '../../src/governance/subsquare/rows.js'
 import { pollJsonOf, pollSettled } from '../../src/governance/subsquare/sync.js'
@@ -68,7 +68,7 @@ describe('the archive fallback', () => {
     const r = await rehostImage(IPFS_URL, undefined, { kubo, now: () => 0, fetchOptions: net.fetchOptions, archiveThrottle: queue })
     expect(r).toMatchObject({ kind: 'archived', media: { cid: CID, origin: 'wayback-cid', mime: 'image/png' }, url: { status: 'ok', cid: CID } })
     expect(calls).toEqual(['stat', 'rehash', 'rehash', 'add-pinned'])
-    expect(net.seen).toEqual([IPFS_URL, archiveUrl(IPFS_URL), archiveUrl(IPFS_URL).replace('20000101000000id_', '20240130045025id_')])
+    expect(net.seen).toEqual([IPFS_URL, archiveUrl(IPFS_URL), archiveUrl(IPFS_URL)!.replace('20000101000000id_', '20240130045025id_')])
   })
 
   it('a capture that does not reproduce the CID is refused', async () => {
@@ -107,6 +107,28 @@ describe('the archive fallback', () => {
     const r = await rehostImage('https://i.ibb.co/a/b.png', undefined, { kubo: fakeKubo(true).kubo, now: () => 0, fetchOptions: net.fetchOptions, archiveThrottle: queue })
     expect(r).toMatchObject({ kind: 'failed', url: { reason: `fetch:http-${status}` } })
     expect(net.seen).toEqual(['https://i.ibb.co/a/b.png'])
+  })
+
+  it('names a capture under the raw-capture path, whatever dot segments the original carries', () => {
+    const prefix = 'https://web.archive.org/web/20000101000000id_/'
+    expect(archiveUrl('https://i.ibb.co/a/b.png')).toBe(`${prefix}https://i.ibb.co/a/b.png`)
+    expect(archiveUrl('https://img.example/ä b.png?x=1&y=ä')).toBe(`${prefix}https://img.example/%C3%A4%20b.png?x=1&y=%C3%A4`)
+    // Dot segments are resolved inside the original: the capture path keeps its prefix.
+    expect(archiveUrl('https://attacker.example/../../../../../save/https://victim.example/')).toBe(`${prefix}https://attacker.example/save/https://victim.example/`)
+    expect(archiveUrl('https://attacker.example/%2e%2e/%2e%2e/%2E%2e/save/https://victim.example/')).toBe(`${prefix}https://attacker.example/save/https://victim.example/`)
+    expect(archiveUrl('https://attacker.example/a/.%2e/..\\..\\save/x')).toBe(`${prefix}https://attacker.example/save/x`)
+    // What would still be resolved against the capture path is refused, never rewritten.
+    for (const url of ['https://../save/https://victim.example/', 'https://%2e%2e/save/x', 'foo:../../../save/https://victim.example/', 'not a url']) {
+      expect(archiveUrl(url), url).toBeNull()
+    }
+  })
+
+  it('is not tried when the original cannot be named as a capture', async () => {
+    const net = network(() => response(503), () => response(200, png()))
+    const url = 'https://../save/https://victim.example/'
+    expect(await rehostImage(url, undefined, { kubo: fakeKubo(true).kubo, now: () => 0, fetch: async u => { net.seen.push(u); throw new SafeFetchError('http-503') }, archiveThrottle: queue }))
+      .toMatchObject({ kind: 'failed', url: { reason: 'fetch:http-503' } })
+    expect(net.seen).toEqual([url])
   })
 
   it('is not tried without its queue', async () => {
