@@ -3,7 +3,7 @@ import rateLimit from '@fastify/rate-limit'
 import { z } from 'zod'
 import { requireUser, sessionUser } from '../services/userAuthService.ts'
 import { privateUserHooks } from './user.ts'
-import { accountRef } from '../services/explorerService.ts'
+import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { forumReady } from '../services/forumStore.ts'
 import { FORUM_TOPICS, LIMITS } from '../services/forumText.ts'
@@ -205,10 +205,12 @@ export async function forumRoutes(fastify: FastifyInstance): Promise<void> {
     if (!body.success) return reply.status(400).send({ error: 'Invalid sanction' })
     const n = normalizeAddress(body.data.account)
     if (!n) return reply.status(400).send({ error: 'Invalid account' })
+    // The account a session for this address signs in as: a bound H160 is its substrate account.
+    const accountId = resolveDisplayAccountId(n.accountId)
     const until = body.data.until == null ? null : Date.parse(body.data.until)
     if (until != null && (!Number.isFinite(until) || until <= Date.now())) return reply.status(400).send({ error: 'until must be a future date, or null to lift the mute' })
-    if (isForumModerator(n.accountId)) return reply.status(422).send({ error: 'Moderators cannot be muted here' })
+    if (isForumModerator(accountId)) return reply.status(422).send({ error: 'Moderators cannot be muted here' })
     // Logged by route and moderator only: the muted account and the reason are private.
-    return run(req, reply, 'moderate.mute', null, async () => { await setMute(moderator, n.accountId, until, body.data.reason); return { ok: true } })
+    return run(req, reply, 'moderate.mute', null, async () => { await setMute(moderator, accountId, until, body.data.reason); return { ok: true } })
   })
 }

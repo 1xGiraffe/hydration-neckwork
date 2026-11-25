@@ -33,6 +33,7 @@ const { stripCorsFromPrivate } = await import('../src/routes/corsPolicy.ts')
 const media = await import('../src/services/forumMedia.ts')
 const { mentionsIn, linkCount, cleanTitle } = await import('../src/services/forumText.ts')
 const identities = await import('../src/services/identityService.ts')
+const { initExplorerService, loadEvmBindings } = await import('../src/services/explorerService.ts')
 
 const ALICE = `0x${'a1'.repeat(32)}`
 const PROPOSER_PROXY = `0x${'51'.repeat(32)}`
@@ -572,6 +573,17 @@ describe('routes', () => {
   it('an upload without a session is refused before its body is read', async () => {
     const res = await app.inject({ method: 'POST', url: '/user/forum/media', headers: { 'content-type': 'application/octet-stream' }, payload: Buffer.alloc(5 * 1024 * 1024) })
     expect(res.statusCode).toBe(401)
+  })
+
+  it('a moderator mute of a bound H160 mutes the account that signs in with it', async () => {
+    const h160 = `0x${'11'.repeat(20)}`
+    const bound = `0x${'bb'.repeat(32)}`
+    initExplorerService(userFakeClient({ account_alias_directory: [{ evm: h160, account_id: bound }] }) as never)
+    await loadEvmBindings()
+    const res = await app.inject({ method: 'POST', url: '/user/admin/forum/sanctions', headers: { authorization: `Bearer ${mod}` }, payload: { account: h160, until: new Date(Date.now() + 86_400_000).toISOString() } })
+    expect(res.statusCode).toBe(200)
+    expect([...fake.sanctions.values()].map(r => r.account_id)).toEqual([bound])
+    expect(await write.mutedUntil(bound)).not.toBeNull()
   })
 
   it('a refusal says why and how long to wait', async () => {
