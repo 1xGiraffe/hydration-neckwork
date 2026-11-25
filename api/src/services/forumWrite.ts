@@ -10,7 +10,7 @@ import {
   type ForumCommentMeta, type ForumPostMeta, forumMediaUrlMap,
 } from './forumStore.ts'
 import { commentFromRow, getForumPost, imageUrlsIn, threadKeyFor, type CommentRow, type ForumComment, type ForumPostDetail, type ForumPostStub } from './forumRead.ts'
-import { FORUM_TOPICS, LIMITS, cleanBody, cleanLabels, cleanTitle, contentHash, hasVisibleText, linkCount, localNetworkUrls, mentionsIn } from './forumText.ts'
+import { FORUM_TOPICS, LIMITS, cleanBody, cleanLabels, cleanTitle, contentHash, hasVisibleText, linkCount, localNetworkUrls, mentionsIn, rawTooLong } from './forumText.ts'
 import { SlidingLimiter, limitMessage, type LimitAction } from './forumLimits.ts'
 
 // The forum's write side (/user/forum/*): discussions, comments and replies, edits
@@ -389,11 +389,16 @@ export function resetForumWriteForTests(): void {
 
 // ---- validation ----
 
+function tooLong(what: string, length: number, max: number): ForumWriteError {
+  return new ForumWriteError(422, `The ${what} is ${length.toLocaleString('en-US')} characters; the limit is ${max.toLocaleString('en-US')}.`, 'too-long')
+}
+
 function validateBody(raw: unknown, max: number, standing: ForumStanding, what: string): string {
   if (typeof raw !== 'string') throw new ForumWriteError(400, `The ${what} is missing.`, 'invalid')
+  if (rawTooLong(raw, max)) throw tooLong(what, raw.length, max)
   const body = cleanBody(raw)
   if (!hasVisibleText(body)) throw new ForumWriteError(400, `The ${what} is empty.`, 'empty')
-  if (body.length > max) throw new ForumWriteError(422, `The ${what} is ${body.length.toLocaleString('en-US')} characters; the limit is ${max.toLocaleString('en-US')}.`, 'too-long')
+  if (body.length > max) throw tooLong(what, body.length, max)
   if (mentionsIn(body).length > LIMITS.mentionsPerItem) throw new ForumWriteError(422, `Mention at most ${LIMITS.mentionsPerItem} accounts in one ${what}.`, 'too-many-mentions')
   if (!standing.linksUnlimited && linkCount(body) > LIMITS.linksPerBodyLowBalance) {
     throw new ForumWriteError(422, `A ${what} can carry at most ${LIMITS.linksPerBodyLowBalance} links from an account holding under 1,000 HDX.`, 'too-many-links')
@@ -535,11 +540,11 @@ export interface CommentResult { comment: ForumComment; generation: string }
 export async function createDiscussion(ctx: WriteContext, input: { title?: unknown; body?: unknown; labels?: unknown }): Promise<PostResult> {
   requireReady()
   const standing = await requireStanding(ctx, 'post')
-  const title = validateTitle(input.title)
-  const body = validateBody(input.body, LIMITS.postBodyChars, standing, 'post')
-  const labels = validateLabels(input.labels)
-  const hash = duplicateCheck(ctx.accountId, `${title}\n${body}`)
   return limited(takeLimit('discussion', ctx.accountId, ctx.ip), async () => {
+    const title = validateTitle(input.title)
+    const body = validateBody(input.body, LIMITS.postBodyChars, standing, 'post')
+    const labels = validateLabels(input.labels)
+    const hash = duplicateCheck(ctx.accountId, `${title}\n${body}`)
     const now = Date.now()
     const postId = nextDiscussionId()
     const row: PostRow = {
@@ -737,9 +742,9 @@ export async function createComment(ctx: WriteContext, input: { threadKey?: unkn
   const open = commentableThread(where.threadKey, input.threadKey)
   if (!open.ok) throw new ForumWriteError(409, open.reason, 'closed')
   const standing = await requireStanding(ctx, 'comment')
-  const body = validateBody(input.body, LIMITS.commentBodyChars, standing, 'comment')
-  const hash = duplicateCheck(ctx.accountId, `${where.threadKey}\n${body}`)
   return limited(takeLimit('comment', ctx.accountId, ctx.ip), async () => {
+    const body = validateBody(input.body, LIMITS.commentBodyChars, standing, 'comment')
+    const hash = duplicateCheck(ctx.accountId, `${where.threadKey}\n${body}`)
     const now = Date.now()
     await ensureSubjectStub(where.threadKey, now)
     // The lock is read again after the awaits: a moderator may have locked it meanwhile.
@@ -769,8 +774,8 @@ export async function addUpdate(ctx: WriteContext, postId: string, input: { body
   const perms = await postPermissions(ctx.accountId, postId)
   if (!perms.update) throw new ForumWriteError(403, 'Only the proposer (or an account that speaks for it on chain now) can post Updates here.', 'forbidden')
   const standing = await requireStanding(ctx, 'comment')
-  const body = validateBody(input.body, LIMITS.updateBodyChars, standing, 'update')
   return limited(takeLimit('comment', ctx.accountId, ctx.ip), async () => {
+    const body = validateBody(input.body, LIMITS.updateBodyChars, standing, 'update')
     const now = Date.now()
     await ensureSubjectStub(postId, now)
     const row = commentRow(ctx.accountId, { threadKey: postId, parentId: '', replyToId: '' }, 'update', body, now)
@@ -798,9 +803,11 @@ export async function editComment(ctx: WriteContext, commentId: string, input: {
   return serialized(commentId, async () => {
     const stored = await ownComment(ctx, commentId)
     const standing = await requireStanding(ctx, 'comment')
-    const body = validateBody(input.body, LIMITS.commentBodyChars, standing, 'comment')
-    if (body === stored.body) return { comment: commentFromRow(stored), generation: '' }
-    return limited(takeLimit('edit', ctx.accountId, ctx.ip), async () => {
+    const slots = takeLimit('edit', ctx.accountId, ctx.ip)
+    return limited(slots, async () => {
+      const body = validateBody(input.body, LIMITS.commentBodyChars, standing, 'comment')
+      // An edit that changes nothing writes nothing and keeps its slot free.
+      if (body === stored.body) { giveBack(slots); return { comment: commentFromRow(stored), generation: '' } }
       const now = Date.now()
       const next: StoredComment = { ...stored, body, revision: stored.revision + 1, authority: 'native', edited_at: ts(now), updated_at: ts(now) }
       await insert('forum_revisions', [revisionRow(commentId, next.revision, '', body, ctx.accountId, now)])
@@ -851,12 +858,14 @@ export async function fileReport(ctx: WriteContext, input: { targetId?: unknown;
   requireReady()
   if (typeof input.targetId !== 'string' || !visibleTarget(input.targetId)) throw new ForumWriteError(404, 'There is nothing to report here.', 'not-found')
   if (typeof input.reason !== 'string' || !(REPORT_REASONS as readonly string[]).includes(input.reason)) throw new ForumWriteError(400, `Pick a reason: ${REPORT_REASONS.join(', ')}.`, 'invalid')
-  const note = input.note == null ? '' : typeof input.note === 'string' ? cleanBody(input.note) : null
-  if (note == null || note.length > LIMITS.reportNoteChars) throw new ForumWriteError(422, `The note is limited to ${LIMITS.reportNoteChars} characters.`, 'too-long')
+  const noteTooLong = () => new ForumWriteError(422, `The note is limited to ${LIMITS.reportNoteChars} characters.`, 'too-long')
+  if (input.note != null && (typeof input.note !== 'string' || rawTooLong(input.note, LIMITS.reportNoteChars))) throw noteTooLong()
   await requireStanding(ctx, 'comment')
   const targetId = input.targetId
   const id = reportId(ctx.accountId, targetId)
   return limited(takeLimit('report', ctx.accountId, ctx.ip), async () => {
+    const note = typeof input.note === 'string' ? cleanBody(input.note) : ''
+    if (note.length > LIMITS.reportNoteChars) throw noteTooLong()
     const res = await client.query({
       query: `SELECT status, toString(created_at) AS created_at FROM price_data.user_forum_reports FINAL WHERE report_id = {id:String} AND deleted = 0 LIMIT 1`,
       query_params: { id }, format: 'JSONEachRow', clickhouse_settings: READ_SETTINGS,

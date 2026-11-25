@@ -165,6 +165,30 @@ describe('discussions', () => {
     await expect(write.createDiscussion(ctx(MOD), { title: 't4', body: 'b4' })).rejects.toMatchObject({ status: 429 })
   })
 
+  it('takes the rate-limit slot before reading the text, and gives it back when the text is refused', async () => {
+    await write.createDiscussion(ctx(MOD), { title: 't0', body: 'b0' })
+    await expect(write.createDiscussion(ctx(MOD), { title: 't1', body: 'x'.repeat(60_000) })).rejects.toMatchObject({ code: 'too-long' })
+    await write.createDiscussion(ctx(MOD), { title: 't1', body: 'b1' })
+    await write.createDiscussion(ctx(MOD), { title: 't2', body: 'b2' })
+    // Out of slots: even hostile text is refused by the limiter, before anything reads it.
+    const hostile = '['.repeat(1 << 20)
+    const t = performance.now()
+    await expect(write.createDiscussion(ctx(MOD), { title: 't3', body: hostile })).rejects.toMatchObject({ status: 429 })
+    for (let i = 0; i < 20; i++) await expect(write.createComment(ctx(MOD), { threadKey: 'opengov:3', body: hostile })).rejects.toMatchObject({ code: 'too-long' })
+    expect(performance.now() - t).toBeLessThan(500)
+  })
+
+  it('refuses a raw text far over its limit before cleaning it', async () => {
+    const t = performance.now()
+    await expect(write.fileReport(ctx(ALICE), { targetId: 'opengov:3', reason: 'spam', note: `${' '.repeat(1 << 20)}x` })).rejects.toMatchObject({ status: 404 })
+    const { comment } = await write.createComment(ctx(BOB), { threadKey: 'opengov:3', body: 'reported' })
+    await expect(write.fileReport(ctx(ALICE), { targetId: comment.commentId, reason: 'spam', note: `${' '.repeat(1 << 20)}x` })).rejects.toMatchObject({ code: 'too-long' })
+    await expect(write.createComment(ctx(ALICE), { threadKey: 'opengov:3', body: `${' '.repeat(1 << 20)}x` })).rejects.toMatchObject({ code: 'too-long' })
+    expect(performance.now() - t).toBeLessThan(500)
+    // A note within the limit once cleaned is accepted, CRLFs and trailing space included.
+    expect(await write.fileReport(ctx(ALICE), { targetId: comment.commentId, reason: 'spam', note: `${'ab\r\n'.repeat(160)}   ` })).toMatchObject({ ok: true })
+  })
+
   it('edits only by the author, as a new revision, keeping every column the sync owns', async () => {
     fake.posts.set('s9', { post_id: 's9', kind: 'discussion', title: 'Imp', body: 'old', body_format: 'markdown', tldr: '', labels: ['X'], linked: [], author_account_id: ALICE, author_legacy_name: '', authority: 'subsquare', source: 'subsquare', source_id: 'id', source_cid: '', source_hash: 'h', source_activity_at: '2026-01-01 00:00:00.000', source_removed: 0, source_comments_count: 2, poll_json: '', banner_cid: '', revision: 2, hidden: 0, hidden_reason: '', deleted: 0, created_at: '2026-01-01 00:00:00.000', edited_at: '1970-01-01 00:00:00.000', last_activity_at: '2026-01-01 00:00:00.000', seq: 0, row_fp: 'FP', moderated: 1, locked: 1 })
     store.applyLocalPost(meta({ postId: 's9', authorAccountId: ALICE, labels: ['X'] }))

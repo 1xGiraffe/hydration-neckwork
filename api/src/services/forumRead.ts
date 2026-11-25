@@ -2,7 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
 import { accountRef, resolveRelatedAccounts, type AccountRef } from './explorerService.ts'
 import { getReferendum } from './governanceService.ts'
-import { ownImageUrls } from './forumText.ts'
+import { htmlImageSources, markdownImageTargets, ownImageUrls } from './forumText.ts'
 import { forumItemShown, postLastActivityAt, textFold, threadKeyFor } from './forumView.ts'
 import {
   forumComment, forumComments, forumGeneration, forumMedia, forumMediaUrlMap, forumPost, forumPosts, forumThreadCounts,
@@ -183,10 +183,7 @@ export interface ForumPostDetail {
 
 /** The image URLs written in a body (markdown `![](…)` and HTML `<img src>`), for the rewrite map. */
 export function imageUrlsIn(body: string): string[] {
-  const out = new Set<string>()
-  for (const m of body.matchAll(/!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^)]*["'])?\s*\)/g)) out.add(m[1])
-  for (const m of body.matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']?([^"'\s>]+)/gi)) out.add(m[1])
-  return [...out]
+  return [...new Set([...markdownImageTargets(body), ...htmlImageSources(body)])]
 }
 
 /**
