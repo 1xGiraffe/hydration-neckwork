@@ -8,8 +8,9 @@ import { USER_AGENT } from './client.js'
 // posts, so an image URL like `http://clickhouse:8123/?query=…` or a hostname that
 // resolves to 10.0.0.5 must be harmless:
 //   - https on port 443 only; a hostname, never an IP literal;
-//   - DNS resolved HERE, every answer checked against the non-public ranges (loopback,
-//     RFC 1918, link-local, CGNAT, ULA, multicast, the docker bridge ranges, …), and
+//   - DNS resolved HERE (within the fetch's timeout), every answer checked against the
+//     non-public ranges (loopback, RFC 1918, link-local, CGNAT, ULA, multicast, the
+//     docker bridge ranges, the IPv6 tunnelling and documentation blocks, …), and
 //     the connection made to the vetted address with SNI and certificate validation
 //     for the hostname — the socket's own lookup is replaced by one that returns that
 //     address, so a second resolution cannot rebind it;
@@ -58,6 +59,26 @@ function v6Groups(ip: string): number[] | null {
   return groups.length === 8 && groups.every(g => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : null
 }
 
+/** Non-public blocks inside 2000::/3, as [first groups, prefix length]. */
+const V6_BLOCKED: Array<[number[], number]> = [
+  [[0x2001, 0x0000], 32], // Teredo — tunnels to an arbitrary IPv4
+  [[0x2001, 0x0002, 0x0000], 48], // benchmarking
+  [[0x2001, 0x0010], 28], // ORCHID (deprecated)
+  [[0x2001, 0x0020], 28], // ORCHIDv2
+  [[0x2001, 0x0db8], 32], // documentation
+  [[0x2002], 16], // 6to4 — tunnels to an arbitrary IPv4
+  [[0x3fff, 0x0000], 20], // documentation
+]
+
+function v6InPrefix(g: number[], prefix: number[], bits: number): boolean {
+  for (let i = 0; i * 16 < bits; i++) {
+    const take = Math.min(16, bits - i * 16)
+    const mask = (0xffff << (16 - take)) & 0xffff
+    if ((g[i] & mask) !== ((prefix[i] ?? 0) & mask)) return false
+  }
+  return true
+}
+
 function v6Public(ip: string): boolean {
   const g = v6Groups(ip)
   if (!g) return false
@@ -65,8 +86,7 @@ function v6Public(ip: string): boolean {
   const embedded = `${g[6] >> 8}.${g[6] & 0xff}.${g[7] >> 8}.${g[7] & 0xff}`
   if (g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff) return v4Public(embedded)
   if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every(x => x === 0)) return v4Public(embedded)
-  if (g[0] === 0x2001 && g[1] === 0x0db8) return false // documentation
-  if (g[0] === 0x2002) return false // 6to4 — tunnels to an arbitrary IPv4
+  if (V6_BLOCKED.some(([prefix, bits]) => v6InPrefix(g, prefix, bits))) return false
   // Only global unicast (2000::/3) is public; ::, ::1, fc00::/7 (ULA), fe80::/10
   // (link-local), ff00::/8 (multicast) and every other reserved block are not.
   return (g[0] & 0xe000) === 0x2000
@@ -85,18 +105,36 @@ export interface ResolvedTarget { url: URL; address: string; family: 4 | 6 }
 export type Resolver = (hostname: string) => Promise<Array<{ address: string; family: number }>>
 const defaultResolver: Resolver = hostname => dnsLookup(hostname, { all: true, verbatim: true })
 
-/** Checks a URL and resolves its host; throws SafeFetchError naming why it is refused. */
-export async function vetUrl(raw: string, resolve: Resolver = defaultResolver): Promise<ResolvedTarget> {
+/** `p`, or a `timeout` refusal as soon as `signal` aborts: a lookup that never answers cannot hold the fetch. */
+function untilAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new SafeFetchError('timeout'))
+    if (signal.aborted) { onAbort(); return }
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(
+      v => { signal.removeEventListener('abort', onAbort); resolve(v) },
+      e => { signal.removeEventListener('abort', onAbort); reject(e) },
+    )
+  })
+}
+
+/**
+ * Checks a URL and resolves its host; throws SafeFetchError naming why it is refused.
+ * `signal` bounds the lookup (safeFetch passes its own timeout's).
+ */
+export async function vetUrl(raw: string, resolve: Resolver = defaultResolver, signal?: AbortSignal): Promise<ResolvedTarget> {
   let url: URL
   try { url = new URL(raw) } catch { throw new SafeFetchError('bad-url') }
   if (url.protocol !== 'https:') throw new SafeFetchError('scheme')
   if (url.port !== '' && url.port !== '443') throw new SafeFetchError('port')
   if (url.username || url.password) throw new SafeFetchError('credentials')
-  const host = url.hostname.replace(/^\[|\]$/g, '')
+  // A fully qualified name's trailing dot names the same host: `localhost.` is localhost.
+  const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '')
   if (!host || isIP(host) || /^[\d.]+$/.test(host) || /^0x/i.test(host)) throw new SafeFetchError('ip-literal')
   if (!host.includes('.') || host.endsWith('.local') || host.endsWith('.internal') || host === 'localhost' || host.endsWith('.localhost')) throw new SafeFetchError('private-host')
   let answers: Array<{ address: string; family: number }>
-  try { answers = await resolve(host) } catch { throw new SafeFetchError('dns') }
+  try { answers = await untilAborted(resolve(host), signal) } catch (err) { throw err instanceof SafeFetchError ? err : new SafeFetchError('dns') }
   if (!answers.length) throw new SafeFetchError('dns')
   // Every answer must be public: a name that also points inside is refused outright,
   // rather than gambling on which answer a retry would get.
@@ -147,7 +185,7 @@ export async function safeFetch(raw: string, options: SafeFetchOptions = {}): Pr
   try {
     let current = raw
     for (let hop = 0; ; hop++) {
-      const target = await vetUrl(current, options.resolve)
+      const target = await vetUrl(current, options.resolve, controller.signal)
       let res: IncomingMessage
       try { res = await doRequest(target, controller.signal) } catch (err) {
         throw new SafeFetchError(controller.signal.aborted ? 'timeout' : 'connect', err instanceof Error ? err.message : String(err))
