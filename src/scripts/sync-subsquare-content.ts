@@ -2,7 +2,7 @@ import { writeFile } from 'node:fs/promises'
 import { createClickHouseClient } from '../db/client.js'
 import { hasFlag, integerOption, stringOption } from '../util/cliArgs.js'
 import { CircuitOpenError, SubsquareClient } from '../governance/subsquare/client.js'
-import { remoteSafeFetch } from '../governance/subsquare/imageFetcher.js'
+import { imageFetchMode, remoteSafeFetch } from '../governance/subsquare/imageFetcher.js'
 import { KuboClient } from '../governance/subsquare/kubo.js'
 import { buildReport, verifyMedia } from '../governance/subsquare/report.js'
 import { GovernanceSync, type CycleResult } from '../governance/subsquare/sync.js'
@@ -15,7 +15,8 @@ import { GovernanceSync, type CycleResult } from '../governance/subsquare/sync.j
 //   --full                 force a full (resumable) import pass
 //   --dry-run              read Subsquare and ClickHouse, write NOTHING (no rows, no pins)
 //   --report=<path>        write the validation report JSON there (a full pass) and print it
-//   --no-images            skip image re-hosting
+//   --no-images            skip image re-hosting (also skipped, with an error logged, when
+//                          neither IMAGE_FETCHER_URL nor IMAGE_FETCH_IN_PROCESS=1 is set)
 //   --refetch-all          with --full: re-read every item even when stored unchanged
 //                          (the post-import report; an unchanged source then writes nothing)
 //   --verify-media         re-hash every pinned image and print the result, then exit
@@ -43,13 +44,20 @@ const client = new SubsquareClient({
   rps: Number(process.env.SUBSQUARE_RPS ?? 1) || 1,
   cache: cacheDir ? { dir: cacheDir, mode: cacheMode } : undefined,
 })
-// Strangers' image URLs are fetched by the isolated fetcher service when it is configured
-// (docker-compose.yml: governance-image-fetcher), never from this process's networks.
-const fetcherUrl = process.env.IMAGE_FETCHER_URL ?? ''
-console.log(fetcherUrl ? '[governance-sync] image fetches go through the isolated fetcher' : '[governance-sync] WARN: IMAGE_FETCHER_URL unset — image fetches run in this process')
+// Strangers' image URLs are fetched by the isolated fetcher service (docker-compose.yml:
+// governance-image-fetcher), never from this process's networks — unless
+// IMAGE_FETCH_IN_PROCESS=1 asks for that explicitly (local development). With neither
+// set, the image pass does not run.
+const fetchMode = imageFetchMode(process.env)
+const wantImages = !hasFlag('no-images') && !!kubo
+if (wantImages) {
+  if (fetchMode.mode === 'fetcher') console.log('[governance-sync] image fetches go through the isolated fetcher')
+  else if (fetchMode.mode === 'in-process') console.warn('[governance-sync] WARN: IMAGE_FETCH_IN_PROCESS=1 — image fetches run in this process (local development only)')
+  else console.error('[governance-sync] ERROR: IMAGE_FETCHER_URL is unset — the image pass is disabled (IMAGE_FETCH_IN_PROCESS=1 fetches in this process, for local development only)')
+}
 const sync = new GovernanceSync({
-  client, ch, kubo, dryRun, images: !hasFlag('no-images') && !!kubo,
-  imageFetch: fetcherUrl ? remoteSafeFetch(fetcherUrl) : undefined,
+  client, ch, kubo, dryRun, images: wantImages && fetchMode.mode !== 'off',
+  imageFetch: fetchMode.mode === 'fetcher' ? remoteSafeFetch(fetchMode.url) : undefined,
   maxImagesPerCycle: integerOption('max-images', 400, { min: 0, max: 10_000, clamp: true }),
   cycleMinutes, sweepHours, refetchAll: hasFlag('refetch-all'),
 })

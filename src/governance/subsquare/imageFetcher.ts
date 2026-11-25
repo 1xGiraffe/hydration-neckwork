@@ -132,3 +132,18 @@ export function remoteSafeFetch(baseUrl: string, fetchImpl: typeof fetch = fetch
     return { bytes, contentType: dec(res.headers.get('x-content-type')), finalUrl: dec(res.headers.get('x-final-url')) || url }
   }
 }
+
+export type ImageFetchMode = { mode: 'fetcher'; url: string } | { mode: 'in-process' } | { mode: 'off' }
+
+/**
+ * Where the sync's image fetches run: in the isolated fetcher (`IMAGE_FETCHER_URL`), or
+ * in the sync's own process only when explicitly asked (`IMAGE_FETCH_IN_PROCESS=1`,
+ * for local development, where there is no fetcher). With neither, the image pass does
+ * not run — a missing setting never quietly moves strangers' URLs onto the sync's networks.
+ */
+export function imageFetchMode(env: Record<string, string | undefined>): ImageFetchMode {
+  const url = (env.IMAGE_FETCHER_URL ?? '').trim()
+  if (url) return { mode: 'fetcher', url }
+  if ((env.IMAGE_FETCH_IN_PROCESS ?? '').trim() === '1') return { mode: 'in-process' }
+  return { mode: 'off' }
+}

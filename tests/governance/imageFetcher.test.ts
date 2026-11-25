@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { fetcherHandler, remoteSafeFetch } from '../../src/governance/subsquare/imageFetcher.js'
+import { fetcherHandler, imageFetchMode, remoteSafeFetch } from '../../src/governance/subsquare/imageFetcher.js'
 import { SafeFetchError, safeFetch, type SafeFetchOptions } from '../../src/governance/subsquare/safeFetch.js'
 
 // The isolated image fetcher: the sync's guarded fetch, run in a container that reaches
@@ -136,5 +136,16 @@ describe('the sync reading a fetcher answer', () => {
     expect((err as SafeFetchError).reason).toBe('fetch')
     await settle()
     expect(f.state.closed).toBe(true)
+  })
+})
+
+describe('where the sync runs its image fetches', () => {
+  it('in the fetcher when one is configured, in its own process only on explicit opt-in, else not at all', () => {
+    expect(imageFetchMode({ IMAGE_FETCHER_URL: 'http://fetcher:8090' })).toEqual({ mode: 'fetcher', url: 'http://fetcher:8090' })
+    expect(imageFetchMode({ IMAGE_FETCHER_URL: 'http://fetcher:8090', IMAGE_FETCH_IN_PROCESS: '1' })).toEqual({ mode: 'fetcher', url: 'http://fetcher:8090' })
+    expect(imageFetchMode({ IMAGE_FETCH_IN_PROCESS: '1' })).toEqual({ mode: 'in-process' })
+    for (const env of [{}, { IMAGE_FETCHER_URL: '' }, { IMAGE_FETCHER_URL: '  ' }, { IMAGE_FETCH_IN_PROCESS: 'true' }, { IMAGE_FETCH_IN_PROCESS: '0' }]) {
+      expect(imageFetchMode(env), JSON.stringify(env)).toEqual({ mode: 'off' })
+    }
   })
 })
