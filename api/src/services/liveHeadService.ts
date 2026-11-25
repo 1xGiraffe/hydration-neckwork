@@ -39,11 +39,20 @@ const POOL_PUSH_MIN_MS = 1_000
 // so it runs whether or not the transaction pool is being read.
 // Comment frames keep idle proxy hops from timing the stream out.
 const KEEPALIVE_MS = 25_000
+// Concurrent streams admitted per client address, and in total. A tab holds one
+// stream for as long as it stays open, so without a bound one client could hold
+// sockets and keepalive writes without limit. Past either cap a stream is refused
+// (429) and the explorer falls back to interval polling, which every live surface
+// already does whenever its stream is down.
+export const MAX_LIVE_STREAMS_PER_CLIENT = 8
+export const MAX_LIVE_STREAMS = 2_000
 
 let client: ClickHouseClient
 export function initLiveHeadService(c: ClickHouseClient): void { client = c }
 
-const clients = new Set<ServerResponse>()
+// Each open stream, with the client address it counts against.
+const clients = new Map<ServerResponse, string>()
+const streamsPerClient = new Map<string, number>()
 let lastHead = 0
 let lastMain = 0
 let lastPrice = 0
@@ -103,7 +112,7 @@ async function pollOnce(): Promise<void> {
       // push triggers folds the tail up to the pushed block.
       publishRouteTailHead(lastHead)
       const frame = sseHeadFrame(lastHead, lastMain, lastBest, lastPool, lastPrice)
-      for (const c of clients) c.write(frame)
+      for (const c of clients.keys()) c.write(frame)
     }
   } catch { /* transient read failure — the next tick retries */ } finally {
     polling = false
@@ -135,13 +144,13 @@ function pushMemoryWatermarks(): void {
   if (poolMoved) lastPoolPushMs = Date.now()
   lastPool = pool
   lastBest = Math.max(lastBest, best)
-  for (const c of clients) c.write(sseHeadFrame(lastHead, lastMain, lastBest, lastPool, lastPrice))
+  for (const c of clients.keys()) c.write(sseHeadFrame(lastHead, lastMain, lastBest, lastPool, lastPrice))
 }
 
 function ensureTimers(): void {
   pollTimer ??= setInterval(() => { void pollOnce() }, POLL_MS)
   poolTimer ??= setInterval(pushMemoryWatermarks, POOL_PUSH_MS)
-  keepaliveTimer ??= setInterval(() => { for (const c of clients) c.write(': ka\n\n') }, KEEPALIVE_MS)
+  keepaliveTimer ??= setInterval(() => { for (const c of clients.keys()) c.write(': ka\n\n') }, KEEPALIVE_MS)
 }
 
 function stopTimers(): void {
@@ -150,23 +159,46 @@ function stopTimers(): void {
   if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null }
 }
 
-export function addLiveHeadClient(res: ServerResponse): void {
-  clients.add(res)
+/** Whether a new stream for `client` (its address) is within both caps. */
+export function liveHeadStreamAvailable(client: string): boolean {
+  return clients.size < MAX_LIVE_STREAMS && (streamsPerClient.get(client) ?? 0) < MAX_LIVE_STREAMS_PER_CLIENT
+}
+
+/**
+ * Admits a stream for `client`, or returns false when that client or the whole
+ * service already holds its cap. Every admitted stream must be released with
+ * removeLiveHeadClient when it closes.
+ */
+export function addLiveHeadClient(res: ServerResponse, client: string): boolean {
+  if (clients.has(res)) return true
+  if (!liveHeadStreamAvailable(client)) return false
+  clients.set(res, client)
+  streamsPerClient.set(client, (streamsPerClient.get(client) ?? 0) + 1)
   // Replay the last known heads immediately, so a (re)connecting tab
   // resynchronizes without waiting for the next block.
   if (lastHead > 0 || lastMain > 0) res.write(sseHeadFrame(lastHead, lastMain, lastBest, Math.max(0, lastPool), lastPrice))
   ensureTimers()
+  return true
 }
 
+/** Releases a stream's slot. Safe to call more than once for the same stream. */
 export function removeLiveHeadClient(res: ServerResponse): void {
+  const client = clients.get(res)
+  if (client === undefined) return
   clients.delete(res)
+  const held = (streamsPerClient.get(client) ?? 1) - 1
+  if (held > 0) streamsPerClient.set(client, held)
+  else streamsPerClient.delete(client)
   if (clients.size === 0) stopTimers()
 }
 
-export function liveHeadClientCount(): number { return clients.size }
+export function liveHeadClientCount(client?: string): number {
+  return client === undefined ? clients.size : streamsPerClient.get(client) ?? 0
+}
 
 export function stopLiveHeadService(): void {
   stopTimers()
-  for (const c of clients) { try { c.end() } catch { /* already closing */ } }
+  for (const c of clients.keys()) { try { c.end() } catch { /* already closing */ } }
   clients.clear()
+  streamsPerClient.clear()
 }

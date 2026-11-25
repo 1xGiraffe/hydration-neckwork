@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ServerResponse } from 'node:http'
 import {
+  MAX_LIVE_STREAMS,
+  MAX_LIVE_STREAMS_PER_CLIENT,
   addLiveHeadClient,
   liveHeadClientCount,
+  liveHeadStreamAvailable,
   poolPushDue,
   removeLiveHeadClient,
   sseHeadFrame,
@@ -57,13 +60,66 @@ describe('live head client registry', () => {
   it('tracks connected clients and clears them on shutdown', () => {
     const a = fakeClient()
     const b = fakeClient()
-    addLiveHeadClient(a.res)
-    addLiveHeadClient(b.res)
+    addLiveHeadClient(a.res, '192.0.2.1')
+    addLiveHeadClient(b.res, '192.0.2.2')
     expect(liveHeadClientCount()).toBe(2)
     removeLiveHeadClient(a.res)
     expect(liveHeadClientCount()).toBe(1)
     stopLiveHeadService()
     expect(liveHeadClientCount()).toBe(0)
     expect(b.ended).toBe(true)
+  })
+})
+
+describe('live stream caps', () => {
+  it('admits a client up to its own cap, independently of other clients', () => {
+    const held = Array.from({ length: MAX_LIVE_STREAMS_PER_CLIENT }, () => fakeClient())
+    for (const c of held) expect(addLiveHeadClient(c.res, '192.0.2.1')).toBe(true)
+    expect(liveHeadStreamAvailable('192.0.2.1')).toBe(false)
+    expect(addLiveHeadClient(fakeClient().res, '192.0.2.1')).toBe(false)
+    expect(liveHeadClientCount('192.0.2.1')).toBe(MAX_LIVE_STREAMS_PER_CLIENT)
+    // Another address is unaffected.
+    expect(addLiveHeadClient(fakeClient().res, '192.0.2.2')).toBe(true)
+    // A closed stream frees its slot for the same client.
+    removeLiveHeadClient(held[0].res)
+    expect(addLiveHeadClient(fakeClient().res, '192.0.2.1')).toBe(true)
+  })
+
+  it('releases a stream once however often its close is reported', () => {
+    const a = fakeClient()
+    const b = fakeClient()
+    addLiveHeadClient(a.res, '192.0.2.1')
+    addLiveHeadClient(b.res, '192.0.2.1')
+    // Request close, response close and a response error can all fire for one stream.
+    removeLiveHeadClient(a.res)
+    removeLiveHeadClient(a.res)
+    removeLiveHeadClient(a.res)
+    expect(liveHeadClientCount('192.0.2.1')).toBe(1)
+    expect(liveHeadClientCount()).toBe(1)
+    // Re-adding a stream that is already counted does not count it twice.
+    expect(addLiveHeadClient(b.res, '192.0.2.1')).toBe(true)
+    expect(liveHeadClientCount('192.0.2.1')).toBe(1)
+    removeLiveHeadClient(b.res)
+    expect(liveHeadClientCount('192.0.2.1')).toBe(0)
+  })
+
+  it('refuses every client once the service holds its total cap', () => {
+    const held = Array.from({ length: MAX_LIVE_STREAMS }, (_, i) => {
+      const c = fakeClient()
+      expect(addLiveHeadClient(c.res, `client-${Math.floor(i / MAX_LIVE_STREAMS_PER_CLIENT)}`)).toBe(true)
+      return c
+    })
+    expect(liveHeadClientCount()).toBe(MAX_LIVE_STREAMS)
+    expect(liveHeadStreamAvailable('198.51.100.7')).toBe(false)
+    expect(addLiveHeadClient(fakeClient().res, '198.51.100.7')).toBe(false)
+    removeLiveHeadClient(held[0].res)
+    expect(addLiveHeadClient(fakeClient().res, '198.51.100.7')).toBe(true)
+  })
+
+  it('forgets every count on shutdown', () => {
+    addLiveHeadClient(fakeClient().res, '192.0.2.1')
+    stopLiveHeadService()
+    expect(liveHeadClientCount('192.0.2.1')).toBe(0)
+    expect(liveHeadStreamAvailable('192.0.2.1')).toBe(true)
   })
 })
