@@ -36,6 +36,7 @@ import { forumRoutes } from './routes/forum.ts'
 import { stripCorsFromPrivate } from './routes/corsPolicy.ts'
 import { registerHtmlCsp } from './routes/htmlCsp.ts'
 import { registerErrorPolicy } from './routes/errorPolicy.ts'
+import { requestLogSerializers } from './routes/logRedaction.ts'
 import { initConvictionState, refreshConvictionSnapshot, startConvictionSnapshotRefresh } from './services/convictionState.ts'
 import { initGovernanceRead } from './services/governanceRead.ts'
 import { initGovernanceDeposits } from './services/governanceDeposits.ts'
@@ -130,7 +131,8 @@ import { telegramConfigured } from './notifications/delivery.ts'
 // this to bare `true`, which would trust XFF from any hop, including a public
 // client spoofing it directly.
 const fastify = Fastify({
-  logger: true,
+  // The request line's URL drops wallet lists and one-time link codes (routes/logRedaction.ts).
+  logger: { serializers: requestLogSerializers },
   trustProxy: ['loopback', 'linklocal', 'uniquelocal'],
   // Verification clients can produce a doubled leading slash (`//v2/...`)
   // purely from how they join their configured base URL; collapse it before
