@@ -500,6 +500,8 @@ export async function deleteTag(owner: string, listId: string, tagId: string): P
 
 let membershipCeiling: number = LIMITS.membersTotal
 export function __setMembershipCeilingForTests(n: number = LIMITS.membersTotal): void { membershipCeiling = n }
+let membersPerAccountCap: number = LIMITS.membersPerAccount
+export function __setMembersPerAccountForTests(n: number = LIMITS.membersPerAccount): void { membersPerAccountCap = n }
 
 function ownedMembershipCount(owner: string): number {
   let n = 0
@@ -533,8 +535,8 @@ export async function setTagMembers(owner: string, listId: string, tagId: string
   const netNew = trulyNew.filter(id => !list.memberTag.has(id))
   if (list.memberTag.size + netNew.length > LIMITS.membersPerList) throw new UserDataError(422, `Limited to ${LIMITS.membersPerList} accounts per list`)
   if (netNew.length) {
-    if (ownedMembershipCount(owner) + netNew.length > LIMITS.membersPerAccount) {
-      throw new UserDataError(422, `Limited to ${LIMITS.membersPerAccount.toLocaleString('en-US')} tagged accounts across all your lists`)
+    if (ownedMembershipCount(owner) + netNew.length > membersPerAccountCap) {
+      throw new UserDataError(422, `Limited to ${membersPerAccountCap.toLocaleString('en-US')} tagged accounts across all your lists`)
     }
     if (totalMembershipCount() + netNew.length > membershipCeiling) {
       throw new UserDataError(503, 'Lists cannot take more tagged accounts right now — try again later')

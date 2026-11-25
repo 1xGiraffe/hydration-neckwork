@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import {
   initUserListService, loadUserLists, ensurePersonalList, createList, createTag, updateTag, setTagMembers, setMemberOrder,
-  subscribePublic, listOrderFor, directoryFoldFor, LIMITS, MAX_DIRECTORY_FOLD_PAIRS,
+  subscribePublic, listOrderFor, directoryFoldFor, LIMITS, MAX_DIRECTORY_FOLD_PAIRS, __setMembersPerAccountForTests,
 } from '../src/services/userListService.ts'
 import { initTagService, loadTags } from '../src/services/tagService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
@@ -207,7 +207,11 @@ describe('directoryFoldFor', () => {
 // derived from the constant rather than written out: a cap change must move
 // this test's data with it, never quietly stop exercising the boundary.
 describe('directoryFoldFor — the fold-size cap', () => {
+  // The per-account cap (LIMITS.membersPerAccount) sits below the fold cap; lift it so
+  // the fold's own guard is still exercised for a store loaded with more.
+  afterEach(() => { __setMembersPerAccountForTests() })
   beforeEach(async () => {
+    __setMembersPerAccountForTests(Number.MAX_SAFE_INTEGER)
     initUserListService(fakeClient())
     await loadUserLists()
     initTagService(fakeClient({}))
