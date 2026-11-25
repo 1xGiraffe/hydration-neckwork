@@ -8,7 +8,7 @@ import { registerErrorPolicy } from '../src/routes/errorPolicy.ts'
 // reads on purpose — a 4xx, a deliberate 5xx refusal — is exactly what Fastify's
 // default handler gives.
 
-const INTERNAL = 'Code: 60. DB::Exception: Unknown table price_data.secret_table (clickhouse:8123, version 24.8) SELECT * FROM price_data.secret_table'
+const INTERNAL = 'Code: 60. DB::Exception: Unknown table price_data.secret_table (db.example:9000, version 1.2.3) SELECT * FROM price_data.secret_table'
 
 function routes(app: FastifyInstance): void {
   app.get('/internal', async () => { throw new Error(INTERNAL) })
@@ -43,7 +43,7 @@ describe('explorer api error policy', () => {
     expect(res.statusCode).toBe(500)
     expect(res.json()).toEqual({ statusCode: 500, error: 'Internal Server Error', message: 'Internal Server Error' })
     expect(res.body).not.toContain('secret_table')
-    expect(res.body).not.toContain('8123')
+    expect(res.body).not.toContain('db.example')
     expect(logs.join('')).toContain('secret_table')
   })
 
