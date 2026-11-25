@@ -456,9 +456,14 @@ export function isAuthor(accountId: string, author: string): boolean { return sa
  */
 export function speaksFor(accountId: string, proposer: string): boolean {
   if (sameAccount(proposer, accountId)) return true
+  const signs = (multisig: string) => !!multisigCompositionFor([multisig])?.signatories.some(s => sameAccount(s, accountId))
   const proxy = proxyInfoFor([proposer])
-  if (proxy?.delegates.some(d => sameAccount(d.accountId, accountId) && (d.proxyType === 'Any' || d.proxyType === 'Governance') && d.delay === 0)) return true
-  return !!multisigCompositionFor([proposer])?.signatories.some(s => sameAccount(s, accountId))
+  // A zero-delay Any/Governance delegate speaks for the proposer, and so do the
+  // signatories of a delegate that is a multisig (a pure proxy run by a council
+  // multisig: the multisig itself holds no key).
+  if (proxy?.delegates.some(d => (d.proxyType === 'Any' || d.proxyType === 'Governance') && d.delay === 0
+    && (sameAccount(d.accountId, accountId) || signs(d.accountId)))) return true
+  return signs(proposer)
 }
 
 /** An on-chain subject's key, canonical only (no leading zeros): 'opengov:450', never 'opengov:0450'. */

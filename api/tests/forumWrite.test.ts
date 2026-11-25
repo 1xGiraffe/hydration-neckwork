@@ -15,10 +15,10 @@ vi.mock('../src/services/governanceDeposits.ts', () => ({
   referendumDeposits: async (i: number) => ({ submission: { who: i === 12 ? `0x${'5d'.repeat(32)}` : `0x${'50'.repeat(32)}` } }),
 }))
 // The proposer's proxies AS THEY STAND NOW — mutable, so a test can remove one.
-const mockProxies = vi.hoisted(() => ({ delegates: [] as Array<{ accountId: string; proxyType: string; delay: number }>, isPure: null as { creator: string } | null }))
+const mockProxies = vi.hoisted(() => ({ delegates: [] as Array<{ accountId: string; proxyType: string; delay: number }>, isPure: null as { creator: string } | null, multisigs: new Map<string, string[]>() }))
 vi.mock('../src/services/proxyMultisigService.ts', () => ({
   proxyInfoFor: (ids: string[]) => (ids[0] === `0x${'50'.repeat(32)}` ? { isPure: mockProxies.isPure, delegates: mockProxies.delegates, delegatorOf: [] } : null),
-  multisigCompositionFor: () => null,
+  multisigCompositionFor: (ids: string[]) => { const s = mockProxies.multisigs.get(ids[0]); return s ? { signatories: s } : null },
 }))
 
 const { initUserAuthService, issueSession, resetUserAuthForTests } = await import('../src/services/userAuthService.ts')
@@ -230,6 +230,15 @@ describe('referendum descriptions (proposer authority)', () => {
     // …but the spawner still speaks through a proxy right it holds now.
     mockProxies.delegates = [...mockProxies.delegates, { accountId: CAROL, proxyType: 'Any', delay: 0 }]
     expect(write.speaksFor(CAROL, PROPOSER)).toBe(true)
+  })
+
+  it('the signatories of a zero-delay multisig delegate speak for the proposer', async () => {
+    const council = `0x${'54'.repeat(32)}`, signer = `0x${'55'.repeat(32)}`, slowCouncil = `0x${'56'.repeat(32)}`, slowSigner = `0x${'57'.repeat(32)}`
+    mockProxies.multisigs.set(council, [signer]).set(slowCouncil, [slowSigner])
+    mockProxies.delegates = [...mockProxies.delegates, { accountId: council, proxyType: 'Governance', delay: 0 }, { accountId: slowCouncil, proxyType: 'Any', delay: 5 }]
+    expect(write.speaksFor(signer, PROPOSER)).toBe(true)
+    expect(write.speaksFor(slowSigner, PROPOSER)).toBe(false)
+    mockProxies.multisigs.clear()
   })
 
   it('the proposer and its Governance proxy may write; a Transfer proxy and strangers may not', async () => {
