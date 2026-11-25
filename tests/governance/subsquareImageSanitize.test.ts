@@ -145,6 +145,30 @@ describe('image container walk', () => {
     expect(sanitizeImage(png(4, 4, [actl(2), fctl(0, 4, 4, 0, 0), fctl(1, 2, 2, 2, 2)]))).toMatchObject({ animated: true })
   })
 
+  it('bounds an animated WebP by its ANMF frames like GIF and APNG', () => {
+    const u24 = (n: number) => [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff]
+    const vp8l = (w: number, h: number) => webpChunk('VP8L', [0x2f, ...u32le((w - 1) | ((h - 1) << 14)), 0, 0])
+    const anmf = ([x, y, w, h]: [number, number, number, number]) => webpChunk('ANMF', cat([...u24(x / 2), ...u24(y / 2), ...u24(w - 1), ...u24(h - 1), ...u24(100), 0], vp8l(w, h)))
+    const animated = (canvasW: number, canvasH: number, frames: Array<[number, number, number, number]>, vp8x = true) => {
+      const head = vp8x ? [webpChunk('VP8X', [0x02, 0, 0, 0, ...u24(canvasW - 1), ...u24(canvasH - 1)])] : []
+      const body = cat(enc('WEBP'), ...head, webpChunk('ANIM', [0, 0, 0, 0, 0, 0]), ...frames.map(anmf))
+      return cat(enc('RIFF'), u32le(body.length), body)
+    }
+    expect(sanitizeImage(animated(8, 8, [[0, 0, 8, 8], [2, 2, 4, 4]]))).toMatchObject({ mime: 'image/webp', width: 8, height: 8, animated: true })
+    // A full-size canvas with many tiny frames: refused by frames × canvas area long before the frame count.
+    expect(() => sanitizeImage(animated(8192, 4880, Array.from({ length: 11 }, () => [0, 0, 1, 1] as [number, number, number, number])))).toThrow(/too-much-animation/)
+    expect(sanitizeImage(animated(8192, 4880, Array.from({ length: 10 }, () => [0, 0, 1, 1] as [number, number, number, number])))).toMatchObject({ animated: true })
+    expect(() => sanitizeImage(animated(1, 1, Array.from({ length: 1001 }, () => [0, 0, 1, 1] as [number, number, number, number])))).toThrow(/too-many-frames/)
+    // A frame the canvas does not hold: past its edge, or larger than the caps themselves.
+    expect(() => sanitizeImage(animated(8, 8, [[6, 0, 4, 4]]))).toThrow(/webp-frame-outside/)
+    expect(() => sanitizeImage(animated(1, 1, [[0, 0, 9000, 9000]]))).toThrow(ImageError)
+    // No VP8X canvas to hold the frames.
+    expect(() => sanitizeImage(animated(8, 8, [[0, 0, 8, 8]], false))).toThrow(/webp-frame-outside/)
+    // An ANMF too short for its frame header.
+    const short = cat(enc('WEBP'), webpChunk('VP8X', [0x02, 0, 0, 0, ...u24(7), ...u24(7)]), webpChunk('ANMF', [0, 0, 0, 0]))
+    expect(() => sanitizeImage(cat(enc('RIFF'), u32le(short.length), short))).toThrow(/webp-bad-anmf/)
+  })
+
   it('validates without stripping when the bytes must keep their CID', () => {
     const src = png(4, 3, [pngChunk('tEXt', enc('Comment\0hello'))])
     expect(sanitizeImage(src, { strip: false }).bytes).toBe(src)

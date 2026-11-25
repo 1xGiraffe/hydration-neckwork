@@ -9,7 +9,8 @@
 // every frame's rectangle must lie inside the canvas the header declares (a 1×1
 // screen carrying a 9000×9000 frame is a bomb the header alone hides), at most
 // MAX_FRAMES frames, and frames × canvas area at most MAX_ANIMATION_PIXELS — the
-// pixels a viewer composites to play it once.
+// pixels a viewer composites to play it once. An animated WebP is held to the same
+// bounds through its ANMF frames.
 
 export type ImageMime = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
 
@@ -24,7 +25,7 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 type Walked = Omit<SanitizedImage, 'mime'> & { end: number }
 export const MAX_SIDE = 8192
 export const MAX_PIXELS = 40_000_000
-/** Frames in one animation (GIF image descriptors, APNG acTL/fcTL). */
+/** Frames in one animation (GIF image descriptors, APNG acTL/fcTL, WebP ANMF). */
 export const MAX_FRAMES = 1000
 /** Frames × canvas area: 400 MP, ten full-size 40 MP canvases or 1000 frames of 400k px. */
 export const MAX_ANIMATION_PIXELS = 400_000_000
@@ -190,7 +191,8 @@ function walkWebp(b: Uint8Array): Walked {
   if (riffSize + 8 > b.length || riffSize < 4) throw new ImageError('webp-truncated')
   const end = 8 + riffSize
   const parts: Uint8Array[] = []
-  let at = 12, width = 0, height = 0, animated = false, sawImage = false
+  let at = 12, width = 0, height = 0, animated = false, sawImage = false, frames = 0
+  const u24 = (p: number) => b[p] | (b[p + 1] << 8) | (b[p + 2] << 16)
   while (at + 8 <= end) {
     const fourcc = ascii(b, at, 4)
     const size = dv.getUint32(at + 4, true)
@@ -202,8 +204,8 @@ function walkWebp(b: Uint8Array): Walked {
       const chunk = b.slice(at, Math.min(next, end))
       chunk[8] &= ~(0x08 | 0x04) // clear the EXIF and XMP flags: those chunks are dropped
       animated = (b[data] & 0x02) !== 0
-      width = 1 + (b[data + 4] | (b[data + 5] << 8) | (b[data + 6] << 16))
-      height = 1 + (b[data + 7] | (b[data + 8] << 8) | (b[data + 9] << 16))
+      width = 1 + u24(data + 4)
+      height = 1 + u24(data + 7)
       parts.push(chunk)
     } else {
       if (fourcc === 'VP8 ') {
@@ -218,7 +220,14 @@ function walkWebp(b: Uint8Array): Walked {
           width = (bits & 0x3fff) + 1
           height = ((bits >>> 14) & 0x3fff) + 1
         }
-      } else if (fourcc === 'ANMF') sawImage = true
+      } else if (fourcc === 'ANMF') {
+        sawImage = true
+        // Frame header: X/2, Y/2, width-1, height-1 (24-bit little-endian each), duration, flags.
+        // The frame must lie inside the VP8X canvas, so an ANMF without one is refused too.
+        if (size < 16) throw new ImageError('webp-bad-anmf')
+        checkFrame(2 * u24(data), 2 * u24(data + 3), 1 + u24(data + 6), 1 + u24(data + 9), width, height, 'webp-frame-outside')
+        checkAnimation(++frames, width, height)
+      }
       if (WEBP_KEEP.has(fourcc)) parts.push(b.subarray(at, Math.min(next, end)))
     }
     at = next
