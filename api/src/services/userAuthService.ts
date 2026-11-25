@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { isIP } from 'node:net'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { signatureVerify, keccakAsU8a, secp256k1Recover, ethereumEncode, cryptoWaitReady, blake2AsU8a } from '@polkadot/util-crypto'
 import { hexToU8a, u8aConcat, stringToU8a, u8aWrapBytes } from '@polkadot/util'
@@ -106,7 +107,7 @@ export function verifySignedLogin(message: string, address: string, signature: s
 // because the 'no-challenge' branch below SAYS so. If every branch read
 // "Signature verification failed", an api restart would be indistinguishable
 // from a broken wallet and would silently eat a login.) ----
-interface PendingChallenge { accountId: string; address: string; message: string; expiresAt: number }
+interface PendingChallenge { accountId: string; address: string; message: string; expiresAt: number; client: string }
 // Long enough to cover a hardware signer: plugging a Ledger in, unlocking it,
 // opening the Polkadot app and confirming does not fit in the five minutes this
 // used to allow, and overrunning it produced the same misleading
@@ -114,7 +115,20 @@ interface PendingChallenge { accountId: string; address: string; message: string
 // single-use and bound to one address, so the only cost of the longer window is
 // a slightly larger pending set, which is capped below.
 export const NONCE_TTL_MS = 15 * 60_000
+// The pending set is bounded twice, and neither bound ever refuses a login:
+// one client (an IPv4 address, or an IPv6 /64 — see challengeClientKey) holds at
+// most MAX_PENDING_PER_CLIENT challenges, its own oldest giving way to a new
+// one, and when the whole set is full the oldest challenge anyone holds gives
+// way. Refusing at a full set would let a few clients that keep it full block
+// every login; evicting means they can only shorten how long an unsigned
+// challenge survives, and filling the set needs MAX_PENDING_CHALLENGES /
+// MAX_PENDING_PER_CLIENT distinct clients. An evicted challenge reads as
+// 'no-challenge' ("no longer valid — please try again").
+const MAX_PENDING_CHALLENGES = 10_000
+const MAX_PENDING_PER_CLIENT = 10
+// Insertion order is issue order, so the first key is always the oldest.
 const pendingChallenges = new Map<string, PendingChallenge>()
+const pendingByClient = new Map<string, string[]>()
 
 // ---- sessions: raw token only ever exists client-side; the map and the table
 // hold its sha256. 90-day sliding expiry, persisted at most hourly. Each
@@ -141,25 +155,53 @@ export async function initUserAuthService(c: ClickHouseClient): Promise<void> {
   await cryptoWaitReady()   // sr25519 verification is wasm-backed
 }
 
-export function resetUserAuthForTests(): void { pendingChallenges.clear(); sessionsByHash.clear() }
+export function resetUserAuthForTests(): void { pendingChallenges.clear(); pendingByClient.clear(); sessionsByHash.clear() }
+export function __pendingChallengeCountForTests(): number { return pendingChallenges.size }
 export function __sessionCountForTests(): number { return sessionsByHash.size }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 
-export function createChallenge(host: string, address: string): LoginChallenge | null {
+// The client a challenge is counted against: the IPv4 address, or the /64 an
+// IPv6 address sits in (one subscriber line usually holds a whole /64, so
+// keying on the full address would hand a single client unlimited keys). An
+// IPv4-mapped IPv6 address counts as its IPv4. Also the login limiter's key.
+export function challengeClientKey(ip: string): string {
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip)
+  if (mapped) return mapped[1]
+  if (isIP(ip) !== 6) return ip
+  const halves = ip.toLowerCase().split('%')[0].split('::')
+  const head = halves[0] ? halves[0].split(':') : []
+  const tail = halves.length > 1 && halves[1] ? halves[1].split(':') : []
+  const groups = [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail]
+  return `${groups.slice(0, 4).map(g => parseInt(g, 16).toString(16)).join(':')}::/64`
+}
+
+function dropChallenge(nonce: string): void {
+  const pending = pendingChallenges.get(nonce)
+  if (!pending) return
+  pendingChallenges.delete(nonce)
+  const queue = pendingByClient.get(pending.client)
+  if (!queue) return
+  const at = queue.indexOf(nonce)
+  if (at >= 0) queue.splice(at, 1)
+  if (!queue.length) pendingByClient.delete(pending.client)
+}
+
+export function createChallenge(host: string, address: string, client = ''): LoginChallenge | null {
   const n = normalizeAddress(address)
   if (!n) return null
   const nonce = randomBytes(16).toString('hex')
   const issued = Date.now()
   const message = buildLoginMessage(host, address.trim(), n.ss58Polkadot ?? n.accountId, nonce, new Date(issued).toISOString(), new Date(issued + NONCE_TTL_MS).toISOString())
-  // Cap the pending set so an unauthenticated client cannot grow it unboundedly
-  // between sweeps (rate limiting bounds the rate; this bounds the total).
-  if (pendingChallenges.size > 10_000) {
-    const now = Date.now()
-    for (const [k, v] of pendingChallenges) if (v.expiresAt < now) pendingChallenges.delete(k)
-    if (pendingChallenges.size > 10_000) return null
+  while ((pendingByClient.get(client)?.length ?? 0) >= MAX_PENDING_PER_CLIENT) dropChallenge(pendingByClient.get(client)![0])
+  if (pendingChallenges.size >= MAX_PENDING_CHALLENGES) {
+    for (const [k, v] of pendingChallenges) if (v.expiresAt < issued) dropChallenge(k)
+    while (pendingChallenges.size >= MAX_PENDING_CHALLENGES) dropChallenge(pendingChallenges.keys().next().value!)
   }
-  pendingChallenges.set(nonce, { accountId: n.accountId, address: address.trim(), message, expiresAt: issued + NONCE_TTL_MS })
+  pendingChallenges.set(nonce, { accountId: n.accountId, address: address.trim(), message, expiresAt: issued + NONCE_TTL_MS, client })
+  const queue = pendingByClient.get(client)
+  if (queue) queue.push(nonce)
+  else pendingByClient.set(client, [nonce])
   return { nonce, message }
 }
 
@@ -177,7 +219,7 @@ export type ChallengeResult =
 export function verifyChallenge(nonce: string, address: string, signature: string): ChallengeResult {
   const pending = pendingChallenges.get(nonce)
   if (!pending) return { ok: false, reason: 'no-challenge' }
-  pendingChallenges.delete(nonce)   // single-use, burn before verifying
+  dropChallenge(nonce)   // single-use, burn before verifying
   if (pending.expiresAt < Date.now()) return { ok: false, reason: 'expired' }
   if (pending.address !== address.trim()) return { ok: false, reason: 'address-mismatch' }
   if (!verifySignedLogin(pending.message, pending.address, signature)) return { ok: false, reason: 'bad-signature' }

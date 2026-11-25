@@ -4,7 +4,7 @@ import { z } from 'zod'
 import {
   createChallenge, verifyChallenge, issueSession, revokeSession, requireUser, sessionUser,
   listSessions, revokeSessionByHash, deviceLabelFromUserAgent,
-  loginFailureMessage, describeLoginSignature,
+  loginFailureMessage, describeLoginSignature, challengeClientKey,
 } from '../services/userAuthService.ts'
 import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
 import {
@@ -160,13 +160,14 @@ export async function userRoutes(fastify: FastifyInstance) {
     if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
   })
 
-  fastify.post('/user/auth/challenge', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+  // Keyed like the pending-challenge cap: per IPv4 address or IPv6 /64.
+  fastify.post('/user/auth/challenge', { config: { rateLimit: { max: 10, timeWindow: '1 minute', keyGenerator: req => challengeClientKey(req.ip) } } }, async (req, reply) => {
     const body = addressBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid address' })
     // The domain the statement names is the explorer's public one, never the request's
     // Host header (which whoever calls the api chooses): the person compares it with
     // their address bar.
-    const challenge = createChallenge(LOGIN_DOMAIN, body.data.address)
+    const challenge = createChallenge(LOGIN_DOMAIN, body.data.address, challengeClientKey(req.ip))
     if (!challenge) return reply.status(400).send({ error: 'Invalid address' })
     return challenge
   })
