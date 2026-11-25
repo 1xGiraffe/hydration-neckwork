@@ -61,11 +61,17 @@ async function fetchUpstream(url: string): Promise<ProxyResult> {
   // is keyless, so no credential of ours is sent either.
   const headers: Record<string, string> = { accept: 'application/json', 'user-agent': USER_AGENT }
 
+  // A redirect is never followed: the allow-list vets the URL asked for, and a
+  // followed Location would reach whatever host the upstream names. fetch throws
+  // on a redirect status, which reaches the caller as a transport failure (502);
+  // a 3xx that is not a redirect (300, 304) is refused the same way.
   const res = await fetch(url, {
     method: 'GET',
     headers,
+    redirect: 'error',
     signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   })
+  if (res.status >= 300 && res.status < 400) throw new Error(`upstream responded ${res.status}`)
   const result: ProxyResult = {
     status: res.status,
     contentType: passthroughContentType(res.headers.get('content-type')),
@@ -116,7 +122,7 @@ export const proxyRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
     const description = [
       upstream.docs,
       `Allow-listed paths only — anything else is 404: ${upstream.allow.map(pattern => pattern.source).join(' | ')}.`,
-      `Responses are cached in this process for ${Math.round(upstream.ttlMs / 1000)}s and are never stored by a shared cache. An upstream 4xx is passed through; a 5xx or a timeout is reported as 502, and neither is cached.`,
+      `Responses are cached in this process for ${Math.round(upstream.ttlMs / 1000)}s and are never stored by a shared cache. An upstream 4xx is passed through; a 5xx, a redirect or a timeout is reported as 502, and none is cached.`,
       'No caller header is forwarded upstream.',
     ].join(' ')
     // The response is whatever the upstream sent, passed through byte for byte —

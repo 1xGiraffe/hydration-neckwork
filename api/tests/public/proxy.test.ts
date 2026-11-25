@@ -209,6 +209,28 @@ describe('proxy passthrough route', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('never follows an upstream redirect', async () => {
+    // The allow-list vets the URL asked for; a followed Location could reach any host.
+    const id = uuid()
+    const fetchMock = stubFetch(upstreamReply(200, '{}'))
+    await app.inject(`/proxy/defillama/yields/chart/${id}`)
+    expect((fetchMock.mock.calls[0][1] as { redirect?: string }).redirect).toBe('error')
+  })
+
+  it('reports a redirect as 502 and never caches it', async () => {
+    // fetch rejects a redirect under `redirect: 'error'`; a 3xx that still arrives
+    // as a response is refused the same way and its body never passes through.
+    const id = uuid()
+    const fetchMock = stubFetch(new TypeError('fetch failed: unexpected redirect'), upstreamReply(304, 'moved elsewhere'))
+    for (let i = 0; i < 2; i += 1) {
+      const res = await app.inject(`/proxy/defillama/yields/chart/${id}`)
+      expect(res.statusCode).toBe(502)
+      expect(res.json().error.code).toBe('upstream_error')
+      expect(res.body).not.toContain('elsewhere')
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('passes an upstream 4xx through unchanged and never caches it', async () => {
     // A 404 for an unknown pool id is the caller's answer, not our fault — but it
     // is still a failure, so the next request re-asks.
