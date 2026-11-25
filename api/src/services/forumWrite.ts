@@ -450,14 +450,14 @@ export function isAuthor(accountId: string, author: string): boolean { return sa
 
 /**
  * The accounts that may speak for an on-chain subject's proposer P: P itself, any of
- * P's Any or Governance proxies, every signatory when P is a multisig, and P's spawner
- * when P is a pure proxy — evaluated from the indexed state on every write.
+ * P's Any or Governance proxies that can act at once (no announcement delay), and
+ * every signatory when P is a multisig — evaluated from the indexed state on every
+ * write. A pure proxy's spawner speaks for it only through such a proxy right of its own.
  */
 export function speaksFor(accountId: string, proposer: string): boolean {
   if (sameAccount(proposer, accountId)) return true
   const proxy = proxyInfoFor([proposer])
-  if (proxy?.delegates.some(d => sameAccount(d.accountId, accountId) && (d.proxyType === 'Any' || d.proxyType === 'Governance'))) return true
-  if (proxy?.isPure && sameAccount(proxy.isPure.creator, accountId)) return true
+  if (proxy?.delegates.some(d => sameAccount(d.accountId, accountId) && (d.proxyType === 'Any' || d.proxyType === 'Governance') && d.delay === 0)) return true
   return !!multisigCompositionFor([proposer])?.signatories.some(s => sameAccount(s, accountId))
 }
 
@@ -465,13 +465,13 @@ export function speaksFor(accountId: string, proposer: string): boolean {
 export const SUBJECT_RE = /^(opengov|democracy):(0|[1-9]\d{0,8})$/
 const OPENGOV_RE = /^opengov:(0|[1-9]\d{0,8})$/
 
-/** The proposer whose authority owns an on-chain subject's description (the submit's signer, and the account its submission deposit came from), or null (no such referendum, or none recorded). */
+/** The proposer whose authority owns an on-chain subject's description (the account the submit ran as, and the account its submission deposit came from), or null (no such referendum, or none recorded). */
 async function subjectProposer(postId: string): Promise<{ exists: boolean; proposer: string | null; depositor: string | null }> {
   const m = SUBJECT_RE.exec(postId)
   if (!m) return { exists: false, proposer: null, depositor: null }
   const detail = await getReferendum(m[1] as 'opengov' | 'democracy', Number(m[2]), 1).catch(() => null)
-  // The submit extrinsic's signer is a proxy when the proposal was submitted through
-  // one; the account the submission deposit was reserved from is the real proposer.
+  // The account the submission deposit was reserved from is the one Referenda::submit
+  // ran as, however the call was wrapped (a proxy, a multisig, a batch).
   const deposits = m[1] === 'opengov' && detail ? await referendumDeposits(Number(m[2])).catch(() => null) : null
   return { exists: !!detail, proposer: detail?.proposer?.accountId ?? null, depositor: deposits?.submission?.who ?? null }
 }
@@ -484,9 +484,9 @@ export interface Permissions { edit: boolean; delete: boolean; update: boolean; 
  *
  * A discussion is its author's. An on-chain subject's description is NEVER owned by
  * whoever last wrote it: its authority is recomputed on every call from the chain —
- * the referendum's proposer and, as they stand now, its Any/Governance proxies,
- * multisig signatories and pure-proxy creator — so a proxy that was removed loses the
- * right at once. A description cannot be deleted by anyone (its revisions are the
+ * the referendum's proposer and, as they stand now, its Any/Governance proxies
+ * without a delay and its multisig signatories — so a proxy that was removed loses
+ * the right at once. A description cannot be deleted by anyone (its revisions are the
  * record of what the proposer said); only a moderator's purge erases it.
  */
 export async function postPermissions(accountId: string, postId: string): Promise<Permissions> {
@@ -496,7 +496,10 @@ export async function postPermissions(accountId: string, postId: string): Promis
   const commentable = commentableThread(meta ? threadKeyFor(postId) : postId, postId)
   if (subject) {
     const { proposer, depositor } = await subjectProposer(postId)
-    const authority = (!!proposer && speaksFor(accountId, proposer)) || (!!depositor && speaksFor(accountId, depositor))
+    // The depositor when it is known, else the proposer — never both, so whoever
+    // merely signed a wrapped submit gains nothing.
+    const owner = depositor ?? proposer
+    const authority = !!owner && speaksFor(accountId, owner)
     return {
       edit: !gone && authority, delete: false, update: !gone && authority && OPENGOV_RE.test(postId),
       comment: commentable.ok, reason: gone ? 'This was deleted.' : commentable.ok ? null : commentable.reason,

@@ -6,6 +6,7 @@ import { convictionName, decodeVoteByte, weightedVotePower } from './convictionW
 import { assetDescriptor } from './explorerAssets.ts'
 import { accountRef, ensurePrices, nestedRemovalRefs, nestedVoteInfos, removalRefsFromPermitData, voteFromPermitData, type AccountRef, type AssetRef } from './explorerService.ts'
 import { referendumTitleFor } from './referendumTitleService.ts'
+import { onBehalfActorsFor } from './onBehalfActors.ts'
 import { pendingNodeApi } from './pendingHeadService.ts'
 import { curveCrossingX, curveDelayPerbill, curveThresholdPerbill, mulCeilPerbill, PERBILL, perbillOfRational, trackById, undecidingTimeoutBlocks, type TrackDef } from './referendaTracks.ts'
 
@@ -1657,17 +1658,11 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     // actually did the thing (see loadEnactmentChain).
     const chain = enactment ? await loadEnactmentChain(enactment, await indexedHead()) : null
 
-    // The proposer: the submit extrinsic's signer (effective signer for proxied
-    // and EVM-signed submissions).
+    // The proposer: the account the submit extrinsic ran as (submittersOf).
     let proposer: AccountRef | null = null
     if (pallet === 'opengov' && submitted?.extrinsic_index != null) {
-      const signerRes = await client.query({
-        query: `SELECT ifNull(signer, effective_signer) AS who FROM price_data.raw_extrinsics
-                WHERE block_height = {b:UInt32} AND extrinsic_index = {i:UInt32} LIMIT 1`,
-        query_params: { b: submitted.block_height, i: submitted.extrinsic_index }, format: 'JSONEachRow',
-      })
-      const who = (await signerRes.json<{ who: string | null }>())[0]?.who
-      if (who && /^0x[0-9a-f]{64}$/i.test(who)) proposer = accountRef(who.toLowerCase())
+      const who = (await submittersOf([[submitted.block_height, submitted.extrinsic_index]])).get(`${submitted.block_height}:${submitted.extrinsic_index}`)
+      if (who) proposer = accountRef(who)
     }
 
     const trackId = typeof submittedArgs.track === 'number' ? submittedArgs.track : null
@@ -1741,9 +1736,9 @@ export interface ReferendumListRow {
   blockHeight: number
   timestamp: string
   // OpenGov enrichment (null for Democracy): the track off the Submitted event,
-  // and the account that signed the submit extrinsic (effective signer for
-  // proxied/EVM submissions). Democracy proposals were tabled from a queue and
-  // name no single submitter.
+  // and the account the submit extrinsic ran as (submittersOf: the proxied or
+  // multisig account, else the signer). Democracy proposals were tabled from a
+  // queue and name no single submitter.
   track: GovernanceTrackRef | null
   proposer: AccountRef | null
   // How the approved call's enactment went (OpenGov only, null until it runs).
@@ -1769,6 +1764,32 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
   // hidden description drops its title from every list as soon as the forum snapshot does.
   return (await referendumDirectory()).slice(offset, offset + limit)
     .map(row => ({ ...row, title: referendumTitleFor(row.pallet, row.index) }))
+}
+
+/**
+ * The account each submit extrinsic ran as, keyed `block:extrinsic`: the on-behalf
+ * actor (onBehalfActors.ts — the innermost proxy's real account, else the multisig it
+ * executed as), or else its signer (the recovered signer of an EVM-originated one).
+ * A signer acting through a proxy or a multisig is never the proposer.
+ */
+async function submittersOf(pairs: Array<[number, number]>): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  if (!pairs.length) return out
+  const [signerRes, onBehalf] = await Promise.all([
+    client.query({
+      query: `SELECT block_height, extrinsic_index, ifNull(signer, effective_signer) AS who
+              FROM price_data.raw_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${pairs.map(([b, i]) => `(${b},${i})`).join(',')})`,
+      format: 'JSONEachRow',
+    }),
+    onBehalfActorsFor(client, pairs),
+  ])
+  for (const row of await signerRes.json<{ block_height: number; extrinsic_index: number; who: string | null }>()) {
+    const key = `${row.block_height}:${row.extrinsic_index}`
+    const who = onBehalf.get(key) ?? row.who
+    if (who && /^0x[0-9a-f]{64}$/i.test(who)) out.set(key, who.toLowerCase())
+  }
+  return out
 }
 
 // The whole directory (~600 rows), sorted by last activity. Built whole because
@@ -1806,25 +1827,14 @@ async function referendumDirectory(): Promise<ReferendumListRow[]> {
       format: 'JSONEachRow',
     })
     const raw = await res.json<{ pallet: string; ref_index: number; events: string[]; block_height: number; ts: string; track_id: number; submit_block: number; submit_ext: number }>()
-    // Every submit extrinsic's signer in one primary-key batch (~400 tuples);
+    // Every submit extrinsic's submitter in one primary-key batch (~400 tuples);
     // the directory result is cached, so this is not a per-request read.
-    const submitKeys = raw.filter(r => r.pallet === 'opengov' && Number(r.submit_ext) >= 0)
-      .map(r => `(${r.submit_block},${r.submit_ext})`)
+    const submitPairs = raw.filter(r => r.pallet === 'opengov' && Number(r.submit_ext) >= 0)
+      .map((r): [number, number] => [Number(r.submit_block), Number(r.submit_ext)])
     const maxOpengovIndex = raw.reduce((m, r) => (r.pallet === 'opengov' ? Math.max(m, Number(r.ref_index)) : m), -1)
     const enactments = maxOpengovIndex >= 0 ? await loadEnactmentOutcomes(maxOpengovIndex) : new Map<number, { outcome: ReferendumEnactmentOutcome; row: EnactmentRow }>()
     const scheduled = await scheduledActivityByReferendum(enactments)
-    const signerByKey = new Map<string, string>()
-    if (submitKeys.length) {
-      const signerRes = await client.query({
-        query: `SELECT block_height, extrinsic_index, ifNull(signer, effective_signer) AS who
-                FROM price_data.raw_extrinsics
-                WHERE (block_height, extrinsic_index) IN (${submitKeys.join(',')})`,
-        format: 'JSONEachRow',
-      })
-      for (const row of await signerRes.json<{ block_height: number; extrinsic_index: number; who: string | null }>()) {
-        if (row.who && /^0x[0-9a-f]{64}$/i.test(row.who)) signerByKey.set(`${row.block_height}:${row.extrinsic_index}`, row.who.toLowerCase())
-      }
-    }
+    const signerByKey = await submittersOf(submitPairs)
     return raw.map(row => {
       const pallet = row.pallet as ReferendumPallet
       const trackId = Number(row.track_id)

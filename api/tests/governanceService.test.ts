@@ -621,6 +621,36 @@ describe('detail page enactment upgrade', () => {
   })
 })
 
+// The proposer is the account the submit ran as, never an outer signer acting for it.
+describe('referendum proposer', () => {
+  const SIGNER = `0x${'51'.repeat(32)}`
+  const REAL = `0x${'50'.repeat(32)}`
+  const setup = (proxied: boolean) => {
+    const query = vi.fn(async ({ query }: { query: string }) => ({
+      json: async () => {
+        if (query.includes('referendum_lifecycle_events')) {
+          return [
+            { event_name: 'Referenda.Submitted', block_height: 9_900_000, extrinsic_index: 3, ts: '2025-10-14 00:00:00', args_json: '{"index":231,"track":1}' },
+            { event_name: 'Referenda.Rejected', block_height: 9_920_000, extrinsic_index: null, ts: '2025-10-15 00:00:00', args_json: '{"index":231,"tally":{"ayes":"0","nays":"10","support":"5"}}' },
+          ]
+        }
+        if (query.includes('FROM price_data.raw_extrinsics')) return [{ block_height: 9_900_000, extrinsic_index: 3, who: SIGNER }]
+        if (query.includes('proxy_call_activity')) return proxied ? [{ block_height: 9_900_000, extrinsic_index: 3, call_address: 'root', real_account: REAL }] : []
+        return []
+      },
+    }))
+    initGovernanceService({ query } as never)
+    initExplorerService({ query } as never)
+  }
+
+  it('is the proxied account for a submit dispatched through a proxy, and the signer otherwise', async () => {
+    setup(true)
+    expect((await getReferendum('opengov', 231, 7))?.proposer?.accountId).toBe(REAL)
+    setup(false)
+    expect((await getReferendum('opengov', 231, 8))?.proposer?.accountId).toBe(SIGNER)
+  })
+})
+
 describe('referendum page read bounds', () => {
   const rowsFor = (query: string): unknown[] => {
     if (query.includes('price_data.referendum_lifecycle_events')) {

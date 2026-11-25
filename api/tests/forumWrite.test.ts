@@ -15,9 +15,9 @@ vi.mock('../src/services/governanceDeposits.ts', () => ({
   referendumDeposits: async (i: number) => ({ submission: { who: i === 12 ? `0x${'5d'.repeat(32)}` : `0x${'50'.repeat(32)}` } }),
 }))
 // The proposer's proxies AS THEY STAND NOW — mutable, so a test can remove one.
-const mockProxies = vi.hoisted(() => ({ delegates: [] as Array<{ accountId: string; proxyType: string; delay: number }> }))
+const mockProxies = vi.hoisted(() => ({ delegates: [] as Array<{ accountId: string; proxyType: string; delay: number }>, isPure: null as { creator: string } | null }))
 vi.mock('../src/services/proxyMultisigService.ts', () => ({
-  proxyInfoFor: (ids: string[]) => (ids[0] === `0x${'50'.repeat(32)}` ? { isPure: null, delegates: mockProxies.delegates, delegatorOf: [] } : null),
+  proxyInfoFor: (ids: string[]) => (ids[0] === `0x${'50'.repeat(32)}` ? { isPure: mockProxies.isPure, delegates: mockProxies.delegates, delegatorOf: [] } : null),
   multisigCompositionFor: () => null,
 }))
 
@@ -111,6 +111,7 @@ beforeEach(() => {
   fake = forumFake({ [ALICE]: 500n * HDX, [BOB]: 5n * HDX, [MOD]: 5000n * HDX, [`0x${'51'.repeat(32)}`]: 10n * HDX, [CAROL]: 200n * HDX, [DAVE]: 300n * HDX })
   firstSeen = {}
   mockProxies.delegates = [{ accountId: `0x${'51'.repeat(32)}`, proxyType: 'Governance', delay: 0 }, { accountId: `0x${'52'.repeat(32)}`, proxyType: 'Transfer', delay: 0 }]
+  mockProxies.isPure = null
   store.setForumSnapshotForTest({ generation: 'g0' })
   initForumRead(fake.client)
   write.initForumWrite(fake.client)
@@ -214,6 +215,20 @@ describe('referendum descriptions (proposer authority)', () => {
     expect((await write.postPermissions(real, 'opengov:12')).edit).toBe(true)
     expect((await write.postPermissions(real, 'opengov:13')).edit).toBe(false)
     expect((await write.postPermissions(ALICE, 'opengov:12')).edit).toBe(false)
+    // The outer signer (and its proxies) gain nothing from having signed the submit.
+    expect((await write.postPermissions(PROPOSER, 'opengov:12')).edit).toBe(false)
+    expect((await write.postPermissions(PROPOSER_PROXY, 'opengov:12')).edit).toBe(false)
+  })
+
+  it('a proxy with an announcement delay, and a pure proxy\'s spawner as such, do not speak for the proposer', async () => {
+    const delayed = `0x${'53'.repeat(32)}`
+    mockProxies.delegates = [...mockProxies.delegates, { accountId: delayed, proxyType: 'Any', delay: 10 }]
+    expect(write.speaksFor(delayed, PROPOSER)).toBe(false)
+    mockProxies.isPure = { creator: CAROL }
+    expect(write.speaksFor(CAROL, PROPOSER)).toBe(false)
+    // …but the spawner still speaks through a proxy right it holds now.
+    mockProxies.delegates = [...mockProxies.delegates, { accountId: CAROL, proxyType: 'Any', delay: 0 }]
+    expect(write.speaksFor(CAROL, PROPOSER)).toBe(true)
   })
 
   it('the proposer and its Governance proxy may write; a Transfer proxy and strangers may not', async () => {
