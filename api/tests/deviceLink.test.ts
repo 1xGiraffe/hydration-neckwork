@@ -7,7 +7,7 @@ import {
   initUserAuthService, resetUserAuthForTests, issueSession, sessionAccount,
   listSessions, revokeSessionByHash, deviceLabelFromUserAgent,
 } from '../src/services/userAuthService.ts'
-import { createDeviceLink, claimDeviceLink, deviceLinkStatus, resetDeviceLinksForTests } from '../src/services/deviceLinkService.ts'
+import { createDeviceLink, claimDeviceLink, deviceLinkStatus, previewDeviceLink, resetDeviceLinksForTests } from '../src/services/deviceLinkService.ts'
 import { initUserListService, loadUserLists } from '../src/services/userListService.ts'
 import { fakeClient, insertedRows } from './helpers/userFakes.ts'
 
@@ -39,6 +39,21 @@ describe('device-link codes', () => {
     vi.setSystemTime(Date.now() + 3 * 60_000 + 1)
     expect(claimDeviceLink(link.code)).toBeNull()
     expect(deviceLinkStatus(link.linkId, ACCOUNT)).toBe('expired')
+  })
+
+  it('previews a live code’s account without consuming it', () => {
+    const link = createDeviceLink(ACCOUNT)!
+    expect(previewDeviceLink(link.code)).toBe(ACCOUNT)
+    expect(previewDeviceLink(link.code)).toBe(ACCOUNT)
+    expect(deviceLinkStatus(link.linkId, ACCOUNT)).toBe('pending')
+    expect(claimDeviceLink(link.code)).toBe(ACCOUNT)
+    // claimed, unknown and expired codes preview as nothing
+    expect(previewDeviceLink(link.code)).toBeNull()
+    expect(previewDeviceLink('0'.repeat(64))).toBeNull()
+    vi.useFakeTimers()
+    const later = createDeviceLink(ACCOUNT)!
+    vi.setSystemTime(Date.now() + 3 * 60_000 + 1)
+    expect(previewDeviceLink(later.code)).toBeNull()
   })
 
   it('only the issuing account can observe a link', () => {
@@ -118,6 +133,12 @@ describe('device-link routes', () => {
     const pending = await f.inject({ method: 'GET', url: `/user/auth/device-link/${linkId}`, headers: { authorization: `Bearer ${token}` } })
     expect(pending.json().status).toBe('pending')
 
+    // the "phone" first sees whose account the code signs into, without using it up
+    const preview = await f.inject({ method: 'POST', url: '/user/auth/device-link/preview', payload: { code } })
+    expect(preview.statusCode).toBe(200)
+    expect(preview.json().account.accountId).toBe(me.account.accountId)
+    expect(preview.headers['cache-control']).toBe('no-store')
+
     // the "phone": no auth header, only the code
     const claim = await f.inject({ method: 'POST', url: '/user/auth/device-link/claim', payload: { code }, headers: { 'user-agent': 'Mozilla/5.0 (Linux; Android 15) Chrome/126.0 Mobile Safari/537.36' } })
     expect(claim.statusCode).toBe(200)
@@ -131,6 +152,8 @@ describe('device-link routes', () => {
     // replay is rejected without touching the phone's fresh session
     const replay = await f.inject({ method: 'POST', url: '/user/auth/device-link/claim', payload: { code } })
     expect(replay.statusCode).toBe(401)
+    const spent = await f.inject({ method: 'POST', url: '/user/auth/device-link/preview', payload: { code } })
+    expect(spent.statusCode).toBe(401)
 
     const sessions = (await f.inject({ method: 'GET', url: '/user/sessions', headers: { authorization: `Bearer ${token}` } })).json().sessions
     expect(sessions).toHaveLength(2)
@@ -151,6 +174,10 @@ describe('device-link routes', () => {
     expect(anon.statusCode).toBe(401)
     const bad = await f.inject({ method: 'POST', url: '/user/auth/device-link/claim', payload: { code: 'nope' } })
     expect(bad.statusCode).toBe(400)
+    const badPreview = await f.inject({ method: 'POST', url: '/user/auth/device-link/preview', payload: { code: 'nope' } })
+    expect(badPreview.statusCode).toBe(400)
+    const unknownPreview = await f.inject({ method: 'POST', url: '/user/auth/device-link/preview', payload: { code: 'ab'.repeat(32) } })
+    expect(unknownPreview.statusCode).toBe(401)
     const { token } = await login(f)
     const foreign = await f.inject({ method: 'DELETE', url: '/user/sessions/deadbeef', headers: { authorization: `Bearer ${token}` } })
     expect(foreign.statusCode).toBe(404)

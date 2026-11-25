@@ -51,6 +51,15 @@ export function claimDeviceLink(code: string): string | null {
   return link.accountId
 }
 
+// The scanning device's look before it claims: the account a live, unclaimed code
+// would sign it into, or null. Never consumes the code. A link anyone can post opens
+// the claim page, so the page names the account before the reader taps the button.
+export function previewDeviceLink(code: string): string | null {
+  const link = linksByCodeHash.get(sha256(code))
+  if (!link || link.claimed || link.expiresAtMs < Date.now()) return null
+  return link.accountId
+}
+
 // Only the issuing account may observe a link's progress. Unknown and expired
 // collapse to 'expired' on purpose: after the sweep they are the same thing.
 export function deviceLinkStatus(linkId: string, accountId: string): 'pending' | 'claimed' | 'expired' {

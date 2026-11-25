@@ -6,7 +6,7 @@ import {
   listSessions, revokeSessionByHash, deviceLabelFromUserAgent,
   loginFailureMessage, describeLoginSignature, challengeClientKey,
 } from '../services/userAuthService.ts'
-import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
+import { createDeviceLink, claimDeviceLink, deviceLinkStatus, previewDeviceLink } from '../services/deviceLinkService.ts'
 import {
   accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold,
   getRecentActivity, getAssetActivity, getGlobalActivityTotal, getAddressActivity, getTagActivity,
@@ -145,9 +145,10 @@ export async function userRoutes(fastify: FastifyInstance) {
   // Scoped to this plugin's encapsulation context — explorer routes unaffected.
   await fastify.register(rateLimit, { max: 120, timeWindow: '1 minute' })
 
-  // The three routes that mint a session rather than carry one.
+  // The routes that mint a session rather than carry one, and the device-link
+  // preview the scanning device reads before it claims.
   privateUserHooks(fastify, [
-    '/user/auth/challenge', '/user/auth/verify', '/user/auth/device-link/claim',
+    '/user/auth/challenge', '/user/auth/verify', '/user/auth/device-link/claim', '/user/auth/device-link/preview',
   ])
 
   // The viewer-fold feeds take the SAME list filters as their public twins, so
@@ -197,7 +198,7 @@ export async function userRoutes(fastify: FastifyInstance) {
     return { token, me: await meResponse(accountId) }
   })
 
-  // ---- QR device-link handoff. All three live under /user/auth/ on purpose:
+  // ---- QR device-link handoff. All four live under /user/auth/ on purpose:
   // the UI's authedJson never drops a local session on a 401 from that prefix,
   // so a rejected (expired/used) code can't log the scanning device out of an
   // account it is already into. ----
@@ -217,6 +218,19 @@ export async function userRoutes(fastify: FastifyInstance) {
   fastify.get('/user/auth/device-link/:linkId', async (req) => {
     const accountId = sessionUser(req)
     return { status: deviceLinkStatus((req.params as { linkId: string }).linkId, accountId) }
+  })
+
+  // The scanning device's preview: the account the code would sign it into, shown
+  // before the claim, so a link someone else sent cannot sign the reader into their
+  // account unnoticed. It never consumes the code; like the claim, the code travels
+  // in the body (never a URL), the rate is limited, and unknown, expired and claimed
+  // codes answer alike.
+  fastify.post('/user/auth/device-link/preview', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const body = deviceLinkClaimBody.safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: 'Invalid link code' })
+    const accountId = previewDeviceLink(body.data.code)
+    if (!accountId) return reply.status(401).send({ error: 'This code has expired or was already used' })
+    return { account: accountRef(accountId) }
   })
 
   // The scanning device trades the code for its own session — same response
