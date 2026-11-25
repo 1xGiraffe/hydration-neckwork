@@ -300,3 +300,77 @@ describe('cache counters', () => {
     expect(families['fam:bad']).toEqual({ hit: 0, stale: 0, join: 0, miss: 1, error: 1 })
   })
 })
+
+describe('cache byte budget', () => {
+  beforeEach(() => { vi.resetModules() })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.useRealTimers()
+  })
+
+  it('estimates a value roughly in proportion to its contents', async () => {
+    const { approxBytes } = await import('../src/services/cache.ts')
+    const row = (i: number) => ({ accountId: `0x${String(i).padStart(64, '0')}`, value: i * 1.5, label: 'holder', flags: [true, false] })
+    const small = Array.from({ length: 1_000 }, (_, i) => row(i))
+    const large = Array.from({ length: 10_000 }, (_, i) => row(i))
+    const ratio = approxBytes(large) / approxBytes(small)
+    expect(ratio).toBeGreaterThan(9)
+    expect(ratio).toBeLessThan(11)
+    // A long string is about its length; a Map is measured through its members.
+    expect(approxBytes('x'.repeat(1_000_000))).toBeGreaterThanOrEqual(1_000_000)
+    const map = new Map(large.map(r => [r.accountId, r]))
+    expect(approxBytes(map)).toBeGreaterThan(approxBytes(large) / 2)
+  })
+
+  it('measures a huge or cyclic value in bounded time', async () => {
+    const { approxBytes } = await import('../src/services/cache.ts')
+    const nested = Array.from({ length: 2_000 }, () => Array.from({ length: 500 }, (_, i) => ({ i, s: 'abc' })))
+    const cyclic: Record<string, unknown> = { name: 'loop' }
+    cyclic.self = cyclic
+    const started = performance.now()
+    expect(approxBytes(nested)).toBeGreaterThan(2_000 * 500 * 8)
+    expect(Number.isFinite(approxBytes(cyclic))).toBe(true)
+    expect(performance.now() - started).toBeLessThan(200)
+  })
+
+  it('evicts the least recently used entries once the stored size passes the budget', async () => {
+    vi.stubEnv('API_CACHE_MAX_BYTES', '10000')
+    const { cached, cacheStats } = await import('../src/services/cache.ts')
+    const load = vi.fn(async (value: string) => value.repeat(4_000))
+    await cached('a', 60_000, () => load('a'))
+    await cached('b', 60_000, () => load('b'))
+    // Reading `a` makes `b` the least recently used.
+    await cached('a', 60_000, () => load('a'))
+    await cached('c', 60_000, () => load('c'))
+    expect(cacheStats().entries).toBe(2)
+    expect(cacheStats().bytes).toBeLessThanOrEqual(10_000)
+    await cached('a', 60_000, () => load('a'))
+    await cached('b', 60_000, () => load('b'))
+    expect(load.mock.calls.map(([value]) => value)).toEqual(['a', 'b', 'c', 'b'])
+  })
+
+  it('keeps a single entry larger than the whole budget rather than recomputing it per read', async () => {
+    vi.stubEnv('API_CACHE_MAX_BYTES', '1000')
+    const { cached, cacheStats } = await import('../src/services/cache.ts')
+    const load = vi.fn(async () => 'z'.repeat(5_000))
+    await cached('small', 60_000, async () => 'tiny')
+    await cached('huge', 60_000, load)
+    await cached('huge', 60_000, load)
+    expect(load).toHaveBeenCalledTimes(1)
+    expect(cacheStats().entries).toBe(1)
+  })
+
+  it('counts a rewritten key once and forgets removed entries', async () => {
+    vi.useFakeTimers()
+    const { cached, cacheInstall, cacheStats } = await import('../src/services/cache.ts')
+    await cached('k', 1_000, async () => 'v'.repeat(1_000))
+    const once = cacheStats().bytes
+    cacheInstall('k', 'v'.repeat(1_000), 1_000)
+    cacheInstall('k', 'v'.repeat(1_000), 1_000)
+    expect(cacheStats().bytes).toBe(once)
+    vi.advanceTimersByTime(1_001)
+    await cached('k', 1_000, async () => 'w')
+    expect(cacheStats().bytes).toBeLessThan(once)
+    expect(cacheStats().entries).toBe(1)
+  })
+})

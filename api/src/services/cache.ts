@@ -5,7 +5,7 @@
 // endpoint inside a TTL window collapse to a single DB query. Concurrent misses
 // for the same key share one in-flight promise (no thundering herd), and the
 // resolved value is served for `ttlMs`.
-interface Entry<T> { value: T; expiresAt: number; freshUntil?: number; lastAccessedAt: number; generation?: number }
+interface Entry<T> { value: T; expiresAt: number; freshUntil?: number; lastAccessedAt: number; generation?: number; bytes: number }
 
 const store = new Map<string, Entry<unknown>>()
 const inflight = new Map<string, Promise<unknown>>()
@@ -21,6 +21,16 @@ const maxEntries = (() => {
   const parsed = Number(process.env.API_CACHE_MAX_ENTRIES?.trim() || '5000')
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 5000
 })()
+// The store is bounded by its approximate size as well as by its entry count: a
+// few thousand entries of whole-directory pages or long histories could otherwise
+// hold an unbounded share of the heap. Sizes are estimated once, when an entry is
+// written (approxBytes below), so a hit pays nothing for the bound.
+const DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+const maxBytes = (() => {
+  const parsed = Number(process.env.API_CACHE_MAX_BYTES?.trim() || String(DEFAULT_MAX_BYTES))
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BYTES
+})()
+let storedBytes = 0
 
 /* ---------------- hit/miss counters ---------------- */
 
@@ -71,10 +81,11 @@ function count(key: string, outcome: CacheOutcome): void {
 }
 
 /** The counters since the last stats line (or reset), per family, plus the store's size. */
-export function cacheStats(): { sinceMs: number; entries: number; inflight: number; families: Record<string, FamilyCounts> } {
+export function cacheStats(): { sinceMs: number; entries: number; bytes: number; inflight: number; families: Record<string, FamilyCounts> } {
   return {
     sinceMs: Date.now() - statsWindowStart,
     entries: store.size,
+    bytes: storedBytes,
     inflight: inflight.size,
     families: Object.fromEntries([...familyCounts].map(([family, counts]) => [family, { ...counts }])),
   }
@@ -89,7 +100,7 @@ function logCacheStats(): void {
   const total = (c: FamilyCounts) => c.hit + c.stale + c.join + c.miss + c.error
   const families = Object.entries(stats.families).filter(([, c]) => total(c) > 0).sort((a, b) => total(b[1]) - total(a[1]))
   if (!families.length) return
-  console.log(`[cache] stats ${JSON.stringify({ windowSec: Math.round(stats.sinceMs / 1000), entries: stats.entries, inflight: stats.inflight, families: Object.fromEntries(families) })}`)
+  console.log(`[cache] stats ${JSON.stringify({ windowSec: Math.round(stats.sinceMs / 1000), entries: stats.entries, mib: Math.round(stats.bytes / 1048576), inflight: stats.inflight, families: Object.fromEntries(families) })}`)
 }
 
 function assertDuration(name: string, durationMs: number): void {
@@ -103,13 +114,94 @@ function nextAccess(): number {
   return accessSequence
 }
 
-// Map insertion order IS access order: every hit re-inserts its key, so the
-// first entry is always the least recently used and eviction is a single
-// `keys().next()` rather than a linear min-scan per evicted entry.
+// Map insertion order IS access order: every hit and every write re-inserts its
+// key, so the first entry is always the least recently used and eviction is a
+// single `keys().next()` rather than a linear min-scan per evicted entry.
 function touch(key: string, entry: Entry<unknown>): void {
   entry.lastAccessedAt = nextAccess()
   store.delete(key)
   store.set(key, entry)
+}
+
+// Every write and removal goes through these two, so storedBytes stays the sum of
+// the stored entries' estimates.
+function storeWrite(key: string, entry: Omit<Entry<unknown>, 'bytes'>): void {
+  storeRemove(key)
+  const bytes = key.length + approxBytes(entry.value)
+  store.set(key, { ...entry, bytes })
+  storedBytes += bytes
+}
+
+function storeRemove(key: string): void {
+  const entry = store.get(key)
+  if (!entry) return
+  store.delete(key)
+  storedBytes -= entry.bytes
+}
+
+/* ---------------- size estimate ---------------- */
+
+// An approximate retained size of a cached value, from a bounded walk: an array or
+// object with many members is measured on an evenly spaced sample (a Map or Set on
+// its first members) and extrapolated, and the walk's container budget is split
+// among the members it samples, so it visits about SIZE_WALK_NODES containers at
+// most and a large page costs about as much to measure as a small one. A shared
+// reference is counted wherever it appears. The figure only has to rank and bound
+// entries, not match the heap byte for byte.
+const SIZE_SAMPLE = 16
+const SIZE_WALK_NODES = 2_048
+const NOMINAL_OBJECT_BYTES = 64
+
+export function approxBytes(value: unknown): number {
+  return sizeOf(value, SIZE_WALK_NODES)
+}
+
+function sizeOf(value: unknown, budget: number): number {
+  switch (typeof value) {
+    case 'string': return 16 + value.length
+    case 'number': return 8
+    case 'boolean': return 4
+    case 'bigint': return 16
+    case 'undefined': return 0
+    case 'object': break
+    default: return 16
+  }
+  if (value === null) return 0
+  if (budget <= 0) return NOMINAL_OBJECT_BYTES
+  const inner = budget - 1
+  if (ArrayBuffer.isView(value)) return 64 + value.byteLength
+  if (value instanceof ArrayBuffer) return 64 + value.byteLength
+  if (value instanceof Date) return 48
+  if (Array.isArray(value)) return 32 + 8 * value.length + sampled(value.length, i => sizeOf(value[i], inner / sampleCount(value.length)))
+  if (value instanceof Map || value instanceof Set) {
+    const n = value.size
+    const share = inner / sampleCount(n)
+    let total = 0
+    let seen = 0
+    // A Set's entries are [member, member]; only a Map's second half is a value.
+    for (const [k, v] of value.entries()) {
+      if (seen >= SIZE_SAMPLE) break
+      total += sizeOf(k, share) + (value instanceof Map ? sizeOf(v, share) : 0)
+      seen += 1
+    }
+    return 64 + 16 * n + (seen ? total * n / seen : 0)
+  }
+  const keys = Object.keys(value)
+  const record = value as Record<string, unknown>
+  return 32 + sampled(keys.length, i => 16 + keys[i]!.length + sizeOf(record[keys[i]!], inner / sampleCount(keys.length)))
+}
+
+function sampleCount(n: number): number {
+  return Math.max(1, Math.min(n, SIZE_SAMPLE))
+}
+
+// The sum over n members, from at most SIZE_SAMPLE evenly spaced ones.
+function sampled(n: number, sizeAt: (i: number) => number): number {
+  if (n === 0) return 0
+  const k = sampleCount(n)
+  let total = 0
+  for (let j = 0; j < k; j += 1) total += sizeAt(Math.floor(j * n / k))
+  return total * n / k
 }
 
 // How often the expired-entry sweep is allowed to run. It is O(store.size), and
@@ -120,18 +212,25 @@ function touch(key: string, entry: Entry<unknown>): void {
 const SWEEP_INTERVAL_MS = 1_000
 let lastSweepAt = 0
 
+function overBudget(): boolean {
+  return store.size > maxEntries || storedBytes > maxBytes
+}
+
 function prune(now: number): void {
-  if (now - lastSweepAt >= SWEEP_INTERVAL_MS || store.size > maxEntries) {
+  if (now - lastSweepAt >= SWEEP_INTERVAL_MS || overBudget()) {
     lastSweepAt = now
     for (const [key, entry] of store) {
-      if (entry.expiresAt <= now) store.delete(key)
+      if (entry.expiresAt <= now) storeRemove(key)
     }
   }
 
-  while (store.size > maxEntries) {
+  // Least recently used first. The entry just written (the newest) is kept even
+  // when it alone exceeds the byte budget: dropping it would only turn its key
+  // into a recompute per request.
+  while (overBudget() && store.size > 1) {
     const oldest = store.keys().next()
     if (oldest.done) return
-    store.delete(oldest.value)
+    storeRemove(oldest.value)
   }
 }
 
@@ -151,7 +250,7 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
       // An install landed while this load ran: its value is the newer one (see installEpochs).
       const superseded = (installEpochs.get(key) ?? -1) > startEpoch
       if (!superseded && (keepIf == null || keepIf(value))) {
-        store.set(key, {
+        storeWrite(key, {
           value,
           ...(freshMs == null ? {} : { freshUntil: resolvedAt + freshMs }),
           ...(generation == null ? {} : { generation }),
@@ -175,6 +274,7 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
 // Test-only: a fresh app under test must not see the previous test's entries.
 export function resetCacheForTests(): void {
   store.clear()
+  storedBytes = 0
   inflight.clear()
   installEpochs.clear()
   familyCounts.clear()
@@ -191,7 +291,7 @@ export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>
     count(key, 'hit')
     return hit.value
   }
-  if (hit) store.delete(key)
+  if (hit) storeRemove(key)
 
   const pending = inflight.get(key) as Promise<T> | undefined
   if (pending) {
@@ -217,7 +317,7 @@ export async function cachedFor<T>(key: string, fn: () => Promise<{ value: T; tt
     count(key, 'hit')
     return hit.value
   }
-  if (hit) store.delete(key)
+  if (hit) storeRemove(key)
 
   const pending = inflight.get(key) as Promise<T> | undefined
   if (pending) {
@@ -262,7 +362,7 @@ export async function cachedFound<T>(key: string, ttlMs: number, fn: () => Promi
     count(key, 'hit')
     return hit.value
   }
-  if (hit) store.delete(key)
+  if (hit) storeRemove(key)
 
   const pending = inflight.get(key) as Promise<T> | undefined
   if (pending) {
@@ -315,7 +415,7 @@ export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number
     }
     return hit.value
   }
-  if (hit) store.delete(key)
+  if (hit) storeRemove(key)
 
   const pending = inflight.get(key) as Promise<T> | undefined
   if (pending) {
@@ -358,8 +458,7 @@ export function cacheInstall<T>(key: string, value: T, staleMs: number, freshMs?
   }
   if (inflight.has(key)) installEpochs.set(key, ++writeSequence)
   const at = Date.now()
-  store.delete(key)
-  store.set(key, {
+  storeWrite(key, {
     value,
     ...(freshMs == null ? {} : { freshUntil: at + freshMs }),
     ...(generation == null ? {} : { generation }),
@@ -383,7 +482,7 @@ export async function seedStale<T>(key: string, load: () => Promise<{ value: T; 
   // Re-check: the load above is a round trip, and a reader may have filled the
   // key meanwhile. A live entry is never older than a persisted one.
   if (occupied(key, at)) return false
-  store.set(key, { value: seed.value, freshUntil: at, expiresAt: at + seed.staleMs, lastAccessedAt: nextAccess() })
+  storeWrite(key, { value: seed.value, freshUntil: at, expiresAt: at + seed.staleMs, lastAccessedAt: nextAccess() })
   prune(at)
   return true
 }
