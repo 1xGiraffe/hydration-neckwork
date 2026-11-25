@@ -1,0 +1,3 @@
+# Allow-list: the image takes nginx.conf alone (Dockerfile).
+*
+!nginx.conf

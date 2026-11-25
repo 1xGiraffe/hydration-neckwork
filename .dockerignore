@@ -2,6 +2,10 @@
 .gitignore
 .dockerignore
 .env
+.env.*
+# Credentials and the deployment's own compose values never enter an image.
+secrets
+docker-compose.override.yml
 .playwright-mcp
 .superpowers
 clickhouse_data

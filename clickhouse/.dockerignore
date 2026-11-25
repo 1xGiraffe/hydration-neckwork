@@ -1,0 +1,5 @@
+# Allow-list: the image takes config.d/ and users.d/ alone (Dockerfile). Nothing else
+# under clickhouse/ (the schema, the docs) is sent to the builder.
+*
+!config.d
+!users.d
