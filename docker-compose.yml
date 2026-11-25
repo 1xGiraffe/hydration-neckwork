@@ -729,6 +729,11 @@ services:
         required: false
     environment:
       - NODE_OPTIONS=--max-old-space-size=4096
+      # The explorer's in-process cache budget (cache.ts; 256 MiB by default for the
+      # smaller api services). The explorer fills 256 MiB with ~1,600 entries and then
+      # evicts what its pages keep re-reading. The size is an estimate that undercounts
+      # deep values, so raise it in steps against the 4 GiB heap, watching heap use.
+      - API_CACHE_MAX_BYTES=${API_CACHE_MAX_BYTES:-536870912}
       # Per-group page/window logging for the notification lanes; off unless set.
       - NOTIFICATIONS_DEBUG=${NOTIFICATIONS_DEBUG:-}
       # HMAC key for the group digests the notification evaluator logs (evaluator.ts

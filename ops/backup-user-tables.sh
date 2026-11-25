@@ -18,7 +18,7 @@ HOST="${CLICKHOUSE_HOST:-clickhouse}"
 export CLICKHOUSE_PASSWORD
 DEST="${BACKUP_DIR:-/backups}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
-TABLES="user_profiles user_avatars user_sessions user_lists user_tags user_tag_members user_list_subscriptions user_list_order user_notification_channels user_notification_rules user_notification_inbox user_notification_state user_api_tokens user_api_limits user_api_usage user_forum_reports user_forum_sanctions"
+TABLES="user_profiles user_avatars user_sessions user_lists user_tags user_tag_members user_list_subscriptions user_list_order user_notification_channels user_notification_rules user_notification_inbox user_notification_state user_api_tokens user_api_limits user_api_usage user_forum_reports user_forum_sanctions user_fold_activity_totals"
 
 while true; do
   day="$(date -u +%Y-%m-%d)"

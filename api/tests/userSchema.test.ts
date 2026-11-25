@@ -28,7 +28,7 @@ describe('004_user.sql', () => {
       'user_list_subscriptions', 'user_list_order',
       'user_notification_channels', 'user_notification_rules', 'user_notification_inbox', 'user_notification_state',
       'user_api_tokens', 'user_api_limits', 'user_api_usage',
-      'user_forum_reports', 'user_forum_sanctions',
+      'user_forum_reports', 'user_forum_sanctions', 'user_fold_activity_totals',
     ]
     for (const t of tables) {
       const stmt = statements.find(s => s.includes(`price_data.${t}`))
@@ -38,7 +38,8 @@ describe('004_user.sql', () => {
       // user_api_usage is the one non-tombstoned table: it is a metering
       // counter whose rows are REPLACED with running totals and aged out by
       // TTL — there is nothing to soft-delete.
-      if (t !== 'user_api_usage') expect(stmt, t).toContain('deleted')
+      // user_fold_activity_totals is a disposable cache of counts, aged out by TTL.
+      if (t !== 'user_api_usage' && t !== 'user_fold_activity_totals') expect(stmt, t).toContain('deleted')
     }
     expect(statements).toHaveLength(tables.length)
   })

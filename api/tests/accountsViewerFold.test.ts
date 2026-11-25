@@ -332,12 +332,17 @@ describe('the viewer-fold activity budget bounds waiting, not coverage', () => {
     expect(explorerService).toContain('foldGroupsSeen.size < FOLD_GROUPS_TRACKED_MAX')
   })
 
-  it('drains its queue in minutes, not hours', () => {
-    // 88 groups at ~3.5s a count plus the cooldown is single-digit minutes. Rationing
-    // a couple per quarter-hour made that 11 hours, restarted by every deploy.
-    const n = (name: string) => Number(new RegExp(`const ${name} = ([\\d_]+)`).exec(explorerService)![1].replace(/_/g, ''))
-    const perGroupMs = 3_500 + n('FOLD_COUNT_COOLDOWN_MS')
-    expect((88 * perGroupMs) / 60_000).toBeLessThan(15)
+  it('keeps its counts across restarts and re-counts each group at most every day or two', () => {
+    // Thousands of groups at a multi-GiB read each: an in-memory map re-counted all of
+    // them after every deploy, hours of ClickHouse. The totals persist in a private
+    // user_* table, and a count is redone only past the TTL or on a membership change.
+    const n = (name: string) => Number(new RegExp(`const ${name} = ([\\d_ *]+)`).exec(explorerService)![1].replace(/_/g, '').split('*').reduce((a, b) => a * Number(b.trim()), 1))
+    expect(n('FOLD_TOTAL_TTL_MS')).toBeGreaterThanOrEqual(24 * 3_600_000)
+    expect(n('FOLD_COUNT_COOLDOWN_MS')).toBeGreaterThanOrEqual(10_000)
+    expect(explorerService).toContain("const FOLD_TOTALS_TABLE = 'price_data.user_fold_activity_totals'")
+    // A total belongs to one membership variant, so viewers with different winning
+    // members never take turns invalidating one entry.
+    expect(explorerService).toContain('const vkey = foldVariantKey(gkey, membershipFingerprint(members))')
   })
 
   it('never logs anything identifying from a viewer\'s own lists', () => {
@@ -353,8 +358,10 @@ describe('the viewer-fold activity budget bounds waiting, not coverage', () => {
         expect(line, line).not.toContain(leak)
       }
     }
-    // Fold totals stay in memory; only shared gkeys reach account_activity_totals.
+    // Fold totals never reach the shared account_activity_totals; only the private
+    // user_fold_activity_totals table holds them.
     expect(sweep).not.toContain('persistActivityTotals')
+    expect(sweep).toContain('table: FOLD_TOTALS_TABLE')
     expect(sweep).toContain('foldTotals.set')
   })
 })

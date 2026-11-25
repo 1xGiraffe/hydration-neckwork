@@ -45,3 +45,8 @@ CREATE TABLE IF NOT EXISTS price_data.user_api_usage (account_id String, hour_st
 -- (reporter, target) while open; a sanction ('mute') holds until `until`.
 CREATE TABLE IF NOT EXISTS price_data.user_forum_reports (report_id String, reporter_account_id String, target_id String, reason LowCardinality(String), note String DEFAULT '', status LowCardinality(String) DEFAULT 'open', deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY report_id SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.user_forum_sanctions (account_id String, kind LowCardinality(String), until DateTime, reason String DEFAULT '', moderator_account_id String DEFAULT '', deleted UInt8 DEFAULT 0, created_at DateTime DEFAULT now(), updated_at DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (account_id, kind) SETTINGS index_granularity = 64;
+-- The activity total of each viewer fold group variant (`u:<tagId>#<membership
+-- fingerprint>`), counted by the api's paced fold sweep and kept here so a restart does
+-- not re-count them all. Derived and disposable (a missing row is simply counted
+-- again), but its keys are private tag ids.
+CREATE TABLE IF NOT EXISTS price_data.user_fold_activity_totals (gkey String, total UInt64, complete UInt8 DEFAULT 1, members_fp String, updated_at DateTime) ENGINE = ReplacingMergeTree(updated_at) ORDER BY gkey TTL updated_at + INTERVAL 30 DAY SETTINGS index_granularity = 256;

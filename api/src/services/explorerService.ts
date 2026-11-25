@@ -33645,21 +33645,68 @@ export function getAccountsForViewerFold(offset: number, limit: number, sort: Ac
 // as the shared ranking is counted, and the page reads whatever is ready. A group not
 // yet counted shows no number, which is the same honest state an unswept account has.
 //
-// These stay in memory and never reach the shared table or a log line: the keys are
-// `u:<tagId>` from a viewer's own lists, which are user_* data.
-interface FoldGroupSpec { listId: string; tagId: string; members: string[] }
-const FOLD_GROUPS_TRACKED_MAX = 2_000
-const FOLD_TOTAL_TTL_MS = 12 * 3_600_000
+// These never reach a shared table or a log line: the keys are `u:<tagId>` from a
+// viewer's own lists, which are user_* data. They are kept in the private
+// `user_fold_activity_totals` table (004_user.sql), so a restart resumes from the
+// last counts instead of re-counting every group — with thousands of groups and a
+// multi-GiB read each, an in-memory map turned every deploy into hours of ClickHouse.
+//
+// A group's members are the viewer's WINNING accounts for that tag (computeDirectoryFold),
+// so one `u:<tagId>` can hold different members for two viewers. A total therefore
+// belongs to a VARIANT, `<gkey>#<membership fingerprint>`: each variant is counted on
+// its own schedule, two viewers never take turns invalidating one entry, and a
+// membership edit is simply a new variant. A variant nobody viewed within the TTL is
+// dropped from the sweep.
+interface FoldGroupSpec { gkey: string; listId: string; tagId: string; members: string[]; fp: string; seenAt: number }
+const FOLD_GROUPS_TRACKED_MAX = 5_000
+const FOLD_TOTAL_TTL_MS = 48 * 3_600_000
+// A failed count is retried after this, doubling per consecutive failure up to the
+// TTL (an unassemblable group fails every time), keeping the previous total meanwhile.
+const FOLD_RETRY_MS = 3_600_000
+const FOLD_TOTALS_TABLE = 'price_data.user_fold_activity_totals'
 // Strictly one count at a time — concurrency is what broke this before (four
-// 4.8 GiB reads at once saturated the instance), not the total volume, which is
-// small: 88 groups at ~3.5s each is ~5 minutes of ClickHouse once per TTL. So the
-// sweep drains its queue continuously with a short gap and then idles, rather than
-// rationing a few per quarter hour — at 2 per 15-minute cycle those 88 groups would
-// have taken 11 hours, and the map is in memory, so every deploy restarted the wait.
-const FOLD_COUNT_COOLDOWN_MS = 2_000
+// 4.8 GiB reads at once saturated the instance). With persisted totals the steady
+// state is one count per variant per TTL; the gap only paces a catch-up (the first
+// sweep, or many groups expiring together) so it never monopolises ClickHouse.
+const FOLD_COUNT_COOLDOWN_MS = 15_000
 const FOLD_SWEEP_IDLE_MS = 30_000
 const foldGroupsSeen = new Map<string, FoldGroupSpec>()
 const foldTotals = new Map<string, ActivityLeaderboardEntry>()
+const foldRetryAt = new Map<string, number>()
+const foldFailures = new Map<string, number>()
+const foldVariantKey = (gkey: string, fp: string): string => `${gkey}#${fp}`
+
+let foldTotalsLoad: Promise<void> | null = null
+let foldTotalsLoaded = false
+let foldTotalsLoadFailures = 0
+// Loads the persisted totals once. A failed load is retried on every tick; after three
+// failures the sweep also counts meanwhile rather than never counting at all (a late
+// load merges without overwriting anything counted since).
+const foldSweepMayCount = (): boolean => foldTotalsLoaded || foldTotalsLoadFailures >= 3
+async function loadFoldTotals(): Promise<void> {
+  if (foldTotalsLoaded) return
+  foldTotalsLoad ??= (async () => {
+    const rs = await client.query({
+      query: `SELECT gkey, total, complete, formatDateTime(updated_at, '%Y-%m-%dT%H:%i:%SZ', 'UTC') AS counted_at
+        FROM ${FOLD_TOTALS_TABLE} FINAL
+        WHERE updated_at > now() - toIntervalSecond({ttl:UInt32})`,
+      query_params: { ttl: Math.floor(FOLD_TOTAL_TTL_MS / 1000) },
+      format: 'JSONEachRow',
+    })
+    const rows = await rs.json<{ gkey: string; total: string | number; complete: number; counted_at: string }>()
+    for (const r of rows) {
+      if (foldTotals.has(r.gkey)) continue
+      foldTotals.set(r.gkey, { gkey: r.gkey.split('#')[0], total: Number(r.total), complete: r.complete === 1, countedAt: r.counted_at })
+    }
+    foldTotalsLoaded = true
+    console.info('[explorer] fold activity totals loaded', { known: foldTotals.size })
+  })().catch(error => {
+    foldTotalsLoad = null
+    foldTotalsLoadFailures++
+    console.warn('[explorer] fold activity totals load failed', error)
+  })
+  await foldTotalsLoad
+}
 
 export function viewerFoldMembers(fold: { ids: string[]; keys: string[] }): Map<string, string[]> {
   const byKey = new Map<string, string[]>()
@@ -33673,29 +33720,39 @@ export function viewerFoldMembers(fold: { ids: string[]; keys: string[] }): Map<
 
 function viewerFoldActivityEntries(fold: ViewerFold): ActivityLeaderboardEntry[] {
   const out: ActivityLeaderboardEntry[] = []
+  const now = Date.now()
   for (const [gkey, members] of viewerFoldMembers(fold)) {
     const group = fold.groups.get(gkey)
     if (!group) continue
-    if (!foldGroupsSeen.has(gkey) && foldGroupsSeen.size < FOLD_GROUPS_TRACKED_MAX) {
-      foldGroupsSeen.set(gkey, { listId: group.listId, tagId: group.tagId, members })
+    const vkey = foldVariantKey(gkey, membershipFingerprint(members))
+    const spec = foldGroupsSeen.get(vkey)
+    if (spec) spec.seenAt = now
+    else if (foldGroupsSeen.size < FOLD_GROUPS_TRACKED_MAX) {
+      foldGroupsSeen.set(vkey, { gkey, listId: group.listId, tagId: group.tagId, members, fp: vkey.slice(gkey.length + 1), seenAt: now })
     }
-    const known = foldTotals.get(gkey)
+    const known = foldTotals.get(vkey)
     if (known && known.total != null) out.push(known)
   }
   return out
 }
 
-// The single most-overdue group whose total has aged out, or null when none has.
+// The single most-overdue variant whose total has aged out, or null when none has.
+// Variants nobody viewed within the TTL leave the sweep (and their totals the map).
 function dueFoldGroup(): [string, FoldGroupSpec] | null {
   const now = Date.now()
-  const age = (gkey: string): number => {
-    const at = foldTotals.get(gkey)?.countedAt
+  const age = (vkey: string): number => {
+    const at = foldTotals.get(vkey)?.countedAt
     const parsed = at ? Date.parse(at) : NaN
     return Number.isFinite(parsed) ? now - parsed : Infinity
   }
   let best: [string, FoldGroupSpec] | null = null
   let bestAge = FOLD_TOTAL_TTL_MS
   for (const entry of foldGroupsSeen) {
+    if (now - entry[1].seenAt > FOLD_TOTAL_TTL_MS) {
+      foldGroupsSeen.delete(entry[0]); foldTotals.delete(entry[0]); foldRetryAt.delete(entry[0]); foldFailures.delete(entry[0])
+      continue
+    }
+    if ((foldRetryAt.get(entry[0]) ?? 0) > now) continue
     const entryAge = age(entry[0])
     if (entryAge > bestAge) { best = entry; bestAge = entryAge }
   }
@@ -33705,17 +33762,31 @@ function dueFoldGroup(): [string, FoldGroupSpec] | null {
 // Counts one group, then reschedules: a continuous single-file lane rather than a
 // burst. Idles when nothing is due, so a warm process costs nothing.
 async function sweepOneFoldGroup(): Promise<boolean> {
+  await loadFoldTotals()
+  if (!foldSweepMayCount()) return false
   const due = dueFoldGroup()
   if (!due) return false
-  const [gkey, spec] = due
+  const [vkey, spec] = due
   const total = await getListTagListTotal(spec.listId, spec.tagId, spec.members, { tab: 'activity', type: 'all' })
     .catch(error => { console.warn('[explorer] fold activity count failed', error); return null })
   if (!total || total.total == null) {
-    // Store the attempt so an ungroupable set does not hold the front of the queue.
-    foldTotals.set(gkey, { gkey, total: null, complete: false, countedAt: new Date().toISOString() })
+    // Keep whatever total was there and retry later, so a transient failure neither
+    // blanks the number nor holds the front of the queue.
+    const failures = (foldFailures.get(vkey) ?? 0) + 1
+    foldFailures.set(vkey, failures)
+    foldRetryAt.set(vkey, Date.now() + Math.min(FOLD_RETRY_MS * 2 ** (failures - 1), FOLD_TOTAL_TTL_MS))
     return true
   }
-  foldTotals.set(gkey, { gkey, total: total.total, complete: total.complete, countedAt: new Date().toISOString() })
+  foldRetryAt.delete(vkey)
+  foldFailures.delete(vkey)
+  const countedAt = new Date()
+  foldTotals.set(vkey, { gkey: spec.gkey, total: total.total, complete: total.complete, countedAt: countedAt.toISOString() })
+  await client.insert({
+    table: FOLD_TOTALS_TABLE,
+    values: [{ gkey: vkey, total: total.total, complete: total.complete ? 1 : 0, members_fp: spec.fp, updated_at: Math.floor(countedAt.getTime() / 1000) }],
+    format: 'JSONEachRow',
+  // Name and code only: a parse error can quote the row, whose key is a private tag id.
+  }).catch((error: { name?: string; code?: string }) => console.warn('[explorer] fold activity total persist failed', { name: error?.name, code: error?.code }))
   console.info('[explorer] fold activity totals', { tracked: foldGroupsSeen.size, known: foldTotals.size })
   return true
 }
