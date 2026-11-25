@@ -13,7 +13,8 @@
 #      for api and api-public BEFORE anything is built: the two must agree, and if
 #      EXPECT_PAIR_PRICE_SOURCE is set it must equal them. The script has no
 #      default of its own, so it can never contradict compose's.
-#   2. `npm --prefix api run check` must be green (typecheck + tests), and
+#   2. `npm --prefix api run check` must be green (typecheck + tests, on
+#      VITEST_MAX_WORKERS test workers, an integer, default 2), and
 #      `ops/audit-gate.mjs api` must find no high/critical production advisory
 #      that ops/audit-allowlist.json does not acknowledge with an unexpired entry.
 #   3. `docker compose build api` builds the one image all five services run; it
