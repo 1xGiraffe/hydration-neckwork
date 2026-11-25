@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CLICKHOUSE_DATABASE="${CLICKHOUSE_DATABASE:-price_data}"
-CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
 RAW_WORKERS="${RAW_WORKERS:-6}"
 # Blocks per backfill range — block-denominated on purpose: a range is a unit of
 # indexing work, and the work in a block does not change with the chain's block
@@ -82,8 +81,10 @@ if ! [[ "$RAW_BLOCKED_RETRY_AFTER_SECONDS" =~ ^[0-9]+$ ]]; then
 fi
 
 ch_query() {
+  # No --password: the docker CLI's command line is visible in the host's process
+  # list. clickhouse-client reads CLICKHOUSE_PASSWORD from the clickhouse container's
+  # own environment, which `exec` inherits.
   docker compose exec -T clickhouse clickhouse-client \
-    --password "$CLICKHOUSE_PASSWORD" \
     --database "$CLICKHOUSE_DATABASE" \
     --query "$1" </dev/null
 }
@@ -839,6 +840,15 @@ FORMAT TSV" || true)"
 # side effects — no poll loop, no clickhouse traffic
 if [[ "${SUPERVISOR_NO_MAIN:-}" == "1" ]]; then
   return 0 2>/dev/null || exit 0
+fi
+
+# CLICKHOUSE_PASSWORD is never used here directly — ch_query runs the client inside
+# the clickhouse container, which reads it from that container's environment — but the
+# nested `docker compose` interpolates it into every worker it starts and refuses to
+# parse the compose file without it. No default: unset, the supervisor stops here.
+if [[ -z "${CLICKHOUSE_PASSWORD:-}" ]]; then
+  log "CLICKHOUSE_PASSWORD is not set; refusing to start"
+  exit 1
 fi
 
 log "starting ingestion supervisor in $ROOT_DIR"

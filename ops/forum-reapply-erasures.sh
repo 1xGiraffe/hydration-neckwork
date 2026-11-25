@@ -11,12 +11,25 @@
 # Idempotent: it blanks only rows that still carry text and deletes only what is left.
 set -eu
 HOST="${CLICKHOUSE_HOST:-clickhouse}"
-PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
+# clickhouse-client reads the password from CLICKHOUSE_PASSWORD in its environment —
+# never from --password, which the host's process list shows. No default: unset, the
+# script refuses to run.
+: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
+export CLICKHOUSE_PASSWORD
 IPFS="${IPFS_API_URL:-http://hydration-neckwork-ipfs:5001}"
-# The node's RPC wants this client's bearer token once ops/ipfs-init.sh sets its
-# authorizations (IPFS_TOKEN_BACKUP, scoped to dag/export, pin/rm and repo/gc).
-ipfs_rpc() { if [ -n "${IPFS_TOKEN_BACKUP:-}" ]; then wget --header="Authorization: Bearer $IPFS_TOKEN_BACKUP" "$@"; else wget "$@"; fi; }
-q() { clickhouse-client --host "$HOST" --password "$PASSWORD" --mutations_sync=2 --lightweight_deletes_sync=2 --query "$1"; }
+# The node's RPC wants this client's bearer token (IPFS_TOKEN_BACKUP, scoped to
+# dag/export, pin/rm and repo/gc; ops/ipfs-init.sh). It never goes on a command line,
+# which the host's process list shows: wget reads the header from a wgetrc file (named
+# by WGETRC) that the shell's builtin printf writes under /tmp (a tmpfs), mode 600.
+IPFS_WGETRC=""
+if [ -n "${IPFS_TOKEN_BACKUP:-}" ]; then
+  IPFS_WGETRC="$(umask 077; mktemp /tmp/ipfs-wgetrc.XXXXXX)"
+  trap 'rm -f "$IPFS_WGETRC"' EXIT
+  trap 'exit 143' INT TERM
+  printf 'header = Authorization: Bearer %s\n' "$IPFS_TOKEN_BACKUP" > "$IPFS_WGETRC"
+fi
+ipfs_rpc() { if [ -n "$IPFS_WGETRC" ]; then WGETRC="$IPFS_WGETRC" wget "$@"; else wget "$@"; fi; }
+q() { clickhouse-client --host "$HOST" --mutations_sync=2 --lightweight_deletes_sync=2 --query "$1"; }
 
 ERASED="SELECT target_id FROM price_data.forum_moderation_log FINAL WHERE action IN ('delete', 'purge')"
 PURGED="SELECT target_id FROM price_data.forum_moderation_log FINAL WHERE action = 'purge'"

@@ -30,6 +30,11 @@ x-hardened: &hardened
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
 
+# CLICKHOUSE_PASSWORD has no default (`:?`): with no password in .env, compose refuses
+# the file instead of starting a database with a known one. The supervisor's nested
+# compose (ingestion-supervisor below) parses this file with only its own environment,
+# which carries CLICKHOUSE_PASSWORD; every other variable stays `:-`.
+
 # Raw ingestion tuning shared by the two raw pipelines. They differ only in
 # their pipeline id, batch size and RPC budget, which each states for itself.
 x-raw-env: &raw-env
@@ -37,7 +42,7 @@ x-raw-env: &raw-env
   SQD_GATEWAY: "${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}"
   SQD_GATEWAY_API_KEY: "${SQD_GATEWAY_API_KEY:-}"
   CLICKHOUSE_HOST: "http://clickhouse:8123"
-  CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-dev}"
+  CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}"
   RPC_HEAD_POLL_MS: "${RPC_HEAD_POLL_MS:-}"
   RAW_LIVE_FINALITY_POLL_MS: "${RAW_LIVE_FINALITY_POLL_MS:-}"
   RAW_BALANCE_READ_CONCURRENCY: "${RAW_BALANCE_READ_CONCURRENCY:-20}"
@@ -78,9 +83,11 @@ services:
     environment:
       - CLICKHOUSE_DB=price_data
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      # No --password on the command line (the host's process list shows it):
+      # clickhouse-client reads CLICKHOUSE_PASSWORD from the container's environment.
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -107,7 +114,7 @@ services:
     environment:
       - SCHEMA_DIR=/schema
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -129,7 +136,7 @@ services:
       - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
       - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - RPC_RATE_LIMIT=${INDEXER_RPC_RATE_LIMIT:-100}
       - RPC_CAPACITY=${INDEXER_RPC_CAPACITY:-20}
       # Empty means "use the code default". Passing the knobs through is what
@@ -197,7 +204,7 @@ services:
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - IDENTITY_CHAINS
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - RPC_RATE_LIMIT=${IDENTITY_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${IDENTITY_RPC_CAPACITY:-5}
     command: ["src/scripts/snapshot-identities.ts", "--loop", "--refresh-hours=${IDENTITY_REFRESH_HOURS:-1}"]
@@ -217,7 +224,7 @@ services:
       - user_backups:/backups
     environment:
       - CLICKHOUSE_HOST=clickhouse
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -245,7 +252,7 @@ services:
       # snapshot services are busy; this one is not rate limited.
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - RPC_RATE_LIMIT=${REFERENDUM_PROPOSAL_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${REFERENDUM_PROPOSAL_RPC_CAPACITY:-4}
     command: ["src/scripts/decode-referendum-proposals.ts", "--loop",
@@ -271,7 +278,7 @@ services:
     environment:
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - RPC_RATE_LIMIT=${BALANCES_SNAPSHOT_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${BALANCES_SNAPSHOT_RPC_CAPACITY:-5}
     command: ["src/scripts/snapshot-balances.ts", "--loop", "--reconcile", "--refresh-hours=${BALANCES_REFRESH_HOURS:-168}"]
@@ -305,7 +312,7 @@ services:
     environment:
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
     command: ["src/scripts/snapshot-atoken-anchors.ts", "--loop", "--refresh-hours=${ATOKEN_ANCHOR_REFRESH_HOURS:-6}"]
 
   ingestion-supervisor:
@@ -327,7 +334,7 @@ services:
       - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-hydration-neckwork}
       - ROOT_DIR=/etc/hydration-neckwork
       - CLICKHOUSE_DATABASE=price_data
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
       - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
       # Handed to every worker the supervisor spawns — backfill, raw-live and the
@@ -431,7 +438,7 @@ services:
       - contract_backups:/backups
     environment:
       - CLICKHOUSE_HOST=clickhouse
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -577,7 +584,7 @@ services:
       - forum_backups:/backups
     environment:
       - CLICKHOUSE_HOST=clickhouse
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - IPFS_API_URL=http://hydration-neckwork-ipfs:5001
     depends_on:
       clickhouse:
@@ -627,7 +634,7 @@ services:
       # or route. Set the same value on api-public; switching recreates both.
       - PAIR_PRICE_SOURCE=${PAIR_PRICE_SOURCE:-usd-ratio}
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       # Live money-market reads use a Hydration RPC reachable from the container.
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       # Operator override for the GIGAHDX cooldown, which is otherwise read from
@@ -717,7 +724,7 @@ services:
     command: ["./node_modules/.bin/tsx", "src/derivations/runner.ts"]
     environment:
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
       # Defuse 1Click, which resolves the destination leg of a cross-chain swap
@@ -762,7 +769,7 @@ services:
       # Pair candles' price source, the same value as api's (services/pairPriceSource.ts).
       - PAIR_PRICE_SOURCE=${PAIR_PRICE_SOURCE:-usd-ratio}
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       # Published by /rest/service/metadata. Set to "false" on a host that serves
       # a lagging copy, so a consumer's provider failover prefers another host.
       - PUBLIC_API_MASTER=${PUBLIC_API_MASTER:-true}
@@ -807,7 +814,7 @@ services:
       - "127.0.0.1:3003:3000"
     environment:
       - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - DATA_API_PORT=3000
       # Admin wallet accounts (comma-separated 0x-64-hex): exempt from rate
       # limits here; the same list gates the admin routes on `api`.

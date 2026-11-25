@@ -8,13 +8,17 @@
 # file per table per day, pruned after $RETAIN_DAYS; runs as a small loop
 # container (contract-backup in docker-compose.yml).
 #
-# Restore: for each table, `clickhouse-client --host "$HOST" --password
-# "$PASSWORD" --query "INSERT INTO price_data.<t> FORMAT Parquet" <
-# <t>.parquet` — safe on a live table because every row carries its original
+# Restore: for each table, `clickhouse-client --host "$HOST" --query "INSERT INTO
+# price_data.<t> FORMAT Parquet" < <t>.parquet` with CLICKHOUSE_PASSWORD in the
+# environment — safe on a live table because every row carries its original
 # `updated_at` ReplacingMergeTree version.
 set -eu
 HOST="${CLICKHOUSE_HOST:-clickhouse}"
-PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
+# clickhouse-client reads the password from CLICKHOUSE_PASSWORD in its environment —
+# never from --password, which the host's process list shows. No default: unset, the
+# job refuses to start.
+: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
+export CLICKHOUSE_PASSWORD
 DEST="${BACKUP_DIR:-/backups}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
 TABLES="contract_abis contract_sources contract_verifications"
@@ -25,7 +29,7 @@ while true; do
   for t in $TABLES; do
     # FINAL collapses replaced versions so a restore INSERT never resurrects
     # superseded rows; tombstones (deleted=1) are kept — they are state.
-    clickhouse-client --host "$HOST" --password "$PASSWORD" \
+    clickhouse-client --host "$HOST" \
       --query "SELECT * FROM price_data.$t FINAL FORMAT Parquet" \
       > "$DEST/$day/$t.parquet.tmp"
     mv "$DEST/$day/$t.parquet.tmp" "$DEST/$day/$t.parquet"

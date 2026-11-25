@@ -14,20 +14,34 @@
 # Days are pruned after $RETAIN_DAYS; a CAR whose CID was removed by moderation is
 # pruned $RETAIN_DAYS after its removal.
 #
-# Restore: for each table, `clickhouse-client --host "$HOST" --password "$PASSWORD"
-# --query "INSERT INTO price_data.<t> FORMAT Parquet" < <t>.parquet` — safe on a live
-# table because every row carries its original ReplacingMergeTree version — then
+# Restore: for each table, `clickhouse-client --host "$HOST" --query "INSERT INTO
+# price_data.<t> FORMAT Parquet" < <t>.parquet` with CLICKHOUSE_PASSWORD in the
+# environment — safe on a live table because every row carries its original
+# ReplacingMergeTree version — then
 # `ipfs dag import --pin-roots <cid>.car` for every image (pins it again), then
 # ops/forum-reapply-erasures.sh (with the NEWEST forum_moderation_log.parquet imported
 # first), which re-applies every author delete, moderator purge and image removal an
 # older export predates.
 set -eu
 HOST="${CLICKHOUSE_HOST:-clickhouse}"
-PASSWORD="${CLICKHOUSE_PASSWORD:-dev}"
+# clickhouse-client reads the password from CLICKHOUSE_PASSWORD in its environment —
+# never from --password, which the host's process list shows. No default: unset, the
+# job refuses to start.
+: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
+export CLICKHOUSE_PASSWORD
 IPFS="${IPFS_API_URL:-http://hydration-neckwork-ipfs:5001}"
-# The node's RPC wants this client's bearer token once ops/ipfs-init.sh sets its
-# authorizations (IPFS_TOKEN_BACKUP, scoped to dag/export, pin/rm and repo/gc).
-ipfs_rpc() { if [ -n "${IPFS_TOKEN_BACKUP:-}" ]; then wget --header="Authorization: Bearer $IPFS_TOKEN_BACKUP" "$@"; else wget "$@"; fi; }
+# The node's RPC wants this client's bearer token (IPFS_TOKEN_BACKUP, scoped to
+# dag/export, pin/rm and repo/gc; ops/ipfs-init.sh). It never goes on a command line,
+# which the host's process list shows: wget reads the header from a wgetrc file (named
+# by WGETRC) that the shell's builtin printf writes under /tmp (a tmpfs), mode 600.
+IPFS_WGETRC=""
+if [ -n "${IPFS_TOKEN_BACKUP:-}" ]; then
+  IPFS_WGETRC="$(umask 077; mktemp /tmp/ipfs-wgetrc.XXXXXX)"
+  trap 'rm -f "$IPFS_WGETRC"' EXIT
+  trap 'exit 143' INT TERM
+  printf 'header = Authorization: Bearer %s\n' "$IPFS_TOKEN_BACKUP" > "$IPFS_WGETRC"
+fi
+ipfs_rpc() { if [ -n "$IPFS_WGETRC" ]; then WGETRC="$IPFS_WGETRC" wget "$@"; else wget "$@"; fi; }
 DEST="${BACKUP_DIR:-/backups}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
 TABLES="forum_posts forum_comments forum_revisions forum_media forum_media_urls forum_moderation_log"
@@ -38,7 +52,7 @@ while true; do
   for t in $TABLES; do
     # FINAL collapses replaced versions so a restore INSERT never resurrects
     # superseded rows; hidden and deleted flags are kept — they are state.
-    clickhouse-client --host "$HOST" --password "$PASSWORD" \
+    clickhouse-client --host "$HOST" \
       --query "SELECT * FROM price_data.$t FINAL FORMAT Parquet" \
       > "$DEST/$day/$t.parquet.tmp"
     mv "$DEST/$day/$t.parquet.tmp" "$DEST/$day/$t.parquet"
@@ -46,7 +60,7 @@ while true; do
   # Images: every live CID not yet exported. A failure (node down) is logged and
   # retried the next night; the table export above has already landed.
   exported=0; failed=0
-  for cid in $(clickhouse-client --host "$HOST" --password "$PASSWORD" \
+  for cid in $(clickhouse-client --host "$HOST" \
       --query "SELECT cid FROM price_data.forum_media FINAL WHERE deleted = 0 FORMAT TSV"); do
     case "$cid" in *[!A-Za-z0-9]*|'') continue ;; esac
     [ -s "$DEST/images/$cid.car" ] && continue
@@ -60,7 +74,7 @@ while true; do
   # A removed image (moderation tombstoned its forum_media row) keeps its CAR for
   # RETAIN_DAYS after the REMOVAL — dated by the row's updated_at, not by when the CAR
   # was exported — the same horizon the table exports age out on.
-  for cid in $(clickhouse-client --host "$HOST" --password "$PASSWORD" --param_days="$RETAIN_DAYS" \
+  for cid in $(clickhouse-client --host "$HOST" --param_days="$RETAIN_DAYS" \
       --query "SELECT cid FROM price_data.forum_media FINAL WHERE deleted = 1 AND updated_at < now() - toIntervalDay({days:UInt32}) FORMAT TSV"); do
     case "$cid" in *[!A-Za-z0-9]*|'') continue ;; esac
     rm -f "$DEST/images/$cid.car"
