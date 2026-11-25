@@ -9,6 +9,7 @@ import {
 } from '../src/notifications/notificationStore.ts'
 import { deliverNotification, deliveryCounters, resetDeliveryStateForTests, webPushConfigured } from '../src/notifications/delivery.ts'
 import { renderNotification, text, account } from '../src/notifications/render.ts'
+import { pushAgent, PUSH_TIMEOUT_MS } from '../src/notifications/pushEndpoint.ts'
 import { fakeClient, insertedRows, type FakeClient } from './helpers/userFakes.ts'
 
 const OWNER = '0x' + 'aa'.repeat(32)
@@ -223,6 +224,24 @@ describe('web push send', () => {
     const [subscription, payload] = sendMock.mock.calls[0]
     expect(subscription).toEqual({ endpoint: SUB.endpoint, keys: { p256dh: SUB.p256dh, auth: SUB.auth } })
     expect(JSON.parse(String(payload))).toMatchObject({ title: 'Safety action', tag: 'safety' })
+  })
+
+  it('bounds every push request with a timeout and the public-only agent', async () => {
+    const channel = await createWebPushChannel(OWNER, SUB)
+    await deliverNotification(notification('w4'), [channel])
+    await vi.waitFor(() => expect(sendMock).toHaveBeenCalledTimes(1))
+    const options = sendMock.mock.calls[0][2] as { timeout?: number; agent?: unknown }
+    expect(options.timeout).toBe(PUSH_TIMEOUT_MS)
+    expect(options.agent).toBe(pushAgent)
+  })
+
+  it('drops a channel whose stored endpoint is not a push service, without sending', async () => {
+    const channel = await createWebPushChannel(OWNER, SUB)
+    const bad = { ...channel, config: { ...SUB, endpoint: 'https://10.0.0.5/push' } }
+    await deliverNotification(notification('w5'), [bad])
+    await vi.waitFor(() => expect(channelsFor(OWNER)).toHaveLength(0))
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(deliveryCounters().webpushFailed).toBe(1)
   })
 
   it('soft-deletes the channel when the push service reports it gone', async () => {

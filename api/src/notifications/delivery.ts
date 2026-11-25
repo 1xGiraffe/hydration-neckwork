@@ -4,6 +4,7 @@ import {
   type InboxInsert, type NotificationChannel, type TelegramConfig, type WebPushConfig,
 } from './notificationStore.ts'
 import { renderNotification, type RenderedNotification } from './render.ts'
+import { isAllowedPushEndpoint, pushAgent, PUSH_TIMEOUT_MS } from './pushEndpoint.ts'
 
 // Outbound delivery. Two rules govern everything here:
 //
@@ -188,12 +189,21 @@ export async function sendToChannel(channel: NotificationChannel, rendered: Rend
 async function sendWebPush(channel: NotificationChannel, rendered: RenderedNotification, tag: string): Promise<void> {
   if (!ensureVapid()) return
   const cfg = channel.config as WebPushConfig
+  // Re-checked at every send, not only at subscribe time: a channel whose
+  // endpoint is not a recognised push service is dropped without a request.
+  if (!isAllowedPushEndpoint(cfg.endpoint)) {
+    counters.webpushFailed++
+    await removeChannelById(channel.channelId).catch(() => {})
+    return
+  }
   const payload = JSON.stringify({ title: rendered.title, body: rendered.body, url: rendered.url, tag })
   try {
     await webpush.sendNotification(
       { endpoint: cfg.endpoint, keys: { p256dh: cfg.p256dh, auth: cfg.auth } },
       payload,
-      { TTL: 3600 },
+      // The agent connects to public addresses only; the timeout abandons a
+      // push service that stops answering instead of holding the socket.
+      { TTL: 3600, timeout: PUSH_TIMEOUT_MS, agent: pushAgent },
     )
     counters.webpushSent++
   } catch (err) {

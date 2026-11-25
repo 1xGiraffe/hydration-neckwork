@@ -131,6 +131,16 @@ describe('channels', () => {
     expect(res.statusCode).toBe(503)
   })
 
+  it('refuses a subscription whose endpoint is not a push service', async () => {
+    const f = await build()
+    const res = await f.inject({
+      method: 'POST', url: '/user/notifications/channels/webpush', headers: auth(),
+      payload: { subscription: { ...SUBSCRIPTION, endpoint: 'https://198.51.100.7/hook' } },
+    })
+    expect(res.statusCode).toBe(422)
+    expect(channelsFor(OWNER)).toHaveLength(0)
+  })
+
   it('rejects a malformed subscription', async () => {
     const f = await build()
     const res = await f.inject({ method: 'POST', url: '/user/notifications/channels/webpush', headers: auth(), payload: { subscription: { endpoint: 'nope' } } })

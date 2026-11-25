@@ -56,6 +56,13 @@ describe('notification channels', () => {
     expect(row.label).toBe('Firefox on Linux')
   })
 
+  it('refuses a push endpoint that is not a recognised push service', async () => {
+    for (const endpoint of ['http://fcm.googleapis.com/fcm/send/x', 'https://fcm.googleapis.com:8443/x', 'https://192.0.2.1/push', 'https://push.example.org/x']) {
+      await expect(createWebPushChannel(OWNER, { ...SUB, endpoint })).rejects.toMatchObject({ status: 422 })
+    }
+    expect(channelsFor(OWNER)).toHaveLength(0)
+  })
+
   it('updates the existing channel when the same endpoint re-registers', async () => {
     const first = await createWebPushChannel(OWNER, SUB, 'Firefox')
     const again = await createWebPushChannel(OWNER, { ...SUB, auth: 'z'.repeat(20) }, '')
@@ -246,12 +253,17 @@ describe('notification rules', () => {
       user_notification_channels: [
         { channel_id: 'c1', account_id: OWNER, kind: 'webpush', config: '{"endpoint":""}', label: '', verified: 1 },
         { channel_id: 'c2', account_id: OWNER, kind: 'telegram', config: '{"chatId":"5"}', label: '', verified: 1 },
+        // A push endpoint outside the push-service allow-list never loads.
+        { channel_id: 'c3', account_id: OWNER, kind: 'webpush', config: JSON.stringify({ ...SUB, endpoint: 'https://internal.example.org/push' }), label: '', verified: 1 },
+        { channel_id: 'c4', account_id: OWNER, kind: 'webpush', config: JSON.stringify(SUB), label: '', verified: 1 },
       ],
     })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     initNotifications(seeded)
     await loadNotifications()
+    warn.mockRestore()
     expect(allRules().map(r => r.ruleId)).toEqual(['r4'])
-    expect(channelsFor(OWNER).map(c => c.channelId)).toEqual(['c2'])
+    expect(channelsFor(OWNER).map(c => c.channelId).sort()).toEqual(['c2', 'c4'])
   })
 
   // A retired kind is the realistic case: `wormhole` was folded into `safety`,

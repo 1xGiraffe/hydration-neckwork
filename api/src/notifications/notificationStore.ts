@@ -3,6 +3,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { UserDataError } from '../services/userProfileService.ts'
 import { isNotificationKind, parseRuleParams, type NotificationKind } from './notificationRules.ts'
 import { blockRuleError, ruleTargetError } from './ruleTargets.ts'
+import { isAllowedPushEndpoint } from './pushEndpoint.ts'
 
 // Notification subscriptions, their channels, and the evaluator's key/value
 // state. Same shape as userListService: the api process is the single writer,
@@ -169,15 +170,22 @@ export async function loadNotifications(): Promise<void> {
     format: 'JSONEachRow',
   })
 
+  let refusedEndpoints = 0
   for (const r of await channelRes.json<{ channel_id: string; account_id: string; kind: string; config: string; label?: string; verified?: number }>()) {
     if (r.kind !== 'webpush' && r.kind !== 'telegram') continue
     const config = parseConfig(r.kind, r.config ?? '')
     if (!config) continue
+    // A stored push endpoint outside the push-service allow-list is never
+    // loaded, so nothing can send to it. The row is left alone: a service
+    // added to the list later brings its channels back. Only the count is
+    // logged; an endpoint is private.
+    if (r.kind === 'webpush' && !isAllowedPushEndpoint((config as WebPushConfig).endpoint)) { refusedEndpoints++; continue }
     indexChannel({
       channelId: r.channel_id, accountId: r.account_id, kind: r.kind, config,
       label: r.label ?? '', verified: Number(r.verified) === 1,
     })
   }
+  if (refusedEndpoints) console.warn(`[notifications] ${refusedEndpoints} push channel(s) skipped: endpoint is not a recognised push service`)
   let trackRules = 0
   for (const r of await ruleRes.json<{ rule_id: string; account_id: string; kind: string; name?: string; params?: string; channels?: string[]; muted?: number; cooldown_s?: number }>()) {
     // A row naming a kind this build no longer has is SKIPPED, never fatal: a
@@ -257,6 +265,7 @@ function checkLabel(label: string): string {
 // of accumulating duplicates — push subscriptions are renewed silently by the
 // browser, and the endpoint is their identity.
 export async function createWebPushChannel(accountId: string, config: WebPushConfig, label = ''): Promise<NotificationChannel> {
+  if (!isAllowedPushEndpoint(config.endpoint)) throw new UserDataError(422, 'This push service is not supported')
   const existing = channelsFor(accountId).find(c => c.kind === 'webpush' && (c.config as WebPushConfig).endpoint === config.endpoint)
   const channel: NotificationChannel = existing
     ? { ...existing, config, label: checkLabel(label) || existing.label, verified: true }
