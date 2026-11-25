@@ -30,6 +30,16 @@ x-hardened: &hardened
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
 
+# Resource ceilings. Every long-running service states mem_limit with an equal
+# memswap_limit (no swap) and a pids_limit (processes and threads), so a runaway
+# request, a parser fed hostile input or a compromised dependency is stopped inside its
+# own container instead of starving the host. Each is sized at three to four times the
+# service's measured peak; a service whose heaviest phase (a backfill range, a full
+# reconcile) is rare gets the ceiling of its own kind of work. Node sizes its default
+# heap from the container's limit — half of it, at most 2 GiB below a 16 GiB limit —
+# so a service that needs today's 4 GiB heap states it (--max-old-space-size=4096). A
+# tmpfs counts against its container's memory: the nginx caches sit inside their limits.
+#
 # CLICKHOUSE_PASSWORD has no default (`:?`): with no password in .env, compose refuses
 # the file instead of starting a database with a known one. The supervisor's nested
 # compose (ingestion-supervisor below) parses this file with only its own environment,
@@ -62,6 +72,8 @@ x-raw-env: &raw-env
   # (checked at startup). Do NOT raise it before the main/price pipeline stops
   # requiring a snapshot row for every block it replays — see the migration runbook.
   RAW_SNAPSHOT_EVERY_N_BLOCKS: "${RAW_SNAPSHOT_EVERY_N_BLOCKS:-1}"
+  # A backfill range or a catch-up after an outage holds large batches: today's heap.
+  NODE_OPTIONS: "--max-old-space-size=4096"
 
 services:
   clickhouse:
@@ -126,6 +138,10 @@ services:
     container_name: hydration-neckwork-indexer
     profiles:
       - worker
+    # The price pipelines (main-live and the supervisor's backfill ranges).
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -145,6 +161,8 @@ services:
       - SNAPSHOT_INTERVAL_MINUTES=${SNAPSHOT_INTERVAL_MINUTES:-}
       - BATCH_SIZE=${INDEXER_BATCH_SIZE:-10000}
       - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
+      # A backfill range holds large batches: today's heap (see the resource ceilings).
+      - NODE_OPTIONS=--max-old-space-size=4096
 
   raw-indexer:
     <<: [*service, *hardened]
@@ -153,6 +171,10 @@ services:
     container_name: hydration-neckwork-raw-indexer
     profiles:
       - worker
+    # The supervisor's raw backfill ranges.
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -171,6 +193,10 @@ services:
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-raw-live
+    # Catching up after an outage runs backfill-sized batches.
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -194,6 +220,9 @@ services:
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-identity-snapshot
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -218,6 +247,9 @@ services:
     <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-user-backup
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 128
     entrypoint: ["/bin/sh", "/backup-user-tables.sh"]
     volumes:
       - ./ops/backup-user-tables.sh:/backup-user-tables.sh:ro
@@ -242,6 +274,9 @@ services:
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-referendum-proposals
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -270,6 +305,10 @@ services:
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-balance-snapshot
+    # The reconcile holds every account balance's projection in one map.
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -281,6 +320,7 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - RPC_RATE_LIMIT=${BALANCES_SNAPSHOT_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${BALANCES_SNAPSHOT_RPC_CAPACITY:-5}
+      - NODE_OPTIONS=--max-old-space-size=4096
     command: ["src/scripts/snapshot-balances.ts", "--loop", "--reconcile", "--refresh-hours=${BALANCES_REFRESH_HOURS:-168}"]
 
   # The B0 anchors loop (see src/scripts/anchorLoop.ts). Money-market collateral
@@ -304,6 +344,9 @@ services:
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-atoken-anchor
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -321,6 +364,10 @@ services:
       context: .
       dockerfile: ops/supervisor.Dockerfile
     container_name: hydration-neckwork-ingestion-supervisor
+    # bash and the docker CLI; the workers it starts carry their own limits.
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -403,6 +450,13 @@ services:
     <<: [*service, *hardened]
     image: ghcr.io/blockscout/smart-contract-verifier:v1.10.6
     container_name: hydration-neckwork-smart-contract-verifier
+    # It runs solc on source code anyone can submit: a pathological input must cost
+    # at most this container's share. solc's peak on a large viaIR project is a few
+    # GiB, and two CPUs keep a compile from taking the host's cores.
+    mem_limit: 4g
+    memswap_limit: 4g
+    pids_limit: 512
+    cpus: 2
     environment:
       # 2 MiB default is below a real project's standard-json input.
       - SMART_CONTRACT_VERIFIER__SERVER__HTTP__MAX_BODY_SIZE=33554432
@@ -432,6 +486,9 @@ services:
     <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-contract-backup
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 128
     entrypoint: ["/bin/sh", "/backup-contract-tables.sh"]
     volumes:
       - ./ops/backup-contract-tables.sh:/backup-contract-tables.sh:ro
@@ -570,6 +627,9 @@ services:
     <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-forum-backup
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 128
     entrypoint: ["/bin/sh", "/backup-forum-tables.sh"]
     # IPFS_TOKEN_BACKUP: its bearer token for the IPFS node's RPC (dag/export, pin/rm,
     # repo/gc; ops/ipfs-init.sh); secrets/ is never committed (mode 600).
@@ -602,6 +662,11 @@ services:
     # rebuild of `api` leaves derivations/api-public/api-data on the stale tag.
     image: hydration-neckwork-api
     container_name: hydration-neckwork-api
+    # Holds the explorer's in-memory snapshots and caches: today's heap, stated
+    # (NODE_OPTIONS below), inside a ceiling at about 3.5x its measured peak.
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 256
     # ipfs-internal: /forum/media/:cid streams pinned forum images from the ipfs
     # node's gateway, and forum uploads are added, pinned, unpinned and collected
     # through its RPC (services/forumMedia.ts).
@@ -621,6 +686,7 @@ services:
       - path: ./secrets/ipfs-token-api.env
         required: false
     environment:
+      - NODE_OPTIONS=--max-old-space-size=4096
       # Per-group page/window logging for the notification lanes; off unless set.
       - NOTIFICATIONS_DEBUG=${NOTIFICATIONS_DEBUG:-}
       # HMAC key for the group digests the notification evaluator logs (evaluator.ts
@@ -716,6 +782,10 @@ services:
       dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-derivations
+    # A cycle's heaviest job peaks at a few GiB: today's heap, stated (NODE_OPTIONS below).
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -723,6 +793,7 @@ services:
         condition: service_completed_successfully
     command: ["./node_modules/.bin/tsx", "src/derivations/runner.ts"]
     environment:
+      - NODE_OPTIONS=--max-old-space-size=4096
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
@@ -749,6 +820,9 @@ services:
       dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-api-public
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -804,6 +878,9 @@ services:
       dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-api-data
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -843,6 +920,9 @@ services:
       dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-api-mcp
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
     # Unconditional: compose only needs to start `api` first so the name
     # resolves. A health condition would couple this service's restarts to the
     # explorer's, and the boot probe already reports an upstream that is still
@@ -911,6 +991,10 @@ services:
       context: ./public-nginx
       dockerfile: Dockerfile
     container_name: hydration-neckwork-api-public-nginx
+    # nginx plus its 256m cache tmpfs.
+    mem_limit: 768m
+    memswap_limit: 768m
+    pids_limit: 256
     depends_on:
       - api-public
     ports:
@@ -932,6 +1016,10 @@ services:
         # (Vite). Set VITE_EXPLORER_URL in .env, then rebuild preis-ui.
         VITE_EXPLORER_URL: ${VITE_EXPLORER_URL:-}
     container_name: hydration-neckwork-preis-ui
+    # nginx plus its 64m cache tmpfs.
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 256
     depends_on:
       - api
     ports:
@@ -955,6 +1043,10 @@ services:
         # Browser-side EVM JSON-RPC for the contract tab (bytecode, eth_call).
         VITE_EVM_RPC_URL: ${VITE_EVM_RPC_URL:-}
     container_name: hydration-neckwork-explorer-ui
+    # nginx plus its 1300m cache tmpfs.
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 256
     depends_on:
       - api
     ports:
