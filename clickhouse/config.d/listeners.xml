@@ -1,0 +1,10 @@
+<clickhouse>
+    <!--
+      Protocol listeners. Every client of this server speaks ClickHouse's own HTTP
+      (8123) or native (9000) protocol, so the stock MySQL (9004) and PostgreSQL
+      (9005) wire-protocol listeners are removed: a listener nothing uses is only
+      another parser and another way to present the same credentials.
+    -->
+    <mysql_port remove="1"/>
+    <postgresql_port remove="1"/>
+</clickhouse>

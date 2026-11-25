@@ -87,6 +87,12 @@ services:
     # memswap_limit = mem_limit: no swap for this container.
     mem_limit: 48g
     memswap_limit: 48g
+    # Its thread pools grow with load; 4096 is about four times what a busy server
+    # runs, so it bounds a runaway without starving one.
+    pids_limit: 4096
+    # The entrypoint drops from root to the clickhouse user itself (`clickhouse su`);
+    # nothing it runs needs a setuid binary or file capabilities.
+    security_opt: ["no-new-privileges:true"]
     ports:
       - "127.0.0.1:18123:8123"
       - "127.0.0.1:19000:9000"
@@ -247,6 +253,11 @@ services:
     <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-user-backup
+    # The ClickHouse image declares /var/lib/clickhouse a VOLUME; the client writes
+    # nothing there, so a small tmpfs takes its place instead of an anonymous volume.
+    tmpfs:
+      - /tmp
+      - /var/lib/clickhouse:size=16m,uid=10001,gid=10001,mode=0700
     mem_limit: 2g
     memswap_limit: 2g
     pids_limit: 128
@@ -429,6 +440,13 @@ services:
       - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
       - RAW_BATCH_SIZE=${RAW_BATCH_SIZE:-}
     volumes:
+      # The raw Docker socket is full control of the Docker daemon, which is root on
+      # the host. The supervisor needs a handful of its endpoints (list, inspect,
+      # create, start, restart and remove containers; exec into clickhouse; the
+      # networks and volumes compose resolves), so a production deployment puts
+      # a filtering Docker API proxy that allows only those in front of the daemon and
+      # points this service at it from its untracked override; the raw socket here is
+      # for a local development stack.
       - /var/run/docker.sock:/var/run/docker.sock
       # The supervisor spawns its workers from this compose file and this script.
       # Both are also baked into its image, which is the trap: without these mounts
@@ -471,11 +489,11 @@ services:
       # useless here; the api implements that protocol itself.
       - SMART_CONTRACT_VERIFIER__SOURCIFY__ENABLED=false
     volumes:
-      # Named volume, not a bind mount: the container runs as uid 1001 and would
-      # fail to populate a host-owned directory. A FRESH volume still mounts
+      # Named volume, not a bind mount: the container runs as UID 10001 (x-hardened)
+      # and would fail to populate a host-owned directory. A FRESH volume still mounts
       # root-owned (the image has no /tmp/solidity-compilers to inherit from),
       # so a new deployment needs a one-time
-      #   docker compose exec -u root smart-contract-verifier chown 1001:1001 /tmp/solidity-compilers
+      #   docker compose run --rm --no-deps -u root --cap-add CHOWN --entrypoint chown smart-contract-verifier 10001:10001 /tmp/solidity-compilers
       # or every verification fails with "fetching evm compiler: Permission denied".
       - solidity_compilers:/tmp/solidity-compilers
 
@@ -487,6 +505,11 @@ services:
     <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-contract-backup
+    # The ClickHouse image declares /var/lib/clickhouse a VOLUME; the client writes
+    # nothing there, so a small tmpfs takes its place instead of an anonymous volume.
+    tmpfs:
+      - /tmp
+      - /var/lib/clickhouse:size=16m,uid=10001,gid=10001,mode=0700
     mem_limit: 2g
     memswap_limit: 2g
     pids_limit: 128
@@ -640,6 +663,11 @@ services:
     <<: [*service, *hardened]
     build: ./clickhouse
     container_name: hydration-neckwork-forum-backup
+    # The ClickHouse image declares /var/lib/clickhouse a VOLUME; the client writes
+    # nothing there, so a small tmpfs takes its place instead of an anonymous volume.
+    tmpfs:
+      - /tmp
+      - /var/lib/clickhouse:size=16m,uid=10001,gid=10001,mode=0700
     mem_limit: 2g
     memswap_limit: 2g
     pids_limit: 128
