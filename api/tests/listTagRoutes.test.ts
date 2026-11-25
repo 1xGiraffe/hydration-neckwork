@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import Fastify from 'fastify'
 import { userRoutes } from '../src/routes/user.ts'
 import { listsRoutes } from '../src/routes/lists.ts'
+import { PUBLIC_MEMBERSHIP_SETTLE_MS, membershipSettler } from '../src/routes/listTagRoutes.ts'
 import { initUserAuthService, resetUserAuthForTests, issueSession } from '../src/services/userAuthService.ts'
 import {
   initUserListService, loadUserLists, createList, updateList, createTag, setTagMembers,
@@ -277,5 +278,89 @@ describe('/explorer/list-tag', () => {
     expect(privateListId).not.toBe(publicListId)
     const r = await f.inject({ method: 'GET', url: `/explorer/list-tag/${privateTagId}/members` })
     expect(r.statusCode).toBe(404)
+  })
+
+  it('adopts a membership edit at most once per settle window, while the owner sees it at once', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1_800_000_000_000)
+      const f = await build()
+      const ownerToken = await issueSession(OWNER)
+      const publicCount = async () => (await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}` })).json().members.length
+      expect(await publicCount()).toBe(1)
+
+      await setTagMembers(OWNER, publicListId, publicTagId, [OUTSIDER], [])
+      const owned = await f.inject({ method: 'GET', url: `/user/list-tag/${publicListId}/${publicTagId}`, headers: { authorization: `Bearer ${ownerToken}` } })
+      expect(owned.json().members).toHaveLength(2)
+      // The anonymous surface keeps the membership it adopted, and with it the caches keyed by it...
+      expect(await publicCount()).toBe(1)
+      vi.setSystemTime(1_800_000_000_000 + PUBLIC_MEMBERSHIP_SETTLE_MS - 1)
+      expect(await publicCount()).toBe(1)
+      // ...until the window has passed.
+      vi.setSystemTime(1_800_000_000_000 + PUBLIC_MEMBERSHIP_SETTLE_MS)
+      expect(await publicCount()).toBe(2)
+
+      // An edit right after an adoption waits out a whole window again.
+      await setTagMembers(OWNER, publicListId, publicTagId, [], [OUTSIDER])
+      expect(await publicCount()).toBe(2)
+      vi.setSystemTime(1_800_000_000_000 + 2 * PUBLIC_MEMBERSHIP_SETTLE_MS)
+      expect(await publicCount()).toBe(1)
+
+      // Visibility is never settled: a list gone private stops answering at once.
+      await updateList(OWNER, publicListId, { visibility: 'private' })
+      expect((await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}` })).statusCode).toBe(404)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('membershipSettler', () => {
+  const A = ['0x' + '01'.repeat(32)]
+  const AB = [...A, '0x' + '02'.repeat(32)]
+  const ABC = [...AB, '0x' + '03'.repeat(32)]
+
+  it('serves a membership as given when nothing was adopted for the tag yet', () => {
+    const settle = membershipSettler(60_000, () => 0)
+    expect(settle('t', AB)).toBe(AB)
+  })
+
+  it('holds the adopted membership through the window, then adopts the live one', () => {
+    let now = 0
+    const settle = membershipSettler(60_000, () => now)
+    expect(settle('t', A)).toBe(A)
+    now = 10_000
+    expect(settle('t', AB)).toBe(A)
+    expect(settle('t', ABC)).toBe(A)
+    now = 60_000
+    expect(settle('t', ABC)).toBe(ABC)
+    now = 60_001
+    expect(settle('t', AB)).toBe(ABC)
+  })
+
+  it('shows a reorder of the same members at once', () => {
+    let now = 0
+    const settle = membershipSettler(60_000, () => now)
+    settle('t', AB)
+    now = 1
+    const reordered = [...AB].reverse()
+    expect(settle('t', reordered)).toBe(reordered)
+  })
+
+  it('settles each tag on its own', () => {
+    let now = 0
+    const settle = membershipSettler(60_000, () => now)
+    settle('t1', A)
+    now = 30_000
+    settle('t2', A)
+    now = 60_000
+    expect(settle('t1', AB)).toBe(AB)
+    expect(settle('t2', AB)).toBe(A)
+  })
+
+  it('passes every membership through when the window is 0', () => {
+    const settle = membershipSettler(0, () => 0)
+    settle('t', A)
+    expect(settle('t', AB)).toBe(AB)
   })
 })

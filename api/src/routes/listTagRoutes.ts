@@ -46,12 +46,64 @@ export interface ListTagReadSurface {
   // The value filters a request carries. Only the `identity` one can depend on
   // who is asking, which is why this is the surface's call and not a handler's.
   valueFilters: (req: FastifyRequest, q: Record<string, unknown>) => ValueListFilters
+  // How long an edited membership may keep being served as it was (see
+  // membershipSettler). Defaults to PUBLIC_MEMBERSHIP_SETTLE_MS for a surface
+  // under /explorer/ and to 0 — every edit seen at once — for any other.
+  membershipSettleMs?: number
+}
+
+// Every aggregate cache behind these reads is keyed by the membership's
+// fingerprint, so a membership edit makes all of them cold at once, and the next
+// reads recompute the whole portfolio, history and feeds over up to the tag's full
+// member set. On the anonymous surface anyone who can edit a public list could
+// otherwise force that recompute as often as they can toggle a member. So there a
+// tag keeps serving the membership it last adopted — whose caches stay warm — and
+// adopts an edited one at most once per window: a viewer sees an edit within
+// PUBLIC_MEMBERSHIP_SETTLE_MS, and a tag costs at most one cold recompute per
+// window however often it is edited. Visibility is not settled: a tag whose list
+// goes private or is deleted stops answering at once (`resolve`). The viewer's own
+// /user/ surface sees every edit at once.
+export const PUBLIC_MEMBERSHIP_SETTLE_MS = 60_000
+
+/**
+ * The membership to serve for a tag (keyed by `key`) given its live `members`:
+ * the live list when it is the one adopted, or when the adopted one is at least
+ * `settleMs` old (the live list is then adopted); otherwise the adopted list.
+ * A reorder of the same members is not a change, so it shows at once.
+ */
+export function membershipSettler(settleMs: number, now: () => number = () => Date.now()): (key: string, members: string[]) => string[] {
+  const adopted = new Map<string, { fingerprint: string; members: string[]; at: number }>()
+  return (key, members) => {
+    if (settleMs <= 0) return members
+    const at = now()
+    // Adoption order is insertion order. An adoption older than the window holds
+    // nothing back any more, so it is forgotten, which keeps this map to the tags
+    // adopted within the last window.
+    for (const [k, entry] of adopted) {
+      if (at - entry.at < settleMs) break
+      adopted.delete(k)
+    }
+    const fingerprint = membershipFingerprint(members)
+    const held = adopted.get(key)
+    if (!held) {
+      adopted.set(key, { fingerprint, members, at })
+      return members
+    }
+    return held.fingerprint === fingerprint ? members : held.members
+  }
 }
 
 // A list tag's own combined portfolio/activity page — the same shape as the
 // system /explorer/tag/:id routes, over a user list's tag instead.
 export function listTagReadRoutes(fastify: FastifyInstance, surface: ListTagReadSurface): void {
-  const { base, resolve } = surface
+  const { base } = surface
+  const settle = membershipSettler(surface.membershipSettleMs ?? (base.startsWith('/explorer/') ? PUBLIC_MEMBERSHIP_SETTLE_MS : 0))
+  const resolve = (req: FastifyRequest, reply: FastifyReply): ResolvedListTag | null => {
+    const resolved = surface.resolve(req, reply)
+    if (!resolved) return null
+    const members = settle(`${resolved.listId}:${resolved.tagId}`, resolved.tag.members)
+    return members === resolved.tag.members ? resolved : { ...resolved, tag: { ...resolved.tag, members } }
+  }
   const query = (req: FastifyRequest) => req.query as Record<string, unknown>
 
   fastify.get(base, async (req, reply) => {
