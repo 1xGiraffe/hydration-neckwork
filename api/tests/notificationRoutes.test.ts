@@ -65,7 +65,7 @@ describe('auth', () => {
       ['GET', '/user/notifications/overview'],
       ['POST', '/user/notifications/channels/webpush'],
       ['POST', '/user/notifications/channels/telegram/link'],
-      ['GET', '/user/notifications/channels/telegram/link/abcdef12'],
+      ['GET', '/user/notifications/channels/telegram/link/00000000-0000-4000-8000-000000000000'],
       ['DELETE', '/user/notifications/channels/x'],
       ['POST', '/user/notifications/channels/x/test'],
       ['POST', '/user/notifications/rules'],
@@ -151,9 +151,13 @@ describe('channels', () => {
     const f = await build()
     const link = (await f.inject({ method: 'POST', url: '/user/notifications/channels/telegram/link', headers: auth() })).json()
     expect(link.url).toContain(`?start=${link.code}`)
-    expect(telegramLinkStatus(link.code, OWNER)).toBe('pending')
-    const status = await f.inject({ method: 'GET', url: `/user/notifications/channels/telegram/link/${link.code}`, headers: auth() })
+    expect(link.linkId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(telegramLinkStatus(link.linkId, OWNER)).toBe('pending')
+    const status = await f.inject({ method: 'GET', url: `/user/notifications/channels/telegram/link/${link.linkId}`, headers: auth() })
     expect(status.json()).toEqual({ status: 'pending' })
+    // The code is the credential the deep link carries; it is never a poll handle.
+    const byCode = await f.inject({ method: 'GET', url: `/user/notifications/channels/telegram/link/${link.code}`, headers: auth() })
+    expect(byCode.statusCode).toBe(400)
   })
 
   // The pool used to be global, so one account could fill it and lock everybody

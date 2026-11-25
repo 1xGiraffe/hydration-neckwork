@@ -71,14 +71,16 @@ describe('notification channels', () => {
     expect(again.label).toBe('Firefox')
   })
 
-  it('keeps one telegram channel per chat and moves it when another account links it', async () => {
+  it('keeps one telegram channel per chat and never moves it to another account', async () => {
     const mine = await upsertTelegramChannel(OWNER, { chatId: '4242', username: 'alice' })
     expect(telegramChannelForChat('4242')?.channelId).toBe(mine.channelId)
     expect(mine.label).toBe('@alice')
-    const theirs = await upsertTelegramChannel(OTHER, { chatId: '4242', username: 'alice' })
-    expect(telegramChannelForChat('4242')?.channelId).toBe(theirs.channelId)
-    expect(channelsFor(OWNER)).toHaveLength(0)
-    expect(channelsFor(OTHER)).toHaveLength(1)
+    const again = await upsertTelegramChannel(OWNER, { chatId: '4242', username: 'alice2' })
+    expect(again.channelId).toBe(mine.channelId)
+    await expect(upsertTelegramChannel(OTHER, { chatId: '4242', username: 'alice' })).rejects.toMatchObject({ status: 409 })
+    expect(telegramChannelForChat('4242')?.accountId).toBe(OWNER)
+    expect(channelsFor(OWNER)).toHaveLength(1)
+    expect(channelsFor(OTHER)).toHaveLength(0)
   })
 
   it('deletes only its own channel, and drops the reference from every rule that named it', async () => {

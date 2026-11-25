@@ -533,8 +533,8 @@ export const userApi = {
     authedJson<NotificationChannel>('POST', '/user/notifications/channels/webpush', { subscription, ...(label ? { label } : {}) }),
   createTelegramLink: () =>
     authedJson<NotificationTelegramLink>('POST', '/user/notifications/channels/telegram/link'),
-  telegramLinkStatus: (code: string, signal?: AbortSignal) =>
-    authedJson<{ status: NotificationLinkStatus }>('GET', `/user/notifications/channels/telegram/link/${encodeURIComponent(code)}`, undefined, signal),
+  telegramLinkStatus: (linkId: string, signal?: AbortSignal) =>
+    authedJson<{ status: NotificationLinkStatus }>('GET', `/user/notifications/channels/telegram/link/${encodeURIComponent(linkId)}`, undefined, signal),
   deleteNotificationChannel: (id: string) =>
     authedJson<{ ok: true }>('DELETE', `/user/notifications/channels/${encodeURIComponent(id)}`),
   // Dispatches a real message through the real renderer, so a green reply means

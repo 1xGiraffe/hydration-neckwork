@@ -113,7 +113,8 @@ export interface NotificationMockState {
   vapidPublicKey: string
   telegramBot: string
   // code → status. A spec calls claimTelegramLink() to flip the pending code
-  // the UI is polling, standing in for someone tapping /start in the bot.
+  // the UI is polling (by its link id), standing in for someone confirming the
+  // link in the bot.
   telegramLinks: Record<string, 'pending' | 'claimed' | 'expired'>
   webPushSubscriptions: WebPushSubscriptionInput[]
   nextId: number
@@ -124,6 +125,8 @@ export const E2E_TELEGRAM_BOT = 'hydration_explorer_bot'
 // The fixed code every link request in a spec gets, so a spec can build the
 // expected deep link without reading it back out of the page.
 export const E2E_TELEGRAM_LINK_CODE = 'a1b2c3d4e5f6'
+// The link id that code is polled by; the code itself never appears in a poll.
+export const E2E_TELEGRAM_LINK_ID = '00000000-0000-4000-8000-0000000000e2'
 export const E2E_TELEGRAM_USERNAME = 'e2etester'
 
 function freshNotifications(): NotificationMockState {
@@ -468,13 +471,15 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
     notify.telegramLinks[E2E_TELEGRAM_LINK_CODE] = 'pending'
     await fulfillJson(route, 200, {
       code: E2E_TELEGRAM_LINK_CODE,
+      linkId: E2E_TELEGRAM_LINK_ID,
       url: `https://t.me/${notify.telegramBot}?start=${E2E_TELEGRAM_LINK_CODE}`,
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
     })
     return
   }
   if (method === 'GET' && (m = path.match(/^\/user\/notifications\/channels\/telegram\/link\/([^/]+)$/))) {
-    await fulfillJson(route, 200, { status: notify.telegramLinks[decodeURIComponent(m[1])] ?? 'expired' })
+    const polled = decodeURIComponent(m[1]) === E2E_TELEGRAM_LINK_ID ? notify.telegramLinks[E2E_TELEGRAM_LINK_CODE] : undefined
+    await fulfillJson(route, 200, { status: polled ?? 'expired' })
     return
   }
   if (method === 'POST' && (m = path.match(/^\/user\/notifications\/channels\/([^/]+)\/test$/))) {

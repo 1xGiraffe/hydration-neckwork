@@ -278,15 +278,15 @@ export async function createWebPushChannel(accountId: string, config: WebPushCon
   return channel
 }
 
-// One channel per chat: a chat that re-links moves to whichever account
-// claimed the newest link code.
+// One channel per chat, and a linked chat is never moved to another account:
+// the chat has to unlink itself (/stop) first, so a link code passed to
+// somebody else cannot take over a chat that already receives alerts.
 export async function upsertTelegramChannel(accountId: string, config: TelegramConfig, label = ''): Promise<NotificationChannel> {
   const existing = telegramChannelForChat(config.chatId)
   if (existing && existing.accountId !== accountId) {
-    unindexChannel(existing)
-    await persistChannel(existing, 1)
+    throw new UserDataError(409, 'This chat is linked to another account — send /stop first')
   }
-  const keep = existing && existing.accountId === accountId ? existing : null
+  const keep = existing
   if (!keep && (channelsByAccount.get(accountId)?.size ?? 0) >= NOTIFICATION_LIMITS.channelsPerAccount) {
     throw new UserDataError(422, `Limited to ${NOTIFICATION_LIMITS.channelsPerAccount} notification channels`)
   }

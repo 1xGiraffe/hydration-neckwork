@@ -16,7 +16,7 @@ import { NotifyButton } from '../components/NotifyButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { clearInboxConfirmBody, cooldownLabel, deleteRuleConfirmBody, ruleTagTarget, ruleHeadline } from '../notificationKinds'
 import { disablePush, enablePush, isStandalone, pushAvailability } from '../push'
-import type { NotificationChannel, NotificationInboxRow, NotificationRule, NotificationRuleInput } from '../types'
+import type { NotificationChannel, NotificationInboxRow, NotificationRule, NotificationRuleInput, NotificationTelegramLink } from '../types'
 
 // Alerts: where the ones already sent are read (the inbox, the default tab),
 // where the rules that produce them are managed, and where the channels that
@@ -319,11 +319,13 @@ function TelegramChannels({ channels, telegramBot, onChanged }: {
 const LINK_POLL_MS = 3000
 
 // The link code is minted here, shown as a deep link (and as the code itself,
-// for a desktop browser handing it to a phone), and polled until the bot
-// reports it claimed. The code lives only inside this panel — leaving discards
-// it, and it expires server-side on its own — mirroring the device-link QR.
+// for a desktop browser handing it to a phone), and its link id is polled until
+// the bot reports it claimed — the bot names the account and waits for the chat
+// to send /confirm first. The code lives only inside this panel and never in a
+// request URL — leaving discards it, and it expires server-side on its own —
+// mirroring the device-link QR.
 function TelegramLinkPanel({ onCancel, onLinked }: { onCancel: () => void; onLinked: () => void }) {
-  const [link, setLink] = useState<{ code: string; url: string; expiresAt: string } | null>(null)
+  const [link, setLink] = useState<NotificationTelegramLink | null>(null)
   const [status, setStatus] = useState<'pending' | 'claimed' | 'expired'>('pending')
   const [error, setError] = useState<string | null>(null)
   // The page above this panel re-renders on the shared 1s clock (useNow), so
@@ -345,7 +347,7 @@ function TelegramLinkPanel({ onCancel, onLinked }: { onCancel: () => void; onLin
   useEffect(() => {
     if (!link || status !== 'pending') return
     const poll = setInterval(() => {
-      userApi.telegramLinkStatus(link.code)
+      userApi.telegramLinkStatus(link.linkId)
         .then(({ status: next }) => {
           if (next === 'claimed') { setStatus('claimed'); onLinkedRef.current() }
           else if (next === 'expired') setStatus('expired')
@@ -368,7 +370,7 @@ function TelegramLinkPanel({ onCancel, onLinked }: { onCancel: () => void; onLin
         <span className="mono">/start {link.code}</span>
         <Copy text={`/start ${link.code}`} />
       </div>
-      <div className="muted notif-note">Waiting for the bot to confirm… anyone holding this code can attach their chat, so keep it to yourself.</div>
+      <div className="muted notif-note">The bot names your account and asks you to send /confirm; this updates once you have. Anyone holding this code can ask to attach their chat, so keep it to yourself.</div>
       <button type="button" className="btn sm" onClick={onCancel}>Cancel</button>
     </div>
   )

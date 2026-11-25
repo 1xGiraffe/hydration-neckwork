@@ -2446,8 +2446,9 @@ export interface NotificationInboxPage { rows: NotificationInboxRow[]; unread: n
 // Suggestions only: a name not in the list is still a valid filter and a valid
 // alert (the server matches names case-insensitively and partially).
 export interface FilterNames { calls: string[]; events: string[] }
-// The Telegram link handoff: `url` is the bot deep link carrying `code`.
-export interface NotificationTelegramLink { code: string; url: string; expiresAt: string }
+// The Telegram link handoff: `url` is the bot deep link carrying `code`; the
+// panel polls by `linkId`, so the code never travels in a request URL.
+export interface NotificationTelegramLink { code: string; linkId: string; url: string; expiresAt: string }
 export type NotificationLinkStatus = 'pending' | 'claimed' | 'expired'
 // What a create/update request carries. `params` is the kind's own object (see
 // notificationKinds.ts); the server re-validates it and answers 422 by name.

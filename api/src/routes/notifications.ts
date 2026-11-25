@@ -140,7 +140,7 @@ const patchRuleBody = z.object({
 })
 const readBody = z.object({ ids: z.array(z.string().max(128)).max(500).optional() })
 const idParam = z.object({ id: z.string().min(1).max(128) })
-const codeParam = z.object({ code: z.string().regex(/^[0-9a-f]{8,64}$/) })
+const linkIdParam = z.object({ linkId: z.string().uuid() })
 const inboxQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(10_000).default(0),
@@ -194,11 +194,13 @@ export async function notificationRoutes(fastify: FastifyInstance) {
     return link
   })
 
-  fastify.get('/user/notifications/channels/telegram/link/:code', async (req, reply) => {
+  // Polled by the link id the mint returned, never by the code: the code is the
+  // credential the deep link carries and stays out of request URLs and logs.
+  fastify.get('/user/notifications/channels/telegram/link/:linkId', async (req, reply) => {
     const accountId = sessionUser(req)
-    const params = codeParam.safeParse(req.params)
-    if (!params.success) return reply.status(400).send({ error: 'Invalid link code' })
-    return { status: telegramLinkStatus(params.data.code, accountId) }
+    const params = linkIdParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid link id' })
+    return { status: telegramLinkStatus(params.data.linkId, accountId) }
   })
 
   fastify.delete('/user/notifications/channels/:id', async (req, reply) => {
