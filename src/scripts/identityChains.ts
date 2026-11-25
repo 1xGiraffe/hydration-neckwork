@@ -8,8 +8,8 @@
 //
 // Hydration leads because an account that registered on Hydration told us what
 // it wants to be called *here*; a People-chain name is the same person's
-// ecosystem-wide name, and a testnet name is free to mint and therefore trusted
-// least.
+// ecosystem-wide name. Testnet People chains are not configured by default: a
+// testnet name is free to mint, and the api never shows or counts one.
 
 export const HYDRATION_CHAIN_KEY = 'hydration'
 

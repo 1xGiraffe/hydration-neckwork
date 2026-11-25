@@ -93,7 +93,7 @@ describe('per-action gates', () => {
     expect(g.ok).toBe(false)
     expect(g.reason).toMatch(/^Starting a discussion needs at least 100 HDX/)
     expect(g.reason).toMatch(/holds 5 HDX/)
-    expect(g.reason).toMatch(/add HDX, set an identity, or vote/)
+    expect(g.reason).toMatch(/add HDX, get your identity verified by a registrar, or vote/)
     expect(actionGate('comment', me({}), true).ok).toBe(true)
   })
   it('the api\'s own per-action reason wins', () => {

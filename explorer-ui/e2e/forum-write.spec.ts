@@ -38,7 +38,7 @@ async function setup(page: Page, opts: { canComment?: boolean; canPost?: boolean
       account: ACCOUNT, canPost: opts.canPost ?? opts.canComment ?? true, canComment: opts.canComment ?? true, moderator: false, linksUnlimited: false, mutedUntil: null,
       facts: { hdx: opts.canComment === false ? '400000000000' : opts.canPost === false ? '5000000000000' : '500000000000000', identity: false, voted: false },
       thresholds: { commentHdx: 1, postHdx: 100 },
-      gate: opts.canComment === false ? { reason: 'no-stake-comment', detail: 'To comment, an account needs at least 1 HDX, an on-chain identity, or a vote on any referendum.' } : null,
+      gate: opts.canComment === false ? { reason: 'no-stake-comment', detail: 'To comment, an account needs at least 1 HDX, a verified on-chain identity, or a vote on any referendum.' } : null,
       topics: ['Treasury', 'Protocol', 'Community'],
       limits: { titleChars: 160, postBodyChars: 50000, commentBodyChars: 10000, labelsPerPost: 3, mentionsPerItem: 10, reportNoteChars: 500, linksPerBody: 20, discussionsPerHour: 3, commentsPerMinute: 10 },
       upload: { usedBytes: 0, maxBytes: 209715200, maxFileBytes: 5242880 }, ready: true,
@@ -181,7 +181,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
       const note = page.locator('.fc-gate')
       await expect(note).toContainText('Commenting needs at least 1 HDX')
       await expect(note).toContainText('This account holds 0.4 HDX')
-      await expect(note).toContainText('add HDX, set an identity, or vote')
+      await expect(note).toContainText('add HDX, get your identity verified by a registrar, or vote')
       await expect(page.getByRole('textbox', { name: 'Write a comment' })).toHaveCount(0)
       const imported = page.locator('.cmt').filter({ hasText: 'Imported comment' })
       await expect(imported.locator('.fa-up')).toBeDisabled()

@@ -102,7 +102,7 @@ export function actionGate(action: ForumAction, me: ForumMe | undefined, signedI
   const held = me.facts ? ` This account holds ${F.amount(me.facts.hdx, 12)} HDX` : ''
   return {
     ok: false, signIn: false,
-    reason: `${ACTION_WORDS[action]} needs at least ${need} HDX, an on-chain identity, or a vote on any referendum.${held ? `${held} — add HDX, set an identity, or vote on a referendum to unlock it.` : ''}`,
+    reason: `${ACTION_WORDS[action]} needs at least ${need} HDX, a verified on-chain identity, or a vote on any referendum.${held ? `${held} — add HDX, get your identity verified by a registrar, or vote on a referendum to unlock it.` : ''}`,
   }
 }
 

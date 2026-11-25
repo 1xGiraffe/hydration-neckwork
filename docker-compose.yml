@@ -178,8 +178,8 @@ services:
     command: ["src/raw/cli.ts", "--pipeline-id=raw-live"]
 
   # Populates price_data.account_identities from the Identity pallet of Hydration and
-  # of every chain in IDENTITY_CHAINS (the Polkadot/Kusama People chains and their
-  # testnets by default), on startup and then hourly. Self-seeding so a fresh
+  # of every chain in IDENTITY_CHAINS (the Polkadot/Kusama People chains by default),
+  # on startup and then hourly. Self-seeding so a fresh
   # `docker compose up` gets identities with no manual step. IDENTITY_CHAINS is
   # forwarded only when set, so the code default in src/config.ts stays canonical.
   identity-snapshot:

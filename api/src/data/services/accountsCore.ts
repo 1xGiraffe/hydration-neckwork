@@ -40,6 +40,7 @@ export async function accountSummary(client: ClickHouseClient, parsed: ParsedAdd
                  argMax(priority, updated_at) AS priority
           FROM price_data.account_identities
           WHERE account_id = {account:String}
+            AND NOT match(chain, '(^|-)(westend|paseo|rococo|wococo)(-|$)')
           GROUP BY chain
           HAVING display != ''`,
       query_params: { account: parsed.accountId },

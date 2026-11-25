@@ -34128,7 +34128,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
               FROM (
                 SELECT lower(account_id) AS account_id, display, priority, chain
                 FROM price_data.account_identities FINAL
-                WHERE display != ''
+                WHERE display != '' AND NOT match(chain, '(^|-)(westend|paseo|rococo|wococo)(-|$)')
               )
               GROUP BY account_id
             ),
