@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import {
   initUserListService, loadUserLists, ensurePersonalList,
   createList, updateList, deleteList,
   createTag, updateTag, deleteTag, setTagMembers, setMemberOrder,
-  getList, ownedListsFor, publicListsTagging,
+  getList, ownedListsFor, publicListsTagging, LIMITS, __setMembershipCeilingForTests,
 } from '../src/services/userListService.ts'
 import { listDetailResponse } from '../src/routes/user.ts'
 import { UserDataError } from '../src/services/userProfileService.ts'
@@ -258,5 +258,53 @@ describe('publicListsTagging — member-of teaser for non-subscribers', () => {
     await setTagMembers(OWNER, lib.listId, tag.tagId, [M1], [])
     const [summary] = publicListsTagging(M1)
     expect(Object.keys(summary).sort()).toEqual(keys.sort())
+  })
+})
+
+// Every membership lives in memory and reloads at boot, so the totals are
+// capped, not only each list: across one account's lists, and across all.
+describe('membership totals', () => {
+  const hex = (i: number) => '0x' + i.toString(16).padStart(64, '0')
+  afterEach(() => { __setMembershipCeilingForTests() })
+
+  it('caps one account across all its lists, and still loads what is stored', async () => {
+    const seeded = fakeClient({
+      user_lists: [
+        { list_id: 'l1', owner_account_id: OWNER, name: 'one', note: '', visibility: 'private', is_personal: 0 },
+        { list_id: 'l2', owner_account_id: OWNER, name: 'two', note: '', visibility: 'private', is_personal: 0 },
+      ],
+      // Twenty tags of 1,000 accounts, split over the two lists, and one empty tag.
+      user_tags: [
+        ...Array.from({ length: 20 }, (_, t) => ({ list_id: t % 2 ? 'l1' : 'l2', tag_id: `t${t}`, name: `t${t}`, color: '', icon: '', note: '' })),
+        { list_id: 'l1', tag_id: 'empty', name: 'empty', color: '', icon: '', note: '' },
+      ],
+      user_tag_members: Array.from({ length: LIMITS.membersPerAccount }, (_, i) => {
+        const t = Math.floor(i / 1000)
+        return { list_id: t % 2 ? 'l1' : 'l2', tag_id: `t${t}`, account_id: hex(i + 1), position: i }
+      }),
+    })
+    initUserListService(seeded)
+    await loadUserLists()
+    expect(getList('l1')!.memberTag.size + getList('l2')!.memberTag.size).toBe(LIMITS.membersPerAccount)
+    await expect(setTagMembers(OWNER, 'l1', 'empty', [M1], [])).rejects.toMatchObject({ status: 422 })
+    // Moving an account between tags of one list adds nothing, and removing frees room.
+    await setTagMembers(OWNER, 'l1', 'empty', [hex(1001)], [])
+    await setTagMembers(OWNER, 'l1', 't1', [], [hex(1002)])
+    await setTagMembers(OWNER, 'l1', 'empty', [M1], [])
+    expect(getList('l1')!.memberTag.has(M1)).toBe(true)
+  })
+
+  it('refuses new memberships once the global ceiling is reached', async () => {
+    const client = fakeClient()
+    initUserListService(client)
+    await loadUserLists()
+    __setMembershipCeilingForTests(2)
+    const mine = await createList(OWNER, 'mine', '', 'private')
+    const tag = await createTag(OWNER, mine.listId, { name: 't' })
+    await setTagMembers(OWNER, mine.listId, tag.tagId, [M1, M2], [])
+    const other = '0x' + 'bb'.repeat(32)
+    const theirs = await createList(other, 'theirs', '', 'private')
+    const theirTag = await createTag(other, theirs.listId, { name: 't' })
+    await expect(setTagMembers(other, theirs.listId, theirTag.tagId, [M3], [])).rejects.toMatchObject({ status: 503 })
   })
 })

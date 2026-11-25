@@ -42,8 +42,15 @@ export interface ListSummary {
   ownerAccountId: string; tagCount: number; accountCount: number; subscriberCount: number
 }
 
+// Every membership is held in memory and reloaded at boot, so the totals are
+// capped as well as the per-list sizes: one account's lists together hold at
+// most `membersPerAccount` tagged accounts, and all accounts together at most
+// `membersTotal`, a safety ceiling that keeps the process's memory bounded
+// however many accounts fill their own allowance. The caps only refuse new
+// additions; a load always keeps every stored membership.
 export const LIMITS = {
   listsPerUser: 50, tagsPerList: 5_000, membersPerTag: 2_000, membersPerList: 20_000,
+  membersPerAccount: 20_000, membersTotal: 1_000_000,
   subscriptionsPerUser: 200, nameLen: 48, noteLen: 280,
 } as const
 
@@ -491,6 +498,20 @@ export async function deleteTag(owner: string, listId: string, tagId: string): P
   await persistMembers(listId, tagId, tombstoneRows(members), 1)
 }
 
+let membershipCeiling: number = LIMITS.membersTotal
+export function __setMembershipCeilingForTests(n: number = LIMITS.membersTotal): void { membershipCeiling = n }
+
+function ownedMembershipCount(owner: string): number {
+  let n = 0
+  for (const id of byOwner.get(owner) ?? []) n += lists.get(id)?.memberTag.size ?? 0
+  return n
+}
+function totalMembershipCount(): number {
+  let n = 0
+  for (const list of lists.values()) n += list.memberTag.size
+  return n
+}
+
 export async function setTagMembers(owner: string, listId: string, tagId: string, add: string[], remove: string[]): Promise<UserTagDef> {
   const list = requireOwned(owner, listId)
   const tag = list.tags.get(tagId)
@@ -511,6 +532,14 @@ export async function setTagMembers(owner: string, listId: string, tagId: string
   if (tag.members.size + trulyNew.length > LIMITS.membersPerTag) throw new UserDataError(422, `Limited to ${LIMITS.membersPerTag} accounts per tag`)
   const netNew = trulyNew.filter(id => !list.memberTag.has(id))
   if (list.memberTag.size + netNew.length > LIMITS.membersPerList) throw new UserDataError(422, `Limited to ${LIMITS.membersPerList} accounts per list`)
+  if (netNew.length) {
+    if (ownedMembershipCount(owner) + netNew.length > LIMITS.membersPerAccount) {
+      throw new UserDataError(422, `Limited to ${LIMITS.membersPerAccount.toLocaleString('en-US')} tagged accounts across all your lists`)
+    }
+    if (totalMembershipCount() + netNew.length > membershipCeiling) {
+      throw new UserDataError(503, 'Lists cannot take more tagged accounts right now — try again later')
+    }
+  }
 
   // One tag per account per list: adding an account MOVES it out of its
   // current tag in this list (tombstoning that membership row). New
