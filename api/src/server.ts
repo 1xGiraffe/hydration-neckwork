@@ -35,6 +35,7 @@ import { feedRoutes } from './routes/feeds.ts'
 import { forumRoutes } from './routes/forum.ts'
 import { stripCorsFromPrivate } from './routes/corsPolicy.ts'
 import { registerHtmlCsp } from './routes/htmlCsp.ts'
+import { registerErrorPolicy } from './routes/errorPolicy.ts'
 import { initConvictionState, refreshConvictionSnapshot, startConvictionSnapshotRefresh } from './services/convictionState.ts'
 import { initGovernanceRead } from './services/governanceRead.ts'
 import { initGovernanceDeposits } from './services/governanceDeposits.ts'
@@ -138,6 +139,11 @@ const fastify = Fastify({
 })
 
 const client = createClickHouseClient()
+
+// An unexpected 5xx is answered generically, its detail kept in the log
+// (routes/errorPolicy.ts). Set before any route is registered: a route keeps the
+// error handler its context had when it was added.
+registerErrorPolicy(fastify)
 
 // CORS: anonymous reads for every origin (a fixed '*', so no Vary: Origin), the
 // private /user/ surface for none (routes/corsPolicy.ts).
