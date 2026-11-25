@@ -10,21 +10,24 @@
 # content on request.
 set -eu
 
-# RPC (full admin power) and gateway listen inside the container only; the ports are
-# reachable on the compose networks the service joins (ipfs-internal: api, sync,
-# backup) and never published on the host.
-ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001
+# The gateway listens inside the container only; the port is reachable on the compose
+# networks the service joins (ipfs-internal: api, sync, backup) and never published on
+# the host. The RPC (full admin power) joins it there only with authorization on (below).
 ipfs config Addresses.Gateway /ip4/0.0.0.0/tcp/8080
 
 # RPC authorization: one bearer token per client, each limited to the RPC paths that
 # client calls, so a request forged through one of them (the sync fetches strangers'
 # URLs) or a compromised container reaches only its own few commands — never config,
 # shutdown or another client's. The tokens come from secrets/ipfs-token-*.env (never
-# committed, mode 600; see docker-compose.yml). Enforced only when ALL three are set:
-# a node that required tokens before every client sends one would lock clients out
-# mid-rollout. The gateway (:8080) is a separate listener (local blocks only).
+# committed, mode 600; ops/ipfs-tokens.sh writes them). Fails closed: unless ALL three
+# are set (64 hex each), the RPC listens on the container's loopback alone, where no
+# client reaches it — uploads, the sync's pins and the backup's image export fail
+# until the tokens are in place, while the gateway (:8080, a separate listener, local
+# blocks only) keeps serving what is pinned. IPFS_RPC_OPEN=1 is the explicit opt-in to
+# an RPC with no authorization on the compose network (a local development stack only).
 tok_ok() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$'; }
 if tok_ok "${IPFS_TOKEN_SYNC:-}" && tok_ok "${IPFS_TOKEN_API:-}" && tok_ok "${IPFS_TOKEN_BACKUP:-}"; then
+  ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001
   ipfs config --json API.Authorizations "$(cat <<JSON
 {
   "sync":   { "AuthSecret": "bearer:${IPFS_TOKEN_SYNC}",   "AllowedPaths": ["/api/v0/add", "/api/v0/pin/add", "/api/v0/pin/rm", "/api/v0/files/stat", "/api/v0/cid/format", "/api/v0/repo/stat", "/api/v0/repo/gc", "/api/v0/cat"] },
@@ -34,9 +37,14 @@ if tok_ok "${IPFS_TOKEN_SYNC:-}" && tok_ok "${IPFS_TOKEN_API:-}" && tok_ok "${IP
 JSON
 )"
   echo "[ipfs-init] RPC authorization enforced (sync, api, backup)"
-else
+elif [ "${IPFS_RPC_OPEN:-}" = "1" ]; then
+  ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001
   ipfs config --json API.Authorizations '{}'
-  echo "[ipfs-init] WARN: RPC authorization OFF — set all three IPFS_TOKEN_* (64 hex) in secrets/ipfs-token-*.env"
+  echo "[ipfs-init] WARN: IPFS_RPC_OPEN=1 — RPC open on the compose network with NO authorization (development only)"
+else
+  ipfs config Addresses.API /ip4/127.0.0.1/tcp/5001
+  ipfs config --json API.Authorizations '{}'
+  echo "[ipfs-init] ERROR: RPC confined to the container's loopback (unreachable) — set all three IPFS_TOKEN_* (64 hex) in secrets/ipfs-token-*.env (ops/ipfs-tokens.sh)"
 fi
 
 # The gateway serves blocks already in the local repo only: an unknown CID is a

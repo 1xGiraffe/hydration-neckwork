@@ -534,7 +534,9 @@ services:
     # The image's own command plus --enable-gc: blocks no pin holds are removed
     # (ops/ipfs-init.sh sets the ceiling and period).
     command: ["daemon", "--migrate=true", "--agent-version-suffix=docker", "--enable-gc"]
-    # The three clients' RPC tokens (ops/ipfs-init.sh enforces them only when all are set).
+    # The three clients' RPC tokens (ops/ipfs-tokens.sh writes them). Without all three
+    # the RPC listens on the node's loopback alone (ops/ipfs-init.sh), unless
+    # IPFS_RPC_OPEN=1 opens it unauthenticated for a local development stack.
     env_file:
       - path: ./secrets/ipfs-token-sync.env
         required: false
@@ -544,9 +546,19 @@ services:
         required: false
     environment:
       - IPFS_ANNOUNCE=${IPFS_ANNOUNCE:-true}
+      - IPFS_RPC_OPEN=${IPFS_RPC_OPEN:-}
     volumes:
       - ipfs_data:/data/ipfs
       - ./ops/ipfs-init.sh:/container-init.d/001-forum-config.sh:ro
+    # The image's own check calls the RPC, which refuses it without a token. This asks
+    # the gateway for the empty identity CID instead: its bytes are the CID itself, so
+    # it answers 200 with no block and no fetch (Gateway.NoFetch) while the daemon serves.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:8080/ipfs/bafkqaaa"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # Subsquare → forum import and sync (src/governance/subsquare/,
   # src/scripts/sync-subsquare-content.ts): a resumable full import, then a batch
