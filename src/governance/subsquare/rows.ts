@@ -323,19 +323,121 @@ export function appendantRow(threadKey: string, a: SsAppendant, links?: LinkRewr
 
 // ---- images in bodies ----
 
-const MD_IMAGE = /!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g
-const HTML_IMAGE = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi
+// Both shapes are found by a single left-to-right scan with "next occurrence" tables,
+// so every candidate is decided in constant time and the scan is linear in the body.
+// It finds exactly what these two global regexes would, in the same order —
+//   markdown: /!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g
+//   html:     /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi
+// — whose backtracking is quadratic on text such as `![](` or `<img` repeated (each
+// failed start rescans to the end of the body).
+
+const WS = /\s/
+const isWs = (c: string) => WS.test(c)
+const isWordCode = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95
+
+/** next[p]: the first index ≥ p whose code unit satisfies `hit`, or s.length. */
+function nextWhere(s: string, hit: (c: string) => boolean): Int32Array {
+  const next = new Int32Array(s.length + 1)
+  next[s.length] = s.length
+  for (let p = s.length - 1; p >= 0; p--) next[p] = hit(s[p]) ? p : next[p + 1]
+  return next
+}
+
+/** Markdown images: `![alt](url "title")`, the URL optionally in <…>. */
+function markdownImageSources(s: string, take: (u: string) => void): void {
+  if (!s.includes('![')) return
+  const n = s.length
+  const bracket = nextWhere(s, c => c === ']')
+  const nonWs = nextWhere(s, c => !isWs(c))
+  const runEnd = nextWhere(s, c => c === ')' || c === '>' || isWs(c)) // end of a [^)\s>]+ run
+  const dq = nextWhere(s, c => c === '"'), sq = nextWhere(s, c => c === "'"), paren = nextWhere(s, c => c === ')')
+  /** Past `\s*\)` from p, or -1. */
+  const closeAt = (p: number) => { const q = nonWs[p]; return q < n && s[q] === ')' ? q + 1 : -1 }
+  let i = 0
+  while (i < n) {
+    i = s.indexOf('![', i)
+    if (i < 0) return
+    const j = bracket[i + 2]
+    if (j >= n || s[j + 1] !== '(') { i++; continue }
+    const k = nonWs[j + 2]
+    // <?([^)\s>]+): with a `<` and a run after it, the run; a lone `<` is the run itself.
+    let start = k
+    if (s[k] === '<' && runEnd[k + 1] > k + 1) start = k + 1
+    const e = runEnd[start]
+    if (e === start) { i++; continue }
+    const q = s[e] === '>' ? e + 1 : e
+    // An optional title after whitespace, then `\s*\)`; else `\s*\)` alone.
+    let end = -1
+    const t = nonWs[q]
+    if (t > q && t < n) {
+      const close = s[t] === '"' ? dq[t + 1] : s[t] === "'" ? sq[t + 1] : s[t] === '(' ? paren[t + 1] : n
+      if (close < n) end = closeAt(close + 1)
+    }
+    if (end < 0) end = closeAt(q)
+    if (end < 0) { i++; continue }
+    take(s.slice(start, e))
+    i = end
+  }
+}
+
+/** `<img … src=…>`: the first `src` attribute (quoted or bare) before the tag's `>`. */
+function htmlImageSources(s: string, take: (u: string) => void): void {
+  // ASCII only, like the regex's /i here, and the same length (toLowerCase can lengthen: İ).
+  const lower = s.replace(/[A-Z]+/g, c => c.toLowerCase())
+  if (!lower.includes('<img')) return
+  const n = s.length
+  const nonWs = nextWhere(s, c => !isWs(c))
+  const gt = nextWhere(s, c => c === '>')
+  const bareEnd = nextWhere(s, c => c === '>' || isWs(c)) // end of a [^\s>]+ run
+  const dq = nextWhere(s, c => c === '"'), sq = nextWhere(s, c => c === "'")
+  // srcEnd[m]: where `\bsrc\s*=\s*value` starting at m ends (-1: none), its value
+  // s[valueFrom[m], valueTo[m]). It depends on m alone, so nextSrc[m] (the first m' ≥ m
+  // that has one) answers every <img.
+  const srcEnd = new Int32Array(n + 1).fill(-1)
+  const valueFrom = new Int32Array(n + 1), valueTo = new Int32Array(n + 1)
+  for (let m = lower.indexOf('src'); m >= 0; m = lower.indexOf('src', m + 1)) {
+    if (m > 0 && isWordCode(s.charCodeAt(m - 1))) continue
+    const eq = nonWs[m + 3]
+    if (eq >= n || s[eq] !== '=') continue
+    const v = nonWs[eq + 1]
+    if (v >= n) continue
+    const close = s[v] === '"' ? dq[v + 1] : s[v] === "'" ? sq[v + 1] : n
+    if (close < n) { srcEnd[m] = close + 1; valueFrom[m] = v + 1; valueTo[m] = close } // "…" or '…'
+    else if (bareEnd[v] > v) { srcEnd[m] = bareEnd[v]; valueFrom[m] = v; valueTo[m] = bareEnd[v] } // bare, or an unclosed quote and what follows
+  }
+  const nextSrc = new Int32Array(n + 1)
+  nextSrc[n] = n
+  for (let m = n - 1; m >= 0; m--) nextSrc[m] = srcEnd[m] >= 0 ? m : nextSrc[m + 1]
+  let i = 0
+  while (i < n) {
+    i = lower.indexOf('<img', i)
+    if (i < 0) return
+    if (i + 4 < n && isWordCode(s.charCodeAt(i + 4))) { i++; continue }
+    // [^>]*? then \bsrc: the first src attribute before the tag's `>` (none at i+4 itself: `g` precedes it).
+    const m = nextSrc[i + 4]
+    if (m >= gt[i + 4]) { i++; continue }
+    take(s.slice(valueFrom[m], valueTo[m]))
+    i = srcEnd[m]
+  }
+}
+
+/** Every image source a body names, as written: the markdown images' in order, then the <img> tags'. */
+export function imageSourcesIn(body: string): string[] {
+  const out: string[] = []
+  const take = (u: string) => { out.push(u) }
+  markdownImageSources(body, take)
+  htmlImageSources(body, take)
+  return out
+}
 
 /** Every http(s) image URL an imported body references (markdown images and <img src>). */
 export function imageUrlsIn(body: string): string[] {
   const urls = new Set<string>()
-  const take = (u: string | undefined) => {
-    if (!u) return
+  for (const u of imageSourcesIn(body)) {
+    if (!u) continue
     const v = u.replace(/&amp;/g, '&').trim()
     if (/^https?:\/\//i.test(v) && v.length <= 2048) urls.add(v)
   }
-  for (const m of body.matchAll(MD_IMAGE)) take(m[1])
-  for (const m of body.matchAll(HTML_IMAGE)) take(m[1] ?? m[2] ?? m[3])
   return [...urls]
 }
 
