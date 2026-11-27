@@ -1,7 +1,8 @@
 import { z } from 'zod'
 
 // The main money market's off-chain rewards programme: PRIME paid to HUSDC and
-// HUSDT suppliers through a Morpho Universal Rewards Distributor, which took over
+// HUSDT suppliers (the Polkadot reserves, and since 2026-11 the Wormhole ones too)
+// through a Morpho Universal Rewards Distributor, which took over
 // from the RewardsController's on-chain PRIME programmes on aHUSDC/aHUSDT when
 // referendum 462 ended them (block 17,214,845; their distribution ended
 // 2026-11-20 16:00 UTC, the programme's first epoch start).
@@ -38,11 +39,16 @@ export const REWARDS_PROGRAM_URL = (process.env.MM_REWARDS_PROGRAM_URL || 'https
 
 /**
  * latest.json names each earning asset by symbol only; the reserve's underlying
- * address per name (the Hydration UI's PROGRAM_ASSET_UNDERLYING).
+ * address per name (the Hydration UI's PROGRAM_ASSET_UNDERLYING). The reserves are
+ * the Hydrated pools' shares: HUSDC/HUSDT over 2-Pool-HUSDC/2-Pool-HUSDT (Polkadot,
+ * 110/111), the `.wh` names over the Wormhole pools (114/115). A name missing here
+ * is left out of every rate with a warning, so a new programme asset needs a line.
  */
 export const PROGRAM_ASSET_UNDERLYING: Readonly<Record<string, string>> = {
   HUSDC: '0x000000000000000000000000000000010000006e',
   HUSDT: '0x000000000000000000000000000000010000006f',
+  'HUSDC.wh': '0x0000000000000000000000000000000100000072',
+  'HUSDT.wh': '0x0000000000000000000000000000000100000073',
   HEURC: '0x000000000000000000000000000000010000273c',
 }
 

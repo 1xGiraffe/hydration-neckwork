@@ -83,6 +83,18 @@ describe('the rate', () => {
     expect(programReserveRates(() => 1n, 1_800_028_800 * 1000).size).toBe(0)
   })
 
+  it('rates the Wormhole HUSDC/HUSDT reserves under the programme\'s .wh names', () => {
+    const asset = { budgetPerDay: '275616000', eligibleUsd: '836326.19' }
+    setProgramLatestForTest(parseProgramLatest(latestJson({ assets: { HUSDC: asset, HUSDT: asset, 'HUSDC.wh': asset, 'HUSDT.wh': asset } })))
+    const rates = programReserveRates(addr => (addr === PRIME ? 1_200_000_000_000n : null), (HOUR + 3_600) * 1000)
+    // 2-Pool-HUSDC (Wormhole) is asset 114 (0x72), 2-Pool-HUSDT (Wormhole) 115 (0x73).
+    expect([...rates.keys()]).toEqual([
+      '0x000000000000000000000000000000010000006e', '0x000000000000000000000000000000010000006f',
+      '0x0000000000000000000000000000000100000072', '0x0000000000000000000000000000000100000073',
+    ])
+    for (const r of rates.values()) expect(r.aprPct).toBe(14_434_536n)
+  })
+
   it('judges staleness and the end in milliseconds', () => {
     expect(isProgramLatestStale(HOUR, (HOUR + 6 * 3_600) * 1000)).toBe(false)
     expect(isProgramLatestStale(HOUR, (HOUR + 6 * 3_600) * 1000 + 1)).toBe(true)

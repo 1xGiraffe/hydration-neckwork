@@ -376,7 +376,7 @@ const PROGRAMME_STAGE: Record<'pending' | 'closed' | 'accruing', string> = {
 }
 
 /**
- * The off-chain PRIME programme (main market, HUSDC/HUSDT suppliers): each EVM
+ * The off-chain PRIME programme (main market, HUSDC/HUSDT suppliers, Polkadot and Wormhole): each EVM
  * holder's eligibility and what it has earned that is NOT claimable yet. Never in
  * a total — a stage becomes claimable (and part of the value) once its root is
  * accepted on the distributor. Null when the upstream states nothing.

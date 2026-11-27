@@ -151,7 +151,8 @@ function ProgrammeStat({ rp }: { rp: AccountRewardsProgram }) {
   const stages = rp.accounts.flatMap(a => a.stages)
   const sym = rp.rewardAsset.symbol
   const ends = rp.endsAt ? ` It ends ${rp.endsAt.slice(0, 10)}.` : ''
-  const title = `${rp.name}: ${sym} for HUSDC/HUSDT suppliers, paid by the rewards distributor (${rp.distributor}) in daily epochs — an epoch's amounts become claimable once its root passes the distributor's timelock and is accepted. An account with HOLLAR debt above $${rp.maxHollarDebtUsd} earns nothing.${ends} Snapshot of ${rp.asOf.slice(0, 16).replace('T', ' ')} UTC.`
+  const assets = rp.assets?.length ? rp.assets.join(', ') : 'HUSDC, HUSDT'
+  const title = `${rp.name}: ${sym} for ${assets} suppliers, paid by the rewards distributor (${rp.distributor}) in daily epochs — an epoch's amounts become claimable once its root passes the distributor's timelock and is accepted. An account with HOLLAR debt above $${rp.maxHollarDebtUsd} earns nothing.${ends} Snapshot of ${rp.asOf.slice(0, 16).replace('T', ' ')} UTC.`
   return (
     <Stat k={`${sym} programme`} title={title} className="bw-kpi-programme">
       {notEarning.length

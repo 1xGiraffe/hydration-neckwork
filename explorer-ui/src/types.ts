@@ -3118,7 +3118,7 @@ export interface RewardsProgramMeta {
   marketKey: string
   distributor: string
   rewardAsset: AssetRef
-  /** The programme's assets by its own names (HUSDC, HUSDT); absent from older APIs. */
+  /** The programme's assets by its own names (HUSDC, HUSDT, HUSDC.wh, HUSDT.wh); absent from older APIs. */
   assets?: string[]
   /** An account whose HOLLAR debt is above this (USD) earns nothing. */
   maxHollarDebtUsd: string
